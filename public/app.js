@@ -1639,87 +1639,145 @@ async function setupReaderLogin(){
         return;
       }
 
-      // Cumulative statistics
+      // Cumulative statistics (across all khatmas)
       const allUnits = khatmas.flatMap(k => k.units || []);
       const totalDone = allUnits.filter(u=>u.status==='completed').length;
-      const totalReading = allUnits.filter(u=>u.status==='reading').length;
       const totalAssigned = allUnits.filter(u=>u.status!=='available').length;
       const totalPct = totalAssigned ? Math.round(totalDone/totalAssigned*100) : 0;
       const readerName = khatmas[0]?.participants?.find(p=>p.name)?.name || '';
 
-      // Khatma cards — show ALL units assigned to this reader (backend already filters by participant_id)
-      const khatmasHtml = khatmas.map(k => {
-        const status = managedKhatmaStatus(k);
+      // ── Welcome header (name and greeting separated) ──────────────
+      const welcomeHtml = readerName ? `
+        <div class="inline-panel action-sheet" style="margin-bottom:14px;padding:12px 16px;display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <span style="color:var(--muted);font-size:12px;display:block;margin-bottom:2px">مرحبًا بك</span>
+            <strong style="font-size:16px">${escapeHtml(readerName)}</strong>
+          </div>
+          <button class="btn ghost compact-btn" id="readerLogoutBtn">تسجيل الخروج</button>
+        </div>` : '';
+
+      // ── Cumulative stats block ─────────────────────────────────────
+      const statsHtml = `
+        <section class="khatma-detail glass" style="margin-top:8px">
+          <div class="sheet-head"><h3>إحصائياتك التجميعية</h3><span>منذ أول ختمة</span></div>
+          <div class="mini-stats">
+            <div><strong>${khatmas.length}</strong><span>ختمة شاركت فيها</span></div>
+            <div><strong>${totalDone}</strong><span>جزء أكملته</span></div>
+            <div><strong>${totalPct}%</strong><span>نسبة الإنجاز الكلية</span></div>
+          </div>
+        </section>`;
+
+      // ── Bind logout ───────────────────────────────────────────────
+      function bindLogout(){
+        document.getElementById('readerLogoutBtn')?.addEventListener('click', () => {
+          localStorage.removeItem('reader_portal_identity');
+          Object.keys(localStorage).filter(k=>k.startsWith('managed_identity_')).forEach(k=>localStorage.removeItem(k));
+          document.getElementById('readerPortalIdentity').value = '';
+          result.innerHTML = '';
+          toast('تم تسجيل الخروج');
+        });
+      }
+
+      // ── Bind "تمت القراءة" buttons with confirm ───────────────────
+      function bindCompleteActions(){
+        result.querySelectorAll('[data-portal-action="complete"]').forEach(btn2 => {
+          btn2.addEventListener('click', async () => {
+            const khatmaId = btn2.dataset.khatma;
+            const unitNum  = btn2.dataset.unit;
+            const unitLabel = btn2.dataset.unitLabel || ('الجزء رقم ' + unitNum);
+            const id2      = btn2.dataset.identity;
+            if(!confirm(`هل فعلًا أتممت قراءة ${unitLabel}؟`)) return;
+            try{
+              await api(`/managed-khatmas/${encodeURIComponent(khatmaId)}/units/${unitNum}/complete`, {method:'POST', body:{identity:id2}});
+              toast('تمت القراءة بنجاح');
+              await doLookup(identity);
+            }catch(err){ toast(err.message||'تعذر التحديث'); }
+          });
+        });
+      }
+
+      // ── Render one khatma's unit cards ────────────────────────────
+      function renderKhatmaUnits(k){
         const displayUnits = (k.units || []);
-        const rotationStart = k.rotationStartDate || k.createdAt || '';
-        // Period label for informational display only — does NOT filter units
+        const rotationStart = k.rotationStartDate || k.khatmaDate || k.createdAt || '';
         const periodLabel = (k.khatmaType === 'monthly' || k.khatmaType === 'weekly')
           ? (currentHijriPeriodLabel(rotationStart, k.khatmaType) || '')
           : '';
-
+        const status = managedKhatmaStatus(k);
         const done = displayUnits.filter(u=>u.status==='completed').length;
         const total = displayUnits.length;
         const allDone = total > 0 && done === total;
-
-        return `<article class="form-card glass" style="margin-bottom:18px">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap;gap:8px">
-            <div>
-              <h3 style="margin:0;font-size:18px">${escapeHtml(k.title)}</h3>
-              <span style="color:var(--muted);font-size:13px">${periodLabel ? 'الفترة: ' + escapeHtml(periodLabel) + ' · ' : ''}${done}/${total} مكتمل${formatPeriodEnd(rotationStart, k.khatmaType) ? ' · ينتهي: ' + formatPeriodEnd(rotationStart, k.khatmaType) : ''}</span>
+        return `
+          <article class="form-card glass" style="margin-bottom:18px">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+              <div>
+                <h3 style="margin:0;font-size:18px">${escapeHtml(k.title)}</h3>
+                <span style="color:var(--muted);font-size:13px">${periodLabel ? 'الفترة: ' + escapeHtml(periodLabel) + ' · ' : ''}${done}/${total} مكتمل${formatPeriodEnd(rotationStart, k.khatmaType) ? ' · ينتهي: ' + formatPeriodEnd(rotationStart, k.khatmaType) : ''}</span>
+              </div>
+              <span class="badge ${allDone ? 'done' : status.className}">${allDone ? '✓ مكتمل' : status.label}</span>
             </div>
-            <span class="badge ${allDone ? 'done' : status.className}">${allDone ? '✓ مكتمل' : status.label}</span>
-          </div>
-          <div class="units-grid" style="grid-template-columns:repeat(auto-fill,minmax(105px,1fr));gap:8px;margin-bottom:0">
-            ${displayUnits.map(unit => {
-              const lbl = {assigned:'مُعيّن',reading:'جاري القراءة',completed:'تمت القراءة'}[unit.status]||'متاح';
-              return `<article class="unit ${unit.status}">
-                <strong style="font-size:13px">${escapeHtml(unit.label)}</strong>
-                <small><span class="status-dot" style="font-size:11px">${lbl}</span></small>
-                ${unit.status==='assigned'?`<div class="unit-actions"><button class="btn ghost" style="font-size:12px;padding:7px" data-portal-action="reading" data-khatma="${escapeHtml(k.id)}" data-unit="${unit.number}" data-identity="${escapeHtml(identity)}">بدء القراءة</button></div>`:''}
-                ${unit.status==='reading'?`<div class="unit-actions"><button class="btn primary" style="font-size:12px;padding:7px" data-portal-action="complete" data-khatma="${escapeHtml(k.id)}" data-unit="${unit.number}" data-identity="${escapeHtml(identity)}">إتمام القراءة</button></div>`:''}
-              </article>`;
-            }).join('') || '<p style="color:var(--muted);grid-column:1/-1;font-size:13px">لا توجد أجزاء مُعيّنة لك في هذه الختمة.</p>'}
-          </div>
-        </article>`;
-      }).join('');
+            <div class="units-grid" style="grid-template-columns:repeat(auto-fill,minmax(105px,1fr));gap:8px;margin-bottom:0">
+              ${displayUnits.map(unit => {
+                const lbl = {assigned:'مُعيّن',reading:'جاري القراءة',completed:'تمت القراءة'}[unit.status]||'متاح';
+                const canComplete = unit.status === 'assigned' || unit.status === 'reading';
+                return `<article class="unit ${unit.status}">
+                  <strong style="font-size:13px">${escapeHtml(unit.label)}</strong>
+                  <small><span class="status-dot" style="font-size:11px">${lbl}</span></small>
+                  ${canComplete ? `<div class="unit-actions"><button class="btn primary" style="font-size:12px;padding:7px" data-portal-action="complete" data-khatma="${escapeHtml(k.id)}" data-unit="${unit.number}" data-unit-label="${escapeHtml(unit.label)}" data-identity="${escapeHtml(identity)}">تمت القراءة</button></div>` : ''}
+                </article>`;
+              }).join('') || '<p style="color:var(--muted);grid-column:1/-1;font-size:13px">لا توجد أجزاء مُعيّنة لك في هذه الختمة.</p>'}
+            </div>
+          </article>`;
+      }
 
-      // Stats BELOW khatmas (cumulative from ALL khatmas)
-      const statsHtml = `<section class="khatma-detail glass" style="margin-top:8px">
-        <div class="sheet-head"><h3>إحصائياتك التجميعية</h3><span>منذ أول ختمة</span></div>
-        <div class="mini-stats">
-          <div><strong>${khatmas.length}</strong><span>ختمة شاركت فيها</span></div>
-          <div><strong>${totalDone}</strong><span>جزء أكملته</span></div>
-          <div><strong>${totalPct}%</strong><span>نسبة الإنجاز الكلية</span></div>
-        </div>
-      </section>`;
+      // ── Single khatma: show units directly ────────────────────────
+      if(khatmas.length === 1){
+        result.innerHTML = welcomeHtml + renderKhatmaUnits(khatmas[0]) + statsHtml;
+        bindLogout();
+        bindCompleteActions();
+        return;
+      }
 
-      result.innerHTML = (readerName ? `<div class="inline-panel action-sheet" style="margin-bottom:14px;padding:12px 16px;display:flex;justify-content:space-between;align-items:center">
-        <div><strong>${escapeHtml(readerName)}</strong><span style="color:var(--muted);font-size:13px;margin-right:8px">مرحبًا بك</span></div>
-        <button class="btn ghost compact-btn" id="readerLogoutBtn">تسجيل الخروج</button>
-      </div>` : '') + khatmasHtml + statsHtml;
+      // ── Multiple khatmas: list → detail flow ──────────────────────
+      function renderKhatmaDetail(k){
+        const backBtn = `<button class="btn ghost compact-btn" id="readerBackBtn" style="margin-bottom:14px">← العودة للقائمة</button>`;
+        result.innerHTML = welcomeHtml + backBtn + renderKhatmaUnits(k) + statsHtml;
+        bindLogout();
+        document.getElementById('readerBackBtn')?.addEventListener('click', renderKhatmaList);
+        bindCompleteActions();
+      }
 
-      document.getElementById('readerLogoutBtn')?.addEventListener('click', () => {
-        localStorage.removeItem('reader_portal_identity');
-        Object.keys(localStorage).filter(k=>k.startsWith('managed_identity_')).forEach(k=>localStorage.removeItem(k));
-        document.getElementById('readerPortalIdentity').value = '';
-        result.innerHTML = '';
-        toast('تم تسجيل الخروج');
-      });
-
-      // Bind unit action buttons
-      result.querySelectorAll('[data-portal-action]').forEach(btn2 => {
-        btn2.addEventListener('click', async () => {
-          const action = btn2.dataset.portalAction;
-          const khatmaId = btn2.dataset.khatma;
-          const unitNum = btn2.dataset.unit;
-          const id2 = btn2.dataset.identity;
-          try{
-            await api(`/managed-khatmas/${encodeURIComponent(khatmaId)}/units/${unitNum}/${action}`, {method:'POST', body:{identity:id2}});
-            toast(action==='reading'?'تم تحديث الحالة إلى جاري القراءة':'تمت القراءة بنجاح');
-            await doLookup(identity);
-          }catch(err){ toast(err.message||'تعذر التحديث'); }
+      function renderKhatmaList(){
+        const listHtml = khatmas.map((k, idx) => {
+          const rotationStart = k.rotationStartDate || k.khatmaDate || k.createdAt || '';
+          const status = managedKhatmaStatus(k);
+          const units = k.units || [];
+          const done  = units.filter(u=>u.status==='completed').length;
+          const total = units.length;
+          const allDone = total > 0 && done === total;
+          return `
+            <article class="form-card glass" style="margin-bottom:12px">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+                <div>
+                  <h3 style="margin:0;font-size:17px">${escapeHtml(k.title)}</h3>
+                  <span style="color:var(--muted);font-size:13px">${done}/${total} مكتمل${k.hijriDate ? ' · ' + escapeHtml(k.hijriDate) : ''}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span class="badge ${allDone ? 'done' : status.className}">${allDone ? '✓ مكتمل' : status.label}</span>
+                  <button class="btn ghost compact-btn" data-open-idx="${idx}">عرض أجزائي →</button>
+                </div>
+              </div>
+            </article>`;
+        }).join('');
+        result.innerHTML = welcomeHtml + listHtml + statsHtml;
+        bindLogout();
+        result.querySelectorAll('[data-open-idx]').forEach(openBtn => {
+          openBtn.addEventListener('click', () => renderKhatmaDetail(khatmas[Number(openBtn.dataset.openIdx)]));
         });
-      });
+      }
+
+      renderKhatmaList();
+
     }catch(err){
       result.innerHTML = `<article class="feature-card empty-state"><h3>${escapeHtml(err.message||'تعذر البحث')}</h3></article>`;
     }finally{ if(btn){ btn.disabled=false; btn.textContent='عرض ختماتي'; } }
@@ -2070,7 +2128,7 @@ async function setupManagedMonitor(){
     const p = managedProgress(k);
     const status = managedKhatmaStatus(k);
     const rotationType = k.khatmaType || 'monthly';
-    const rotationStart = k.rotationStartDate || k.createdAt || '';
+    const rotationStart = k.rotationStartDate || k.khatmaDate || k.createdAt || '';
     const periodIndex = computeCurrentPeriodIndex(rotationStart, rotationType);
     const participants = (k.participants || []);
 
@@ -2737,7 +2795,7 @@ async function setupManagedKhatma(id, manageMode=false){
   const emptyUnits = filteredUnits.length ? '' : '<article class="feature-card empty-state"><h3>لا توجد نتائج</h3><p>غيّر الفلتر أو البحث لعرض الأجزاء.</p></article>';
   const viewerBlock = isVerifiedPublic ? `<div class="inline-panel action-sheet"><div class="sheet-head"><h3>${escapeHtml(viewerName)}</h3><span>أجزاؤك في هذه الختمة</span></div><p>يمكنك تحديث حالة الأجزاء المخصصة لك فقط.</p></div>` : '';
   const toolsBlock = isAdmin ? managedKhatmaToolsHtml(k) : '';
-  const rotStart = k.rotationStartDate || k.createdAt || '';
+  const rotStart = k.rotationStartDate || k.khatmaDate || k.createdAt || '';
   const periodEndDisplay = rotStart ? formatPeriodEnd(rotStart, k.khatmaType) : '';
   const periodLabelDisplay = rotStart ? currentHijriPeriodLabel(rotStart, k.khatmaType) : '';
   const periodStatHtml = periodEndDisplay ? `<div><strong>${periodLabelDisplay || '—'}</strong><span>الدورة الحالية</span></div><div><strong>${periodEndDisplay}</strong><span>نهاية الدورة</span></div>` : '';
@@ -2812,7 +2870,7 @@ function rotationMonitorHtml(k){
   const participants = (k.participants || []).filter(p => p.startJuz && p.partsCount);
   if(!participants.length) return '';
   const rotationType = k.khatmaType || 'monthly';
-  const rotationStartDate = k.rotationStartDate || k.createdAt || '';
+  const rotationStartDate = k.rotationStartDate || k.khatmaDate || k.createdAt || '';
   const currentPeriod = computeCurrentPeriodIndex(rotationStartDate, rotationType);
   const periodEndLabel = formatPeriodEnd(rotationStartDate, rotationType);
   const currentLabel = currentHijriPeriodLabel(rotationStartDate, rotationType) || `الدورة ${currentPeriod + 1}`;
