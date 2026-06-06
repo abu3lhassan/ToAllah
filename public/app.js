@@ -685,7 +685,6 @@ window.toggleManagedUserPermission = async function(id, enabled){
 function setupHome(){
   const hero = document.querySelector('.hero.grid-2');
   const heroCopy = document.querySelector('.hero-copy');
-  const heroActions = document.querySelector('.hero-actions');
   const heroCard = document.querySelector('.hero-card');
   const features = document.querySelector('.features');
 
@@ -696,7 +695,6 @@ function setupHome(){
     // Anonymous: centre the hero, hide stats card
     if(hero){ hero.style.gridTemplateColumns = '1fr'; hero.style.textAlign = 'center'; hero.style.justifyItems = 'center'; }
     if(heroCopy){ heroCopy.style.maxWidth = '860px'; heroCopy.style.marginInline = 'auto'; }
-    if(heroActions) heroActions.style.justifyContent = 'center';
     hero?.querySelectorAll('p').forEach(p => { p.style.marginInline = 'auto'; });
     if(heroCard) heroCard.style.display = 'none';
     return;
@@ -705,19 +703,13 @@ function setupHome(){
   // Restore hero layout for logged-in users
   if(hero){ hero.style.gridTemplateColumns = ''; hero.style.textAlign = ''; hero.style.justifyItems = ''; }
   if(heroCopy){ heroCopy.style.maxWidth = ''; heroCopy.style.marginInline = ''; }
-  if(heroActions) heroActions.style.justifyContent = '';
   hero?.querySelectorAll('p').forEach(p => { p.style.marginInline = ''; });
   if(heroCard){ heroCard.style.display = ''; heroCard.classList.remove('hidden'); }
 
   const isOwner = state.user.role === 'owner';
 
   if(!isOwner){
-    // Non-owner managed creator: redirect hero buttons to managed paths
-    const createBtn = heroActions?.querySelector('a[href="#/create"]');
-    const viewBtn = heroActions?.querySelector('a[href="#/khatmas"]');
-    if(createBtn) createBtn.href = '#/managed-create';
-    if(viewBtn) viewBtn.href = '#/managed-khatmas';
-    // Stats from managed khatmas
+    // Non-owner managed creator: stats from managed khatmas
     const data = state.managedKhatmas;
     const total = data.length;
     const completed = data.filter(k => managedProgress(k).pct === 100).length;
@@ -1655,24 +1647,15 @@ async function setupReaderLogin(){
       const totalPct = totalAssigned ? Math.round(totalDone/totalAssigned*100) : 0;
       const readerName = khatmas[0]?.participants?.find(p=>p.name)?.name || '';
 
-      // Khatma cards — show CURRENT PERIOD units only for rotating khatmas
+      // Khatma cards — show ALL units assigned to this reader (backend already filters by participant_id)
       const khatmasHtml = khatmas.map(k => {
         const status = managedKhatmaStatus(k);
-        const allMyUnits = (k.units || []);
-        const participant = (k.participants || []).find(p => p.name);
-        const startJuz = participant?.startJuz;
-        const partsCount = participant?.partsCount;
+        const displayUnits = (k.units || []);
         const rotationStart = k.rotationStartDate || k.createdAt || '';
-        const isRotating = (k.khatmaType === 'monthly' || k.khatmaType === 'weekly') && startJuz && partsCount;
-
-        let displayUnits = allMyUnits;
-        let periodLabel = '';
-        if (isRotating) {
-          const periodIdx = computeCurrentPeriodIndex(rotationStart, k.khatmaType);
-          const currentJuz = computeRotationJuz(startJuz, partsCount, periodIdx);
-          displayUnits = allMyUnits.filter(u => currentJuz.includes(u.number));
-          periodLabel = currentHijriPeriodLabel(rotationStart, k.khatmaType) || '';
-        }
+        // Period label for informational display only — does NOT filter units
+        const periodLabel = (k.khatmaType === 'monthly' || k.khatmaType === 'weekly')
+          ? (currentHijriPeriodLabel(rotationStart, k.khatmaType) || '')
+          : '';
 
         const done = displayUnits.filter(u=>u.status==='completed').length;
         const total = displayUnits.length;
@@ -1695,7 +1678,7 @@ async function setupReaderLogin(){
                 ${unit.status==='assigned'?`<div class="unit-actions"><button class="btn ghost" style="font-size:12px;padding:7px" data-portal-action="reading" data-khatma="${escapeHtml(k.id)}" data-unit="${unit.number}" data-identity="${escapeHtml(identity)}">بدء القراءة</button></div>`:''}
                 ${unit.status==='reading'?`<div class="unit-actions"><button class="btn primary" style="font-size:12px;padding:7px" data-portal-action="complete" data-khatma="${escapeHtml(k.id)}" data-unit="${unit.number}" data-identity="${escapeHtml(identity)}">إتمام القراءة</button></div>`:''}
               </article>`;
-            }).join('') || '<p style="color:var(--muted);grid-column:1/-1;font-size:13px">لا توجد أجزاء مُعيّنة لك في الفترة الحالية.</p>'}
+            }).join('') || '<p style="color:var(--muted);grid-column:1/-1;font-size:13px">لا توجد أجزاء مُعيّنة لك في هذه الختمة.</p>'}
           </div>
         </article>`;
       }).join('');
