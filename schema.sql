@@ -1,4 +1,3 @@
-DROP TABLE IF EXISTS invite_codes;
 DROP TABLE IF EXISTS user_sessions;
 DROP TABLE IF EXISTS users;
 DROP TABLE IF EXISTS khatma_units;
@@ -21,19 +20,6 @@ CREATE TABLE user_sessions (
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE invite_codes (
-  id TEXT PRIMARY KEY,
-  code TEXT NOT NULL UNIQUE,
-  max_uses INTEGER,
-  used_count INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'active',
-  created_by_user_id TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  disabled_at TEXT,
-  FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE khatmas (
@@ -82,8 +68,6 @@ CREATE TABLE khatma_units (
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON user_sessions(expires_at);
-CREATE INDEX IF NOT EXISTS idx_invites_code ON invite_codes(code);
-CREATE INDEX IF NOT EXISTS idx_invites_status ON invite_codes(status);
 CREATE INDEX IF NOT EXISTS idx_khatmas_owner_key ON khatmas(owner_key);
 CREATE INDEX IF NOT EXISTS idx_khatmas_created_by ON khatmas(created_by_user_id);
 CREATE INDEX IF NOT EXISTS idx_khatmas_deleted_at ON khatmas(deleted_at);
