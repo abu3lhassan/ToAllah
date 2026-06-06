@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS managed_khatmas (
   created_at TEXT NOT NULL,
   closed_at TEXT,
   deleted_at TEXT,
+  shared_creator_group_id TEXT,
   FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 

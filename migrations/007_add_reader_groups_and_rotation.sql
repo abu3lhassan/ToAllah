@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS managed_reader_groups (
   rotation_start_date TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  shared_creator_group_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_managed_groups_created_by ON managed_reader_groups(created_by_user_id);

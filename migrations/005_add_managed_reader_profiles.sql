@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS managed_reader_profiles (
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  shared_creator_group_id TEXT,
   FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE CASCADE,
   UNIQUE(created_by_user_id, access_code)
 );
