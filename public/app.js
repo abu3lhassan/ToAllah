@@ -1,5 +1,6 @@
 
-const APP_NAME = 'درب الزهراء';
+const APP_CONFIG = window.APP_CONFIG || {};
+const APP_NAME = APP_CONFIG.APP_NAME || 'إلى الله';
 const API_BASE = '/api';
 const state = { khatmas: [], managedKhatmas: [], managedReaders: [], activeUnitKey: '', activeManagedUnitKey: '', activeAdminKhatmaId: '', activeResetUserId: '', activeDeleteUserId: '', activeDeleteKhatmaId: '', activeUpdateKhatmaId: '', activeDeleteManagedKhatmaId: '', activeUpdateManagedKhatmaId: '', activeDuplicateManagedKhatmaId: '', activeUnitFilter: 'all', activeUnitSearch: '', activeManagedUnitFilter: 'all', activeManagedUnitSearch: '', loading: true, user: null, token: localStorage.getItem('auth_token') || '', currentManageMode: false, currentManagedManageMode: false, ownerCreateUserOpen: false, ownerCreateInviteOpen: false, activeReadersGroupId: '', editGroupId: '', currentReaderGroup: null, currentGroupReaders: [] };
 
@@ -3399,7 +3400,7 @@ async function downloadTextFile(filename, content, type){
     const file = new File([blob], filename, {type});
     const isSmallScreen = window.matchMedia && window.matchMedia('(max-width: 820px)').matches;
     if(isSmallScreen && navigator.share && navigator.canShare && navigator.canShare({files:[file]})){
-      await navigator.share({files:[file], title: filename, text: 'تصدير من درب الزهراء للختمات القرآنية'});
+      await navigator.share({files:[file], title: filename, text: 'تصدير من إلى الله للختمات القرآنية'});
       return;
     }
   }catch{}
@@ -3452,19 +3453,19 @@ function printablePage(title, body){
 window.printKhatmasList = function(){
   const rows = khatmaExportRows(state.khatmas);
   const headers = rows.length ? Object.keys(rows[0]) : [];
-  const table = `<h1>قائمة الختمات</h1><div class="meta">درب الزهراء للختمات القرآنية · ${new Date().toLocaleDateString('ar-SA')}</div><table><thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${headers.map(h=>`<td>${escapeHtml(row[h])}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  const table = `<h1>قائمة الختمات</h1><div class="meta">الى الله للختمات القرآنية · ${new Date().toLocaleDateString('ar-SA')}</div><table><thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${headers.map(h=>`<td>${escapeHtml(row[h])}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
   const w = window.open('', '_blank'); if(w){ w.document.write(printablePage('قائمة الختمات', table)); w.document.close(); }
 };
 window.printSingleKhatma = function(id){
   const k = state.khatmas.find(x=>x.id===id); if(!k) return toast('الختمة غير موجودة');
   const p = progress(k); const status = khatmaStatus(k); const rows = khatmaUnitExportRows(k); const headers = rows.length ? Object.keys(rows[0]).filter(h => !['الختمة','رقم الختمة'].includes(h)) : [];
-  const body = `<h1>${escapeHtml(k.title || 'الختمة')}</h1><div class="meta">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : '')} · ${escapeHtml(status.label)} · الإنجاز ${p.pct}%</div><div class="card"><strong>التاريخ:</strong> ${escapeHtml([k.hijriDate || '', k.gregorianDate || ''].filter(Boolean).join(' - '))}<br><strong>منسق الختمة:</strong> ${escapeHtml(k.coordinatorName || '-')}<br><strong>الإهداء:</strong><br>${escapeHtml(k.dedication || '').replace(/\n/g,'<br>')}</div><table><thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${headers.map(h=>`<td>${escapeHtml(row[h])}</td>`).join('')}</tr>`).join('')}</tbody></table><p class="small">تمت الطباعة من منصة درب الزهراء للختمات القرآنية.</p>`;
+  const body = `<h1>${escapeHtml(k.title || 'الختمة')}</h1><div class="meta">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : '')} · ${escapeHtml(status.label)} · الإنجاز ${p.pct}%</div><div class="card"><strong>التاريخ:</strong> ${escapeHtml([k.hijriDate || '', k.gregorianDate || ''].filter(Boolean).join(' - '))}<br><strong>منسق الختمة:</strong> ${escapeHtml(k.coordinatorName || '-')}<br><strong>الإهداء:</strong><br>${escapeHtml(k.dedication || '').replace(/\n/g,'<br>')}</div><table><thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${headers.map(h=>`<td>${escapeHtml(row[h])}</td>`).join('')}</tr>`).join('')}</tbody></table><p class="small">تمت الطباعة من منصة الى الله للختمات القرآنية.</p>`;
   const w = window.open('', '_blank'); if(w){ w.document.write(printablePage(k.title || 'الختمة', body)); w.document.close(); }
 };
 window.printManagedKhatmasList = function(){
   const rows = managedKhatmaExportRows(state.managedKhatmas);
   const headers = rows.length ? Object.keys(rows[0]) : [];
-  const table = `<h1>قائمة الختمات المُدارة</h1><div class="meta">درب الزهراء للختمات القرآنية · ${new Date().toLocaleDateString('ar-SA')}</div><table><thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${headers.map(h=>`<td>${escapeHtml(row[h])}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  const table = `<h1>قائمة الختمات المُدارة</h1><div class="meta"> اى الله للختمات القرآنية · ${new Date().toLocaleDateString('ar-SA')}</div><table><thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${headers.map(h=>`<td>${escapeHtml(row[h])}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
   const w = window.open('', '_blank'); if(w){ w.document.write(printablePage('قائمة الختمات المُدارة', table)); w.document.close(); }
 };
 window.printReaderGroup = function(id){
@@ -3482,7 +3483,7 @@ window.printReaderGroup = function(id){
     <div class="meta">مجموعة قراء · ${escapeHtml(periodLabel)} · ${readers.length} قارئ · ${new Date().toLocaleDateString('ar-SA')}</div>
     <table><thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>
     <tbody>${rows.map(row=>`<tr>${headers.map(h=>`<td>${escapeHtml(row[h])}</td>`).join('')}</tr>`).join('')}</tbody></table>
-    <p class="small">تمت الطباعة من منصة درب الزهراء للختمات القرآنية.</p>`;
+    <p class="small">تمت الطباعة من منصة الى الله للختمات القرآنية.</p>`;
   const w = window.open('', '_blank'); if(w){ w.document.write(printablePage(group.name, body)); w.document.close(); }
 };
 window.printMonitorReport = function(){
@@ -3502,17 +3503,17 @@ window.printMonitorReport = function(){
   const globalPct = totalUnits ? Math.round(100*totalCompleted/totalUnits) : 0;
   const h = getHijriParts(new Date());
   const body = `<h1>لوحة متابعة الختمات المُدارة</h1>
-    <div class="meta">درب الزهراء · ${hijriMonthName(h.month)} ${h.year} هـ · ${new Date().toLocaleDateString('ar-SA')}</div>
+    <div class="meta"> الى الله · ${hijriMonthName(h.month)} ${h.year} هـ · ${new Date().toLocaleDateString('ar-SA')}</div>
     <div class="card"><strong>الإجمالي:</strong> ${khatmas.length} ختمة · ${totalCompleted}/${totalUnits} وحدة مكتملة · الإنجاز الكلي ${globalPct}%</div>
     <table><thead><tr>${headers.map(h2=>`<th>${escapeHtml(h2)}</th>`).join('')}</tr></thead>
     <tbody>${rows.map(row=>`<tr>${headers.map(h2=>`<td>${escapeHtml(row[h2])}</td>`).join('')}</tr>`).join('')}</tbody></table>
-    <p class="small">تمت الطباعة من منصة درب الزهراء للختمات القرآنية.</p>`;
+    <p class="small">تمت الطباعة من منصة الى الله للختمات القرآنية.</p>`;
   const w = window.open('', '_blank'); if(w){ w.document.write(printablePage('تقرير المراقبة', body)); w.document.close(); }
 };
 window.printSingleManagedKhatma = function(id){
   const k = state.managedKhatmas.find(x=>x.id===id); if(!k) return toast('الختمة المُدارة غير موجودة');
   const p = managedProgress(k); const status = managedKhatmaStatus(k); const rows = managedKhatmaUnitExportRows(k); const headers = rows.length ? Object.keys(rows[0]).filter(h => !['الختمة','رقم الختمة'].includes(h)) : [];
-  const body = `<h1>${escapeHtml(k.title || 'الختمة المُدارة')}</h1><div class="meta">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : '')} · ${escapeHtml(status.label)} · الإنجاز ${p.pct}%</div><div class="card"><strong>التاريخ:</strong> ${escapeHtml([k.hijriDate || '', k.gregorianDate || ''].filter(Boolean).join(' - '))}<br><strong>منسق الختمة:</strong> ${escapeHtml(k.coordinatorName || '-')}<br><strong>الإهداء:</strong><br>${escapeHtml(k.dedication || '').replace(/\n/g,'<br>')}</div><table><thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${headers.map(h=>`<td>${escapeHtml(row[h])}</td>`).join('')}</tr>`).join('')}</tbody></table><p class="small">تمت الطباعة من منصة درب الزهراء للختمات القرآنية.</p>`;
+  const body = `<h1>${escapeHtml(k.title || 'الختمة المُدارة')}</h1><div class="meta">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : '')} · ${escapeHtml(status.label)} · الإنجاز ${p.pct}%</div><div class="card"><strong>التاريخ:</strong> ${escapeHtml([k.hijriDate || '', k.gregorianDate || ''].filter(Boolean).join(' - '))}<br><strong>منسق الختمة:</strong> ${escapeHtml(k.coordinatorName || '-')}<br><strong>الإهداء:</strong><br>${escapeHtml(k.dedication || '').replace(/\n/g,'<br>')}</div><table><thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${headers.map(h=>`<td>${escapeHtml(row[h])}</td>`).join('')}</tr>`).join('')}</tbody></table><p class="small">تمت الطباعة من منصة الى الله للختمات القرآنية.</p>`;
   const w = window.open('', '_blank'); if(w){ w.document.write(printablePage(k.title || 'الختمة المُدارة', body)); w.document.close(); }
 };
 function setupZakat(){ const ids = ['khamsSelect','peopleCount','zakatCategory']; ids.forEach(id => document.getElementById(id).addEventListener('input', zakatCalculation)); document.getElementById('copyZakat').addEventListener('click', ()=>copyText(zakatMessage())); document.getElementById('sendZakat').addEventListener('click', ()=>window.open('https://wa.me/?text=' + encodeURIComponent(zakatMessage()), '_blank')); }

@@ -1,1 +1,10 @@
-{"scripts":{"dev":"wrangler pages dev public --d1 DB=khatmat_darb_alzahra","deploy":"wrangler pages deploy public --project-name khatmat-darb-alzahra","db:init":"wrangler d1 execute khatmat_darb_alzahra --file=./schema.sql --remote"},"devDependencies":{"wrangler":"latest"}}
+{
+  "scripts": {
+    "dev": "wrangler pages dev public --d1 DB=toallah_db",
+    "deploy": "wrangler pages deploy public --project-name toallah",
+    "db:init": "echo db:init is disabled until ToAllah migrations are reviewed"
+  },
+  "devDependencies": {
+    "wrangler": "latest"
+  }
+}

@@ -1,8 +1,8 @@
-name = "khatmat-darb-alzahra"
+name = "toallah"
 compatibility_date = "2026-05-22"
 pages_build_output_dir = "./public"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "khatmat_darb_alzahra"
-database_id = "6487157c-bba1-40f4-8965-757fa6fb2708"
+database_name = "toallah_db"
+database_id = "938b6097-b17b-42d9-9112-e135ebf4d3a8"
