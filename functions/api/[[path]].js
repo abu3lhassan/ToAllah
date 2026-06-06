@@ -1683,6 +1683,12 @@ async function updateManagedKhatma(request, DB, id) {
   const existingUnitMap = new Map(existingUnits.map(u => [u.unit_number, u]));
   const stmts = [];
 
+  // Determine new rotation_start_date:
+  // Use an explicitly provided value first, then sync with khatmaDate (the admin-set start date),
+  // then fall back to the existing DB value. This keeps rotation_start_date aligned with
+  // the khatma's declared start date when the admin edits the khatma.
+  const newRotationStartDate = String(data.rotationStartDate || data.khatmaDate || "").trim() || row.rotation_start_date || null;
+
   stmts.push(DB.prepare(`
     UPDATE managed_khatmas
     SET title = ?,
@@ -1700,7 +1706,8 @@ async function updateManagedKhatma(request, DB, id) {
         quote_by = ?,
         quote_text = ?,
         quote_source = ?,
-        notes = ?
+        notes = ?,
+        rotation_start_date = ?
     WHERE id = ?
   `).bind(
     data.title || "ختمة مُدارة جديدة",
@@ -1710,7 +1717,7 @@ async function updateManagedKhatma(request, DB, id) {
     data.hijriDate || "",
     data.gregorianDate || "",
     (() => {
-      const rs = row.rotation_start_date || data.rotationStartDate || "";
+      const rs = newRotationStartDate || "";
       if (rs && (khatmaType === 'monthly' || khatmaType === 'weekly')) {
         return computeRotationPeriodEnd(rs, khatmaType)?.toISOString() || data.expiresAt || "";
       }
@@ -1725,6 +1732,7 @@ async function updateManagedKhatma(request, DB, id) {
     data.quoteText || "",
     data.quoteSource || "",
     data.notes || "",
+    newRotationStartDate,
     id
   ));
 

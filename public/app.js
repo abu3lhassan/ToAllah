@@ -1710,12 +1710,18 @@ async function setupReaderLogin(){
       // ── Render one khatma's unit cards ────────────────────────────
       function renderKhatmaUnits(k){
         const displayUnits = (k.units || []);
+        // rotationStart: used for rotation period calculations (period index, period label, period end)
         const rotationStart = k.rotationStartDate || k.khatmaDate || k.createdAt || '';
-        const started = khatmaHasStarted(rotationStart);
+        // khatmaStartRef: used ONLY to decide if the khatma has started.
+        // khatmaDate takes priority because it is the admin-set start date and is always
+        // updated when the khatma is edited. rotationStartDate may reflect an older group
+        // rotation cycle that differs from the khatma's actual start date.
+        const khatmaStartRef = k.khatmaDate || k.rotationStartDate || k.createdAt || '';
+        const started = khatmaHasStarted(khatmaStartRef);
 
         // Khatma hasn't started yet → show a clear notice instead of units
         if(!started){
-          const startDate = new Date(rotationStart);
+          const startDate = new Date(khatmaStartRef);
           const startDateStr = startDate.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn', {day:'numeric', month:'long', year:'numeric'}).replace('،','').trim();
           const daysUntil = Math.ceil((startDate - Date.now()) / 86400000);
           const daysStr = daysUntil === 1 ? 'يوم واحد' : `${daysUntil} أيام`;
