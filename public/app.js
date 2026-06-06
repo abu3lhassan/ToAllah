@@ -1268,11 +1268,16 @@ function generateRotationPlan(startJuz, partsCount, rotationStartDate, rotationT
 function formatPeriodEnd(rotationStartDate, rotationType){
   const end = computeCurrentPeriodEnd(rotationStartDate, rotationType);
   if(!end) return '';
-  if(rotationType === 'monthly'){
-    const {year, month} = getHijriParts(end);
-    return `نهاية ${hijriMonthName(month)} ${year} هـ`;
-  }
-  return end.toLocaleDateString('ar-SA-u-ca-gregory',{day:'numeric',month:'long',year:'numeric'});
+  // Always return Gregorian date with remaining-days suffix
+  const dateStr = end.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn', {day:'numeric', month:'long', year:'numeric'}).replace('،','').trim();
+  const msLeft = end.getTime() + 86400000 - Date.now(); // include the end-day itself
+  const daysLeft = Math.ceil(msLeft / 86400000);
+  if(daysLeft > 0) return `${dateStr} · متبقي ${daysLeft} ${daysLeft === 1 ? 'يوم' : 'أيام'}`;
+  return dateStr;
+}
+function khatmaHasStarted(rotationStart){
+  if(!rotationStart) return true; // no start date → treat as already started
+  return new Date(rotationStart) <= new Date();
 }
 function currentHijriPeriodLabel(rotationStartDate, rotationType){
   if(rotationType === 'monthly'){
@@ -1686,7 +1691,13 @@ async function setupReaderLogin(){
             const unitNum  = btn2.dataset.unit;
             const unitLabel = btn2.dataset.unitLabel || ('الجزء رقم ' + unitNum);
             const id2      = btn2.dataset.identity;
-            if(!confirm(`هل فعلًا أتممت قراءة ${unitLabel}؟`)) return;
+            const confirmed = await showConfirmModal({
+              title: 'تأكيد إتمام القراءة',
+              message: `هل فعلًا أتممت قراءة ${unitLabel}؟`,
+              confirmLabel: 'نعم، أتممت القراءة',
+              cancelLabel: 'إلغاء'
+            });
+            if(!confirmed) return;
             try{
               await api(`/managed-khatmas/${encodeURIComponent(khatmaId)}/units/${unitNum}/complete`, {method:'POST', body:{identity:id2}});
               toast('تمت القراءة بنجاح');
@@ -1700,6 +1711,24 @@ async function setupReaderLogin(){
       function renderKhatmaUnits(k){
         const displayUnits = (k.units || []);
         const rotationStart = k.rotationStartDate || k.khatmaDate || k.createdAt || '';
+        const started = khatmaHasStarted(rotationStart);
+
+        // Khatma hasn't started yet → show a clear notice instead of units
+        if(!started){
+          const startDate = new Date(rotationStart);
+          const startDateStr = startDate.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn', {day:'numeric', month:'long', year:'numeric'}).replace('،','').trim();
+          const daysUntil = Math.ceil((startDate - Date.now()) / 86400000);
+          const daysStr = daysUntil === 1 ? 'يوم واحد' : `${daysUntil} أيام`;
+          return `
+            <article class="form-card glass" style="margin-bottom:18px">
+              <h3 style="margin:0 0 14px;font-size:18px">${escapeHtml(k.title)}</h3>
+              <div class="inline-panel action-sheet" style="text-align:center;padding:24px 16px">
+                <p style="margin:0 0 6px;font-size:16px;font-weight:700">الختمة لم تبدأ بعد.</p>
+                <p style="margin:0;color:var(--muted);font-size:14px">تبدأ في: ${startDateStr}${daysUntil > 0 ? ' · متبقي ' + daysStr : ''}</p>
+              </div>
+            </article>`;
+        }
+
         const periodLabel = (k.khatmaType === 'monthly' || k.khatmaType === 'weekly')
           ? (currentHijriPeriodLabel(rotationStart, k.khatmaType) || '')
           : '';
@@ -1707,12 +1736,13 @@ async function setupReaderLogin(){
         const done = displayUnits.filter(u=>u.status==='completed').length;
         const total = displayUnits.length;
         const allDone = total > 0 && done === total;
+        const periodEndStr = formatPeriodEnd(rotationStart, k.khatmaType);
         return `
           <article class="form-card glass" style="margin-bottom:18px">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap;gap:8px">
               <div>
                 <h3 style="margin:0;font-size:18px">${escapeHtml(k.title)}</h3>
-                <span style="color:var(--muted);font-size:13px">${periodLabel ? 'الفترة: ' + escapeHtml(periodLabel) + ' · ' : ''}${done}/${total} مكتمل${formatPeriodEnd(rotationStart, k.khatmaType) ? ' · ينتهي: ' + formatPeriodEnd(rotationStart, k.khatmaType) : ''}</span>
+                <span style="color:var(--muted);font-size:13px">${periodLabel ? 'الفترة: ' + escapeHtml(periodLabel) + ' · ' : ''}${done}/${total} مكتمل${periodEndStr ? ' · ينتهي: ' + escapeHtml(periodEndStr) : ''}</span>
               </div>
               <span class="badge ${allDone ? 'done' : status.className}">${allDone ? '✓ مكتمل' : status.label}</span>
             </div>
@@ -3535,5 +3565,25 @@ function showInputModal({title, message, label, placeholder='', inputMode='text'
 function showConfirmModal({title, message, confirmText='تأكيد', danger=false}){ return new Promise(resolve => { const backdrop = document.createElement('div'); backdrop.className = 'modal-backdrop'; backdrop.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(message).replace(/\n/g,'<br>')}</p><div class="modal-actions"><button class="btn ${danger ? 'danger-btn' : 'primary'}" id="modalOk">${escapeHtml(confirmText)}</button><button class="btn ghost" id="modalCancel">إلغاء</button></div></div>`; document.body.appendChild(backdrop); const close = value => { backdrop.remove(); resolve(value); }; backdrop.querySelector('#modalOk').addEventListener('click', ()=>close(true)); backdrop.querySelector('#modalCancel').addEventListener('click', ()=>close(false)); backdrop.addEventListener('click', e => { if(e.target === backdrop) close(false); }); }); }
 function copyText(text){ navigator.clipboard?.writeText(text).then(()=>toast('تم النسخ')).catch(()=>toast('تعذر النسخ')); }
 function toast(msg){ const el=document.createElement('div'); el.className='toast'; el.textContent=msg; document.body.appendChild(el); setTimeout(()=>el.remove(),2200); }
+function showConfirmModal({ title, message, confirmLabel = 'تأكيد', cancelLabel = 'إلغاء' }){
+  return new Promise(resolve => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" dir="rtl">
+      <div class="sheet-head"><h3>${escapeHtml(title)}</h3></div>
+      <p>${escapeHtml(message)}</p>
+      <div class="modal-actions">
+        <button class="btn ghost" id="confirmModalCancel" type="button">${escapeHtml(cancelLabel)}</button>
+        <button class="btn primary" id="confirmModalOk" type="button">${escapeHtml(confirmLabel)}</button>
+      </div>
+    </div>`;
+    document.body.appendChild(backdrop);
+    const close = val => { backdrop.remove(); resolve(val); };
+    backdrop.querySelector('#confirmModalOk').addEventListener('click', () => close(true));
+    backdrop.querySelector('#confirmModalCancel').addEventListener('click', () => close(false));
+    backdrop.addEventListener('click', e => { if(e.target === backdrop) close(false); });
+    backdrop.querySelector('#confirmModalOk').focus();
+  });
+}
 function escapeJs(value){ return String(value || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'"); }
 function escapeHtml(value=''){ return String(value ?? '').replace(/[&<>'"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[c])); }
