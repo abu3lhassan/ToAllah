@@ -1,3 +1,2 @@
--- Safe one-time D1 migration for custom unit selection mode.
--- Do NOT run schema.sql for this patch.
-ALTER TABLE khatmas ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'all';
+-- selection_mode is already defined in 0001_init.sql for fresh databases.
+-- This migration is intentionally kept as a no-op to preserve migration order.

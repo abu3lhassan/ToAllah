@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS managed_reader_groups (
   created_by_user_id TEXT NOT NULL,
   name TEXT NOT NULL,
   notes TEXT,
-  rotation_type TEXT NOT NULL DEFAULT 'weekly',
+  rotation_type TEXT NOT NULL DEFAULT 'monthly',
   rotation_start_date TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL,

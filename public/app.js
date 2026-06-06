@@ -154,13 +154,13 @@ const KHATMA_TYPE_OPTIONS = [
 ];
 function normalizeKhatmaType(value=''){
   const raw = String(value || '').trim();
-  return KHATMA_TYPE_OPTIONS.some(([key]) => key === raw) ? raw : 'weekly';
+  return KHATMA_TYPE_OPTIONS.some(([key]) => key === raw) ? raw : 'monthly';
 }
-function khatmaTypeOptionsHtml(selected='weekly'){
+function khatmaTypeOptionsHtml(selected='monthly'){
   const current = normalizeKhatmaType(selected);
   return KHATMA_TYPE_OPTIONS.map(([key,label]) => `<option value="${key}" ${current === key ? 'selected' : ''}>${label}</option>`).join('');
 }
-function khatmaTypeAdjective(value='weekly'){
+function khatmaTypeAdjective(value='monthly'){
   const current = normalizeKhatmaType(value);
   return KHATMA_TYPE_OPTIONS.find(([key]) => key === current)?.[2] || 'الأسبوعية';
 }
@@ -913,7 +913,7 @@ function previewCreateMessage(form){
     id: 'preview',
     title: data.title || 'ختمة القرآن',
     weekNumber: data.weekNumber || '-',
-    khatmaType: data.khatmaType || 'weekly',
+    khatmaType: data.khatmaType || 'monthly',
     hijriDate: data.hijriDate || '',
     gregorianDate: data.gregorianDate || '',
     dedication: data.dedication || '',
@@ -2569,7 +2569,7 @@ async function setupManagedCreate(){
   document.getElementById('managedCsvFile')?.remove();
   document.getElementById('previewManagedKhatmaMessage')?.addEventListener('click', () => {
     const data = Object.fromEntries(new FormData(form).entries());
-    const draft = {id:'managed-preview', title:data.title || 'ختمة مُدارة', weekNumber:data.weekNumber || '-', khatmaType:data.khatmaType || 'weekly', hijriDate:data.hijriDate || '', gregorianDate:data.gregorianDate || '', dedication:data.dedication || '', quoteBy:data.quoteBy || '', quoteText:data.quoteText || '', quoteSource:data.quoteSource || '', notes:data.notes || ''};
+    const draft = {id:'managed-preview', title:data.title || 'ختمة مُدارة', weekNumber:data.weekNumber || '-', khatmaType:data.khatmaType || 'monthly', hijriDate:data.hijriDate || '', gregorianDate:data.gregorianDate || '', dedication:data.dedication || '', quoteBy:data.quoteBy || '', quoteText:data.quoteText || '', quoteSource:data.quoteSource || '', notes:data.notes || ''};
     const box = document.getElementById('managedCreatePreviewBox');
     if(box){ box.hidden = false; box.innerHTML = `<div class="sheet-head"><h3>معاينة رسالة المشاركة</h3><span>قبل الحفظ</span></div><div class="message-preview">${escapeHtml(buildManagedWhatsAppMessage(draft)).replace(/#\/managed-khatma\/managed-preview/g, '#/managed-khatma/بعد-الحفظ')}</div>`; }
   });
@@ -2795,7 +2795,7 @@ async function handleManagedUnitAction(khatmaId, num, action, isAdmin){
 function rotationMonitorHtml(k){
   const participants = (k.participants || []).filter(p => p.startJuz && p.partsCount);
   if(!participants.length) return '';
-  const rotationType = k.khatmaType || 'weekly';
+  const rotationType = k.khatmaType || 'monthly';
   const rotationStartDate = k.rotationStartDate || k.createdAt || '';
   const currentPeriod = computeCurrentPeriodIndex(rotationStartDate, rotationType);
   const periodEndLabel = formatPeriodEnd(rotationStartDate, rotationType);

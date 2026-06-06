@@ -121,7 +121,7 @@ function normalizeKhatmaType(value = "") {
     "المحددة": "specific"
   };
   if (KHATMA_TYPES.has(raw)) return raw;
-  return aliases[raw] || "weekly";
+  return aliases[raw] || "monthly";
 }
 
 function normalizeAccessCode(value = "") {
@@ -157,7 +157,7 @@ function mapKhatma(row, units = []) {
     id: row.id,
     title: row.title,
     weekNumber: row.week_number || "",
-    khatmaType: row.khatma_type || "weekly",
+    khatmaType: row.khatma_type || "monthly",
     khatmaDate: row.khatma_date || "",
     hijriDate: row.hijri_date || "",
     gregorianDate: row.gregorian_date || "",
@@ -371,7 +371,7 @@ async function ensureManagedSchema(DB) {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       week_number TEXT,
-      khatma_type TEXT NOT NULL DEFAULT 'weekly',
+      khatma_type TEXT NOT NULL DEFAULT 'monthly',
       khatma_date TEXT,
       hijri_date TEXT,
       gregorian_date TEXT,
@@ -652,7 +652,7 @@ async function ensureGroupSchema(DB) {
       created_by_user_id TEXT NOT NULL,
       name TEXT NOT NULL,
       notes TEXT,
-      rotation_type TEXT NOT NULL DEFAULT 'weekly',
+      rotation_type TEXT NOT NULL DEFAULT 'monthly',
       rotation_start_date TEXT,
       status TEXT NOT NULL DEFAULT 'active',
       created_at TEXT NOT NULL,
@@ -722,7 +722,7 @@ async function createReaderGroup(request, DB) {
   const body = await readJson(request);
   const name = String(body.name || "").trim();
   if (!name) return json({ ok: false, error: "اسم المجموعة مطلوب" }, 400);
-  const rotationType = ["weekly","monthly","yearly","special","separate","sub","specific","none"].includes(body.rotationType || body.rotation_type) ? (body.rotationType || body.rotation_type) : "weekly";
+  const rotationType = ["weekly","monthly","yearly","special","separate","sub","specific","none"].includes(body.rotationType || body.rotation_type) ? (body.rotationType || body.rotation_type) : "monthly";
   const rotationStartDate = body.rotationStartDate || body.rotation_start_date || "";
   const rotationDurationYears = Math.min(15, Math.max(1, Number(body.rotationDurationYears || body.rotation_duration_years || 5) || 5));
   const id = newId("mgroup");
@@ -854,7 +854,7 @@ function assignmentValueFor(assignments, unitNumber) {
 
 function mapManagedKhatma(row, units = [], participants = [], includeSecrets = false, visibleParticipantId = "") {
   const visibleId = String(visibleParticipantId || "");
-  const khatmaType = row.khatma_type || "weekly";
+  const khatmaType = row.khatma_type || "monthly";
   const rotationStart = row.rotation_start_date || "";
   let expiresAt = row.expires_at || "";
   if (rotationStart && (khatmaType === 'monthly' || khatmaType === 'weekly')) {
@@ -1825,7 +1825,7 @@ async function duplicateManagedKhatma(request, DB, id) {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, NULL, ?, ?, NULL)
   `).bind(
     nid, (row.title || "") + " - نسخة", row.week_number || "",
-    row.khatma_type || "weekly", row.khatma_date || "", row.hijri_date || "",
+    row.khatma_type || "monthly", row.khatma_date || "", row.hijri_date || "",
     row.gregorian_date || "", row.expires_at || "", row.division || "juz",
     row.selection_mode || "all", row.owner_name || "", result.user.id,
     row.coordinator_name || "", row.coordinator_whatsapp || "",
@@ -2330,7 +2330,7 @@ async function readerLookup(request, DB) {
     khatmaId: p.khatma_id, participantId: p.id,
     participantName: p.participant_name, accessCode: p.access_code,
     title: p.title || "", weekNumber: p.week_number || "",
-    khatmaType: p.khatma_type || "weekly", hijriDate: p.hijri_date || "",
+    khatmaType: p.khatma_type || "monthly", hijriDate: p.hijri_date || "",
     gregorianDate: p.gregorian_date || "", khatmaStatus: p.khatma_status || "active",
     coordinatorName: p.coordinator_name || ""
   })) });

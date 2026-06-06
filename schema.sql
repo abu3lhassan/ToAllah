@@ -26,7 +26,7 @@ CREATE TABLE khatmas (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   week_number TEXT,
-  khatma_type TEXT NOT NULL DEFAULT 'weekly',
+  khatma_type TEXT NOT NULL DEFAULT 'monthly',
   khatma_date TEXT,
   hijri_date TEXT,
   gregorian_date TEXT,
