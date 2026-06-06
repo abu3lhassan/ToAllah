@@ -32,6 +32,7 @@ CREATE TABLE khatmas (
   gregorian_date TEXT,
   expires_at TEXT,
   division TEXT NOT NULL DEFAULT 'juz',
+  selection_mode TEXT NOT NULL DEFAULT 'all',
   owner_name TEXT,
   owner_key TEXT NOT NULL,
   created_by_user_id TEXT,
