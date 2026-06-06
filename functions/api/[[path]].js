@@ -961,13 +961,28 @@ async function getManagedKhatmaParticipantView(DB, id, participant) {
   if (!participant) return null;
   const row = await DB.prepare("SELECT * FROM managed_khatmas WHERE id = ? AND deleted_at IS NULL LIMIT 1").bind(id).first();
   if (!row) return null;
+
+  // Collect ALL participant IDs for this reader in this khatma.
+  // A single physical reader may appear under multiple participant records
+  // (e.g. added from different groups or manually) linked by reader_profile_id.
+  let participantIds = [participant.id];
+  if (participant.reader_profile_id) {
+    const siblings = (await DB.prepare(
+      "SELECT id FROM managed_khatma_participants WHERE khatma_id = ? AND reader_profile_id = ?"
+    ).bind(id, participant.reader_profile_id).all()).results || [];
+    for (const s of siblings) {
+      if (s.id !== participant.id) participantIds.push(s.id);
+    }
+  }
+
+  const inClause = participantIds.map(() => "?").join(",");
   const units = (await DB.prepare(`
     SELECT u.*, p.participant_name, p.phone AS participant_phone
     FROM managed_khatma_units u
     JOIN managed_khatma_participants p ON p.id = u.participant_id
-    WHERE u.khatma_id = ? AND u.participant_id = ?
+    WHERE u.khatma_id = ? AND u.participant_id IN (${inClause})
     ORDER BY u.unit_number ASC
-  `).bind(id, participant.id).all()).results || [];
+  `).bind(id, ...participantIds).all()).results || [];
   return mapManagedKhatma(row, units, [participant], false, participant.id);
 }
 
@@ -1891,7 +1906,31 @@ async function managedUnitAction(request, DB, khatmaId, number, action) {
     const validCode = identityCode && identityCode === String(unit.access_code || "");
     const validPhone = identityPhone && identityPhone.length >= 9 && identityPhone === normalizePhone(unit.phone || "");
     const validName = identityRaw && identityRaw.trim() === String(unit.participant_name || "").trim();
-    if (!validCode && !validPhone && !validName) return json({ ok: false, error: "الكود أو رقم الجوال أو الاسم غير صحيح" }, 403);
+
+    if (!validCode && !validPhone && !validName) {
+      // Fallback: check if the incoming identity matches any sibling participant
+      // in this khatma that shares reader_profile_id with the unit's participant.
+      // This covers readers who have multiple participant records in the same khatma.
+      let allowedViaSiblingProfile = false;
+      const unitParticipantRow = await DB.prepare(
+        "SELECT reader_profile_id FROM managed_khatma_participants WHERE id = ? LIMIT 1"
+      ).bind(unit.participant_id).first();
+      if (unitParticipantRow?.reader_profile_id) {
+        const conditions = [];
+        const params = [khatmaId, unitParticipantRow.reader_profile_id];
+        if (identityCode && isValidAccessCode(identityCode)) { conditions.push("access_code = ?"); params.push(identityCode); }
+        if (identityPhone && identityPhone.length >= 9) { conditions.push("phone = ?"); params.push(identityPhone); }
+        if (identityRaw.length >= 2) { conditions.push("participant_name = ?"); params.push(identityRaw); }
+        if (conditions.length) {
+          const sibling = await DB.prepare(
+            `SELECT id FROM managed_khatma_participants WHERE khatma_id = ? AND reader_profile_id = ? AND (${conditions.join(" OR ")}) LIMIT 1`
+          ).bind(...params).first();
+          allowedViaSiblingProfile = !!sibling;
+        }
+      }
+      if (!allowedViaSiblingProfile) return json({ ok: false, error: "الكود أو رقم الجوال أو الاسم غير صحيح" }, 403);
+    }
+
     viewerParticipant = await DB.prepare("SELECT * FROM managed_khatma_participants WHERE id = ? LIMIT 1").bind(unit.participant_id).first();
   }
 
