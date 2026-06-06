@@ -1,0 +1,1 @@
+{"scripts":{"dev":"wrangler pages dev public --d1 DB=khatmat_darb_alzahra","deploy":"wrangler pages deploy public --project-name khatmat-darb-alzahra","db:init":"wrangler d1 execute khatmat_darb_alzahra --file=./schema.sql --remote"},"devDependencies":{"wrangler":"latest"}}

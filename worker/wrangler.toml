@@ -1,0 +1,8 @@
+name = "khatmat-darb-alzahra-api"
+main = "index.js"
+compatibility_date = "2026-05-22"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "khatmat_darb_alzahra"
+database_id = "PUT_YOUR_D1_DATABASE_ID_HERE"
