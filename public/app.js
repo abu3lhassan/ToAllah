@@ -82,7 +82,7 @@ function syncHeaderMode(){
     mobileUserNav.hidden = !(isMobile && isLoggedIn);
     mobileUserNav.style.display = (isMobile && isLoggedIn) ? 'flex' : 'none';
     mobileUserNav.textContent = state.user ? `الحساب: ${state.user.displayName}` : '';
-    mobileUserNav.href = isOwner ? '#/owner' : '#/khatmas';
+    mobileUserNav.href = isOwner ? '#/owner' : (canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home');
   }
 
   if (mobileLogoutNav) {
@@ -128,7 +128,7 @@ init();
 async function init(){
   await loadCurrentUser();
   renderAuthLinks();
-  await refreshKhatmas();
+  if(state.user?.role === 'owner') await refreshKhatmas();
   if(canUseManagedKhatmas()) await refreshManagedKhatmas();
   router();
 }
@@ -193,10 +193,17 @@ function renderAuthLinks(){
   document.body.classList.toggle('is-authenticated', isLoggedIn);
 
   const khatmasNavGroup = document.getElementById('khatmasNavGroup');
-  if(khatmasNavGroup) khatmasNavGroup.hidden = !isLoggedIn;
+  if(khatmasNavGroup) khatmasNavGroup.hidden = !isOwner;
   if(ownerNav) ownerNav.hidden = !isOwner;
   if(managedNavGroup) managedNavGroup.hidden = !canUseManagedKhatmas();
   if(userMenuOwner) userMenuOwner.hidden = !isOwner;
+  const khatmasDropdownLink = document.getElementById('khatmasDropdownLink');
+  if(khatmasDropdownLink) khatmasDropdownLink.hidden = !isOwner;
+  // Rename managed-nav labels: non-owners see clean generic labels, owners keep "مُدارة" labels
+  const managedNavBtn = managedNavGroup?.querySelector('.nav-group-btn');
+  const managedCreateNavLink = managedNavGroup?.querySelector('a[href="#/managed-create"]');
+  if(managedNavBtn) managedNavBtn.textContent = isOwner ? 'الختمات المُدارة ▾' : 'الختمات ▾';
+  if(managedCreateNavLink) managedCreateNavLink.textContent = isOwner ? 'إنشاء ختمة مُدارة' : 'إنشاء ختمة';
 
   // Desktop: keep the account inside the premium pill only.
   // Mobile: show account/logout inside the hamburger menu.
@@ -212,15 +219,15 @@ function renderAuthLinks(){
   }
   if(mobileUserNav){
     mobileUserNav.textContent = state.user ? `الحساب: ${state.user.displayName}` : '';
-    mobileUserNav.href = isOwner ? '#/owner' : '#/khatmas';
+    mobileUserNav.href = isOwner ? '#/owner' : (canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home');
   }
 
   syncHeaderMode();
 }
 async function refreshKhatmas(){
+  if(!state.user || state.user.role !== 'owner'){ state.khatmas = []; return; }
   try{
-    const path = state.user?.role === 'owner' ? '/khatmas' : '/khatmas?ownerKey=' + encodeURIComponent(getOwnerKey());
-    const res = await api(path);
+    const res = await api('/khatmas');
     state.khatmas = res.khatmas || [];
   }catch(err){
     console.error(err);
@@ -314,9 +321,18 @@ async function router(){
   if(hash.startsWith('#/managed-khatma/')) return renderTemplate('managedKhatmaTemplate', () => { const parts = hash.split('/'); setupManagedKhatma(parts[2], parts[3] === 'manage'); });
   if(hash.startsWith('#/managed-khatmas/archived')) return renderTemplate('managedKhatmasArchivedTemplate', setupManagedKhatmasArchived);
   if(hash.startsWith('#/managed-khatmas')) return renderTemplate('managedKhatmasTemplate', setupManagedKhatmas);
-  if(hash.startsWith('#/create')) return renderTemplate('createTemplate', setupCreate);
-  if(hash.startsWith('#/khatmas')) return renderTemplate('khatmasTemplate', setupKhatmas);
-  if(hash.startsWith('#/khatma/')) return renderTemplate('khatmaTemplate', () => { const parts = hash.split('/'); setupKhatma(parts[2], parts[3] === 'manage'); });
+  if(hash.startsWith('#/create')){
+    if(!state.user || state.user.role !== 'owner'){ location.hash = canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home'; return; }
+    return renderTemplate('createTemplate', setupCreate);
+  }
+  if(hash.startsWith('#/khatmas')){
+    if(!state.user || state.user.role !== 'owner'){ location.hash = canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home'; return; }
+    return renderTemplate('khatmasTemplate', setupKhatmas);
+  }
+  if(hash.startsWith('#/khatma/')){
+    if(!state.user || state.user.role !== 'owner'){ location.hash = canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home'; return; }
+    return renderTemplate('khatmaTemplate', () => { const parts = hash.split('/'); setupKhatma(parts[2], parts[3] === 'manage'); });
+  }
   renderTemplate('homeTemplate', setupHome);
 }
 function renderTemplate(id, setup){
@@ -336,10 +352,10 @@ function setupLogin(){
       state.user = res.user;
       localStorage.setItem('auth_token', state.token);
       renderAuthLinks();
-      await refreshKhatmas();
+      if(state.user?.role === 'owner') await refreshKhatmas();
       if(canUseManagedKhatmas()) await refreshManagedKhatmas();
       toast('تم تسجيل الدخول');
-      location.hash = state.user?.role === 'owner' ? '#/owner' : '#/khatmas';
+      location.hash = state.user?.role === 'owner' ? '#/owner' : (canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home');
     }catch(err){ toast(err.message || 'تعذر تسجيل الدخول'); }
   });
   const registerForm = document.getElementById('registerForm');
@@ -671,63 +687,55 @@ function setupHome(){
   const heroCopy = document.querySelector('.hero-copy');
   const heroActions = document.querySelector('.hero-actions');
   const heroCard = document.querySelector('.hero-card');
+  const features = document.querySelector('.features');
+
+  // Features section has 2 cards after Zakat removal; force 2-column grid
+  if(features) features.style.gridTemplateColumns = 'repeat(2, 1fr)';
 
   if(!state.user){
-    if(hero){
-      hero.style.gridTemplateColumns = '1fr';
-      hero.style.textAlign = 'center';
-      hero.style.justifyItems = 'center';
-    }
-
-    if(heroCopy){
-      heroCopy.style.maxWidth = '860px';
-      heroCopy.style.marginInline = 'auto';
-    }
-
-    if(heroActions){
-      heroActions.style.justifyContent = 'center';
-    }
-
-    hero?.querySelectorAll('p').forEach(p => {
-      p.style.marginInline = 'auto';
-    });
-
-    if(heroCard){
-      heroCard.style.display = 'none';
-    }
-
+    // Anonymous: centre the hero, hide stats card
+    if(hero){ hero.style.gridTemplateColumns = '1fr'; hero.style.textAlign = 'center'; hero.style.justifyItems = 'center'; }
+    if(heroCopy){ heroCopy.style.maxWidth = '860px'; heroCopy.style.marginInline = 'auto'; }
+    if(heroActions) heroActions.style.justifyContent = 'center';
+    hero?.querySelectorAll('p').forEach(p => { p.style.marginInline = 'auto'; });
+    if(heroCard) heroCard.style.display = 'none';
     return;
   }
 
-  if(hero){
-    hero.style.gridTemplateColumns = '';
-    hero.style.textAlign = '';
-    hero.style.justifyItems = '';
+  // Restore hero layout for logged-in users
+  if(hero){ hero.style.gridTemplateColumns = ''; hero.style.textAlign = ''; hero.style.justifyItems = ''; }
+  if(heroCopy){ heroCopy.style.maxWidth = ''; heroCopy.style.marginInline = ''; }
+  if(heroActions) heroActions.style.justifyContent = '';
+  hero?.querySelectorAll('p').forEach(p => { p.style.marginInline = ''; });
+  if(heroCard){ heroCard.style.display = ''; heroCard.classList.remove('hidden'); }
+
+  const isOwner = state.user.role === 'owner';
+
+  if(!isOwner){
+    // Non-owner managed creator: redirect hero buttons to managed paths
+    const createBtn = heroActions?.querySelector('a[href="#/create"]');
+    const viewBtn = heroActions?.querySelector('a[href="#/khatmas"]');
+    if(createBtn) createBtn.href = '#/managed-create';
+    if(viewBtn) viewBtn.href = '#/managed-khatmas';
+    // Stats from managed khatmas
+    const data = state.managedKhatmas;
+    const total = data.length;
+    const completed = data.filter(k => managedProgress(k).pct === 100).length;
+    const open = data.filter(k => managedKhatmaStatus(k).key === 'active').length;
+    const avg = total ? Math.round(data.reduce((s,k)=>s+managedProgress(k).pct,0)/total) : 0;
+    document.getElementById('statKhatmas').textContent = total;
+    document.getElementById('statDone').textContent = completed;
+    document.getElementById('statOpen').textContent = open;
+    document.getElementById('homeProgress').textContent = avg + '%';
+    document.querySelector('.progress-ring')?.style.setProperty('--pct', avg + '%');
+    return;
   }
 
-  if(heroCopy){
-    heroCopy.style.maxWidth = '';
-    heroCopy.style.marginInline = '';
-  }
-
-  if(heroActions){
-    heroActions.style.justifyContent = '';
-  }
-
-  hero?.querySelectorAll('p').forEach(p => {
-    p.style.marginInline = '';
-  });
-
-  if(heroCard){
-    heroCard.style.display = '';
-    heroCard.classList.remove('hidden');
-  }
-
+  // Owner: stats from regular khatmas
   const total = state.khatmas.length;
   const completed = state.khatmas.filter(k => progress(k).pct === 100).length;
   const open = state.khatmas.filter(k => khatmaStatus(k).key === 'active').length;
   const avg = total ? Math.round(state.khatmas.reduce((s,k)=>s+progress(k).pct,0)/total) : 0;
-
   document.getElementById('statKhatmas').textContent = total;
   document.getElementById('statDone').textContent = completed;
   document.getElementById('statOpen').textContent = open;
@@ -984,12 +992,13 @@ function managedProgress(k){
   const active = (k.units || []).filter(u=>u.status==='assigned' || u.status==='reading').length;
   return {completed, active, pct: k.units?.length ? Math.round((completed / k.units.length) * 100) : 0};
 }
+function khatmaFallbackLabel(){ return state.user?.role === 'owner' ? 'ختمة مُدارة' : 'ختمة'; }
 function managedKhatmaStatus(k){
   const p = managedProgress(k);
   if(k.status === 'closed') return {key:'closed', label:'مغلقة بواسطة المنشئ', className:'closed'};
   if(p.pct === 100) return {key:'completed', label:'مكتملة', className:'done'};
   if(isExpired(k)) return {key:'expired', label:'انتهت مدة الختمة', className:'closed'};
-  return {key:'active', label:'الختمة المُدارة جارية', className:''};
+  return {key:'active', label: state.user?.role === 'owner' ? 'الختمة المُدارة جارية' : 'الختمة جارية', className:''};
 }
 function managedStatusLabel(status){
   return ({available:'غير معيّن', assigned:'مُعيّن للقارئ', reading:'جاري القراءة', completed:'تمت القراءة'}[status] || 'غير معيّن');
@@ -1316,6 +1325,11 @@ async function importManagedCsvIntoForm(file, form){
 async function setupManagedReaders(){
   const root = document.getElementById('managedReadersView');
   if(!canUseManagedKhatmas()){ root.innerHTML = `<article class="feature-card empty-state"><h3>غير مصرح</h3><p>هذه الصفحة للمالك أو منشئ الختمات المتحكم فقط.</p></article>`; return; }
+  // Patch page-head eyebrow for non-owners
+  if(state.user?.role !== 'owner'){
+    const eyebrow = document.querySelector('.page-head .eyebrow');
+    if(eyebrow && eyebrow.textContent.includes('مُدارة')) eyebrow.textContent = 'القراء';
+  }
 
   let groups = [];
   try{ const res = await api('/managed-reader-groups'); groups = res.groups || []; }catch(err){ toast(err.message || 'تعذر تحميل المجموعات'); }
@@ -2100,7 +2114,7 @@ async function setupManagedMonitor(){
       <div class="khatma-list-main v32" style="flex-wrap:wrap;gap:12px">
         <div class="khatma-list-content v32" style="flex:1">
           <div class="khatma-list-badges v32">
-            <span class="mini-pill v32">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : 'ختمة مُدارة')}</span>
+            <span class="mini-pill v32">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : khatmaFallbackLabel())}</span>
             <span class="mini-pill v32 status ${status.className}">${status.label}</span>
           </div>
           <div class="khatma-list-titleline v32"><h3>${escapeHtml(k.title)}</h3><p>${escapeHtml(k.hijriDate||'')}${k.gregorianDate?' - '+escapeHtml(k.gregorianDate):''}</p></div>
@@ -2514,17 +2528,28 @@ function setupManagedKhatmas(){
     list.innerHTML = `<article class="feature-card empty-state"><h3>غير مصرح</h3><p>هذه الصفحة للمالك أو منشئ الختمات المتحكم فقط.</p></article>`;
     return;
   }
+  const isOwner = state.user?.role === 'owner';
+  // Patch page-head eyebrow for non-owners
+  if(!isOwner){
+    const eyebrow = document.querySelector('.page-head .eyebrow');
+    if(eyebrow && eyebrow.textContent.includes('مُدارة')) eyebrow.textContent = 'الختمات';
+  }
   refreshManagedKhatmas().then(() => {
     if(!state.managedKhatmas.length){
       list.classList.remove('khatma-rows-list', 'khatma-rows-list-v3', 'khatma-rows-list-v32');
-      list.innerHTML = `<article class="feature-card empty-state"><h3>لا توجد ختمات مُدارة بعد</h3><p>ابدأ بإنشاء ختمة مُدارة وتعيين القراء على الأجزاء.</p><a class="btn primary" href="#/managed-create">إنشاء ختمة مُدارة</a></article>`;
+      const emptyTitle = isOwner ? 'لا توجد ختمات مُدارة بعد' : 'لا توجد ختمات بعد';
+      const emptyBody = isOwner ? 'ابدأ بإنشاء ختمة مُدارة وتعيين القراء على الأجزاء.' : 'ابدأ بإنشاء ختمة وتعيين القراء على الأجزاء.';
+      const emptyBtn = isOwner ? 'إنشاء ختمة مُدارة' : 'إنشاء ختمة';
+      list.innerHTML = `<article class="feature-card empty-state"><h3>${emptyTitle}</h3><p>${emptyBody}</p><a class="btn primary" href="#/managed-create">${emptyBtn}</a></article>`;
       return;
     }
     list.classList.add('khatma-rows-list', 'khatma-rows-list-v3', 'khatma-rows-list-v32');
+    const listTitle = isOwner ? 'قائمة الختمات المُدارة' : 'قائمة الختمات';
+    const createTitle = isOwner ? 'إنشاء ختمة مُدارة' : 'إنشاء ختمة';
     const toolbar = `<div class="khatma-list-toolbar v32 glass">
-      <div class="khatma-list-toolbar-title"><h3>قائمة الختمات المُدارة</h3><p>${state.managedKhatmas.length} ختمة محفوظة</p></div>
+      <div class="khatma-list-toolbar-title"><h3>${listTitle}</h3><p>${state.managedKhatmas.length} ختمة محفوظة</p></div>
       <div class="icon-action-group v32">
-        <a class="icon-action v32" href="#/managed-create" title="إنشاء ختمة مُدارة"><span aria-hidden="true">+</span><strong>إنشاء</strong></a>
+        <a class="icon-action v32" href="#/managed-create" title="${createTitle}"><span aria-hidden="true">+</span><strong>إنشاء</strong></a>
         <button class="icon-action v32" type="button" onclick="exportManagedKhatmasCsv()" title="تصدير ملف CSV"><span aria-hidden="true">⇩</span><strong>CSV / Excel</strong></button>
         <button class="icon-action v32" type="button" onclick="printManagedKhatmasList()" title="طباعة أو حفظ PDF"><span aria-hidden="true">⎙</span><strong>طباعة / PDF</strong></button>
       </div>
@@ -2539,7 +2564,7 @@ function managedKhatmaListRowHtml(k){
     <div class="khatma-list-main v32">
       <div class="khatma-list-content v32">
         <div class="khatma-list-badges v32">
-          <span class="mini-pill v32">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : 'ختمة مُدارة')}</span>
+          <span class="mini-pill v32">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : khatmaFallbackLabel())}</span>
           <span class="mini-pill v32 status ${status.className}">${status.label}</span>
           ${k.sharedCreatorGroupId ? `<span class="mini-pill v32" style="background:rgba(15,95,69,.13);color:var(--primary)">مشارك</span>` : ''}
         </div>
@@ -2561,6 +2586,14 @@ async function setupManagedCreate(){
     form.outerHTML = `<article class="feature-card empty-state"><h3>غير مصرح</h3><p>إنشاء الختمات المُدارة مخصص للمالك أو منشئ الختمات المتحكم.</p></article>`;
     return;
   }
+  const isOwner = state.user?.role === 'owner';
+  // Patch page-head eyebrow and submit button for non-owners
+  if(!isOwner){
+    const eyebrow = document.querySelector('.page-head .eyebrow');
+    if(eyebrow && eyebrow.textContent.includes('مُدارة')) eyebrow.textContent = 'ختمة';
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if(submitBtn && submitBtn.textContent.includes('مُدارة')) submitBtn.textContent = 'حفظ الختمة';
+  }
 
   // Register critical listeners BEFORE async operations
   document.getElementById('loadManagedKhatmaTemplate')?.addEventListener('click', ()=>openKhatmaTemplatesDialog(form));
@@ -2579,9 +2612,9 @@ async function setupManagedCreate(){
       const data = managedEditorPayload(form);
       const res = await api('/managed-khatmas', {method:'POST', body:data});
       state.managedKhatmas.unshift(res.khatma);
-      toast('تم حفظ الختمة المُدارة');
+      toast(isOwner ? 'تم حفظ الختمة المُدارة' : 'تم حفظ الختمة');
       location.hash = '#/managed-khatma/' + res.khatma.id + '/manage';
-    }catch(err){ toast(err.message || 'تعذر حفظ الختمة المُدارة'); }
+    }catch(err){ toast(err.message || (isOwner ? 'تعذر حفظ الختمة المُدارة' : 'تعذر حفظ الختمة')); }
   });
 
   // Auto-fill week number with next available
@@ -2696,7 +2729,7 @@ async function setupManagedKhatma(id, manageMode=false){
   }
   const k = state.managedKhatmas.find(x=>x.id===id);
   const view = document.getElementById('managedKhatmaView');
-  if(!k){ view.innerHTML = `<section class="page-head"><h1>الختمة المُدارة غير موجودة</h1><a class="btn primary" href="#/managed-khatmas">الرجوع</a></section>`; return; }
+  if(!k){ view.innerHTML = `<section class="page-head"><h1>${state.user?.role === 'owner' ? 'الختمة المُدارة غير موجودة' : 'الختمة غير موجودة'}</h1><a class="btn primary" href="#/managed-khatmas">الرجوع</a></section>`; return; }
   const isAdmin = includeAdmin && canManageManagedKhatma(k);
   const p = managedProgress(k); const status = managedKhatmaStatus(k); const message = buildManagedWhatsAppMessage(k);
   const manageBadge = manageMode ? '<span class="badge">صفحة إدارة</span>' : '';
@@ -2706,7 +2739,7 @@ async function setupManagedKhatma(id, manageMode=false){
   const isVerifiedPublic = !includeAdmin && !manageMode && Boolean(viewerName);
   if(!manageMode && !isVerifiedPublic){
     if(canManageManagedKhatma(k)){ location.hash = '#/managed-khatma/' + id + '/manage'; return; }
-    view.innerHTML = `<section class="page-head"><span class="eyebrow">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : 'ختمة مُدارة')}</span><h1>${escapeHtml(k.title)}</h1><p>${escapeHtml(k.hijriDate || '')} - ${escapeHtml(k.gregorianDate || '')}</p><div class="status-line"><span class="badge ${status.className}">${status.label}</span></div></section><section class="khatma-detail glass"><div class="countdown-card ${countdownClass(k)}" data-countdown-for="${k.id}">${countdownHtml(k)}</div><form id="managedVerifyForm" class="inline-panel action-sheet"><div class="sheet-head"><h3>التحقق من بيانات القارئ</h3><span>خصوصية الأجزاء</span></div><p>أدخل الكود أو رقم الجوال أو الاسم الكامل للاطلاع على أجزائك فقط.</p><label>الكود أو الجوال أو الاسم<input id="managedVerifyIdentity" autocomplete="off" placeholder="الكود أو 05XXXXXXXX أو الاسم" /></label><button class="btn primary wide" type="submit">عرض أجزائي</button></form></section>`;
+    view.innerHTML = `<section class="page-head"><span class="eyebrow">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : khatmaFallbackLabel())}</span><h1>${escapeHtml(k.title)}</h1><p>${escapeHtml(k.hijriDate || '')} - ${escapeHtml(k.gregorianDate || '')}</p><div class="status-line"><span class="badge ${status.className}">${status.label}</span></div></section><section class="khatma-detail glass"><div class="countdown-card ${countdownClass(k)}" data-countdown-for="${k.id}">${countdownHtml(k)}</div><form id="managedVerifyForm" class="inline-panel action-sheet"><div class="sheet-head"><h3>التحقق من بيانات القارئ</h3><span>خصوصية الأجزاء</span></div><p>أدخل الكود أو رقم الجوال أو الاسم الكامل للاطلاع على أجزائك فقط.</p><label>الكود أو الجوال أو الاسم<input id="managedVerifyIdentity" autocomplete="off" placeholder="الكود أو 05XXXXXXXX أو الاسم" /></label><button class="btn primary wide" type="submit">عرض أجزائي</button></form></section>`;
     document.getElementById('managedVerifyForm')?.addEventListener('submit', async event => {
       event.preventDefault();
       const input = document.getElementById('managedVerifyIdentity');
@@ -2725,7 +2758,7 @@ async function setupManagedKhatma(id, manageMode=false){
   const periodEndDisplay = rotStart ? formatPeriodEnd(rotStart, k.khatmaType) : '';
   const periodLabelDisplay = rotStart ? currentHijriPeriodLabel(rotStart, k.khatmaType) : '';
   const periodStatHtml = periodEndDisplay ? `<div><strong>${periodLabelDisplay || '—'}</strong><span>الدورة الحالية</span></div><div><strong>${periodEndDisplay}</strong><span>نهاية الدورة</span></div>` : '';
-  view.innerHTML = `<section class="page-head"><span class="eyebrow">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : 'ختمة مُدارة')}</span><h1>${escapeHtml(k.title)}</h1><p>${escapeHtml(k.hijriDate || '')} - ${escapeHtml(k.gregorianDate || '')}</p><div class="status-line"><span class="badge ${status.className}">${status.label}</span>${manageBadge}</div></section><section class="khatma-detail glass"><div class="mini-stats"><div><strong>${p.pct}%</strong><span>الإنجاز</span></div><div><strong>${p.completed}</strong><span>مكتمل</span></div><div><strong>${p.active}</strong><span>مُعيّن / جاري</span></div>${periodStatHtml}</div><div class="countdown-card ${countdownClass(k)}" data-countdown-for="${k.id}">${countdownHtml(k)}</div>${viewerBlock}${shareBlock}${toolsBlock}${adminBlock}</section><section class="unit-toolbar glass"><label>تصفية الأجزاء<select id="managedUnitStatusFilter"><option value="all">الكل</option><option value="available">غير معيّن</option><option value="assigned">مُعيّن</option><option value="reading">جاري القراءة</option><option value="completed">تمت القراءة</option></select></label><label>بحث<input id="managedUnitSearchInput" placeholder="ابحث في أجزائك" /></label></section><section class="units-grid">${filteredUnits.map(unit => managedUnitCardHtml(k, unit, isAdmin)).join('')}${emptyUnits}</section>`;
+  view.innerHTML = `<section class="page-head"><span class="eyebrow">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : khatmaFallbackLabel())}</span><h1>${escapeHtml(k.title)}</h1><p>${escapeHtml(k.hijriDate || '')} - ${escapeHtml(k.gregorianDate || '')}</p><div class="status-line"><span class="badge ${status.className}">${status.label}</span>${manageBadge}</div></section><section class="khatma-detail glass"><div class="mini-stats"><div><strong>${p.pct}%</strong><span>الإنجاز</span></div><div><strong>${p.completed}</strong><span>مكتمل</span></div><div><strong>${p.active}</strong><span>مُعيّن / جاري</span></div>${periodStatHtml}</div><div class="countdown-card ${countdownClass(k)}" data-countdown-for="${k.id}">${countdownHtml(k)}</div>${viewerBlock}${shareBlock}${toolsBlock}${adminBlock}</section><section class="unit-toolbar glass"><label>تصفية الأجزاء<select id="managedUnitStatusFilter"><option value="all">الكل</option><option value="available">غير معيّن</option><option value="assigned">مُعيّن</option><option value="reading">جاري القراءة</option><option value="completed">تمت القراءة</option></select></label><label>بحث<input id="managedUnitSearchInput" placeholder="ابحث في أجزائك" /></label></section><section class="units-grid">${filteredUnits.map(unit => managedUnitCardHtml(k, unit, isAdmin)).join('')}${emptyUnits}</section>`;
   document.getElementById('copyManagedMessage')?.addEventListener('click', ()=>copyText(message));
   document.getElementById('shareManagedWhatsApp')?.addEventListener('click', ()=> window.open('https://wa.me/?text=' + encodeURIComponent(message), '_blank'));
   const filterSelect = document.getElementById('managedUnitStatusFilter');
@@ -2972,7 +3005,7 @@ async function setupManagedKhatmasArchived(){
         <div class="khatma-list-main v32">
           <div class="khatma-list-content v32">
             <div class="khatma-list-badges v32">
-              <span class="mini-pill v32">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : 'ختمة مُدارة')}</span>
+              <span class="mini-pill v32">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : khatmaFallbackLabel())}</span>
               <span class="mini-pill v32 status" style="background:#888;color:#fff">مؤرشفة</span>
             </div>
             <div class="khatma-list-titleline v32"><h3>${escapeHtml(k.title)}</h3><p>${archivedDate ? 'أُرشفت: ' + archivedDate : ''}</p></div>

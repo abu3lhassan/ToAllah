@@ -1263,7 +1263,7 @@ input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--mute
 .invite-actions      { grid-template-columns: 1fr 1fr 1fr }
 
 /* Auth grid */
-.auth-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start }
+.auth-grid { display: grid; grid-template-columns: minmax(0, 520px); gap: 18px; align-items: start; justify-content: center }
 .auth-grid .form-card { margin-top: 0 }
 .owner-section-card   { margin-top: 24px }
 

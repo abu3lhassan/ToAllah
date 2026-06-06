@@ -2414,15 +2414,18 @@ export async function onRequest(context) {
       return managedUnitAction(request, env.DB, parts[1], parts[3], parts[4]);
     }
     if (parts.length === 1 && parts[0] === "khatmas") {
+      const chk = await requireOwner(request, env.DB); if (!chk.ok) return chk.response;
       if (method === "GET") return listKhatmas(request, env.DB);
       if (method === "POST") return createKhatma(request, env.DB);
     }
     if (parts.length === 2 && parts[0] === "khatmas" && method === "GET") {
+      const chk = await requireOwner(request, env.DB); if (!chk.ok) return chk.response;
       const khatma = await getKhatma(env.DB, parts[1]);
       if (!khatma) return json({ ok: false, error: "الختمة غير موجودة" }, 404);
       return json({ ok: true, khatma });
     }
     if (parts.length === 4 && parts[0] === "khatmas" && parts[2] === "admin") {
+      const chk = await requireOwner(request, env.DB); if (!chk.ok) return chk.response;
       if (method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
       if (parts[3] === "verify") return verifyAdmin(request, env.DB, parts[1]);
       if (parts[3] === "toggle-close") return toggleClose(request, env.DB, parts[1]);
@@ -2430,6 +2433,7 @@ export async function onRequest(context) {
       if (parts[3] === "delete") return softDelete(request, env.DB, parts[1]);
     }
     if (parts.length === 5 && parts[0] === "khatmas" && parts[2] === "units") {
+      const chk = await requireOwner(request, env.DB); if (!chk.ok) return chk.response;
       if (method !== "POST" && method !== "PATCH") return json({ ok: false, error: "Method not allowed" }, 405);
       return unitAction(request, env.DB, parts[1], parts[3], parts[4]);
     }
