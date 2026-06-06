@@ -57,8 +57,6 @@ function computeRotationPeriodEnd(rotationStartDate, rotationType) {
   return null;
 }
 function adminCode() { return String(Math.floor(10000000 + Math.random() * 90000000)); }
-function inviteCode() { return `ZAHRA-${crypto.randomUUID().replaceAll("-", "").slice(0, 6).toUpperCase()}`; }
-function normalizeInviteCode(value) { return String(value || "").trim().toUpperCase(); }
 
 async function sha256Hex(value) {
   const bytes = new TextEncoder().encode(String(value || ""));
@@ -216,49 +214,6 @@ async function requireOwner(request, DB) {
 }
 
 
-async function registerWithInvite(request, DB) {
-  const body = await readJson(request);
-  const username = String(body.username || "").trim();
-  const displayName = String(body.displayName || body.display_name || username).trim();
-  const password = String(body.password || "").trim();
-  const code = normalizeInviteCode(body.inviteCode || body.invite_code);
-
-  if (!displayName || !username || !password || !code) {
-    return json({ ok: false, error: "الاسم واسم المستخدم وكلمة المرور وكود الدعوة مطلوبة" }, 400);
-  }
-  if (password.length < 4) {
-    return json({ ok: false, error: "كلمة المرور قصيرة جدًا" }, 400);
-  }
-
-  const invite = await DB.prepare(`
-    SELECT * FROM invite_codes
-    WHERE code = ?
-      AND status = 'active'
-    LIMIT 1
-  `).bind(code).first();
-
-  if (!invite) return json({ ok: false, error: "كود الدعوة غير صحيح أو غير فعال" }, 403);
-  if (invite.max_uses !== null && invite.max_uses !== undefined && Number(invite.used_count || 0) >= Number(invite.max_uses)) {
-    return json({ ok: false, error: "تم استهلاك كود الدعوة" }, 403);
-  }
-
-  const existing = await DB.prepare("SELECT id FROM users WHERE username = ? LIMIT 1").bind(username).first();
-  if (existing) return json({ ok: false, error: "اسم المستخدم موجود مسبقًا" }, 409);
-
-  const id = newId("user");
-  const t = now();
-  await DB.batch([
-    DB.prepare(`
-      INSERT INTO users (id, username, display_name, password_hash, role, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'creator', 'active', ?, ?)
-    `).bind(id, username, displayName, await hashPassword(password, username), t, t),
-    DB.prepare("UPDATE invite_codes SET used_count = used_count + 1, updated_at = ? WHERE id = ?").bind(t, invite.id)
-  ]);
-
-  const user = await DB.prepare("SELECT * FROM users WHERE id = ? LIMIT 1").bind(id).first();
-  return json({ ok: true, user: await publicUserWithManagedPermission(DB, user) }, 201);
-}
-
 async function login(request, DB) {
   const body = await readJson(request);
   const username = String(body.username || "").trim();
@@ -399,77 +354,6 @@ async function setManagedUserPermission(request, DB, id) {
     `).bind(id, enabled ? "active" : "disabled", check.user.id, t, t).run();
   }
   return json({ ok: true, enabled });
-}
-
-
-
-async function ensureInviteSchema(DB) {
-  await DB.prepare(`
-    CREATE TABLE IF NOT EXISTS invite_codes (
-      id TEXT PRIMARY KEY,
-      code TEXT NOT NULL UNIQUE,
-      max_uses INTEGER,
-      used_count INTEGER NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'active',
-      created_by_user_id TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      disabled_at TEXT
-    )
-  `).run();
-  await DB.prepare("CREATE INDEX IF NOT EXISTS idx_invites_code ON invite_codes(code)").run();
-  await DB.prepare("CREATE INDEX IF NOT EXISTS idx_invites_status ON invite_codes(status)").run();
-}
-
-async function listInvites(request, DB) {
-  await ensureInviteSchema(DB);
-  const check = await requireOwner(request, DB);
-  if (!check.ok) return check.response;
-  const rows = await DB.prepare(`
-    SELECT id, code, max_uses, used_count, status, created_at, updated_at, disabled_at
-    FROM invite_codes
-    ORDER BY created_at DESC
-  `).all();
-  return json({ ok: true, invites: rows.results || [] });
-}
-
-async function createInvite(request, DB) {
-  await ensureInviteSchema(DB);
-  const check = await requireOwner(request, DB);
-  if (!check.ok) return check.response;
-  const body = await readJson(request);
-  const code = normalizeInviteCode(body.code) || inviteCode();
-  const maxUsesRaw = body.maxUses ?? body.max_uses;
-  const maxUses = maxUsesRaw === "" || maxUsesRaw === null || maxUsesRaw === undefined ? 1 : Math.max(1, Number(maxUsesRaw));
-  const existing = await DB.prepare("SELECT id FROM invite_codes WHERE code = ? LIMIT 1").bind(code).first();
-  if (existing) return json({ ok: false, error: "كود الدعوة موجود مسبقًا" }, 409);
-  const id = newId("invite");
-  const t = now();
-  await DB.prepare(`
-    INSERT INTO invite_codes (id, code, max_uses, used_count, status, created_by_user_id, created_at, updated_at, disabled_at)
-    VALUES (?, ?, ?, 0, 'active', ?, ?, ?, NULL)
-  `).bind(id, code, maxUses, check.user.id, t, t).run();
-  const invite = await DB.prepare("SELECT * FROM invite_codes WHERE id = ? LIMIT 1").bind(id).first();
-  return json({ ok: true, invite }, 201);
-}
-
-async function setInviteStatus(request, DB, id) {
-  await ensureInviteSchema(DB);
-  const check = await requireOwner(request, DB);
-  if (!check.ok) return check.response;
-  const body = await readJson(request);
-  const status = body.status === "disabled" ? "disabled" : "active";
-  await DB.prepare("UPDATE invite_codes SET status = ?, disabled_at = ?, updated_at = ? WHERE id = ?")
-    .bind(status, status === "disabled" ? now() : null, now(), id).run();
-  return json({ ok: true });
-}
-
-async function deleteInvite(request, DB, id) {
-  await ensureInviteSchema(DB);
-  const check = await requireOwner(request, DB);
-  if (!check.ok) return check.response;
-  await DB.prepare("DELETE FROM invite_codes WHERE id = ?").bind(id).run();
-  return json({ ok: true, deleted: true });
 }
 
 async function ensureManagedSchema(DB) {
@@ -2061,7 +1945,7 @@ async function systemBackup(request, DB) {
   await ensureCreatorGroupSchema(DB);
   const safeAll = async (stmt) => { try { return (await stmt.all()).results || []; } catch { return []; } };
   const [
-    users, inviteCodes,
+    users,
     khatmas, khatmaUnits,
     managedKhatmas, managedParticipants, managedUnits,
     readers, readerGroups,
@@ -2070,7 +1954,6 @@ async function systemBackup(request, DB) {
     khatmaTemplates
   ] = await Promise.all([
     safeAll(DB.prepare("SELECT id, username, display_name, role, status, created_at, updated_at FROM users WHERE status != 'deleted'")),
-    safeAll(DB.prepare("SELECT * FROM invite_codes")),
     safeAll(DB.prepare("SELECT * FROM khatmas WHERE deleted_at IS NULL")),
     safeAll(DB.prepare("SELECT * FROM khatma_units")),
     safeAll(DB.prepare("SELECT * FROM managed_khatmas WHERE deleted_at IS NULL")),
@@ -2093,7 +1976,7 @@ async function systemBackup(request, DB) {
       khatmaTemplates: khatmaTemplates.length
     },
     data: {
-      users, inviteCodes,
+      users,
       khatmas, khatmaUnits,
       managedKhatmas, managedParticipants, managedUnits,
       readers, readerGroups,
@@ -2170,7 +2053,6 @@ async function systemRestore(request, DB) {
     "DELETE FROM managed_reader_groups",
     "DELETE FROM khatma_units",
     "DELETE FROM khatmas",
-    "DELETE FROM invite_codes",
     "DELETE FROM khatma_templates",
     `DELETE FROM user_sessions WHERE token != '${currentToken.replace(/'/g,"''")}'`,
     `DELETE FROM users WHERE id != '${currentUserId.replace(/'/g,"''")}'`,
@@ -2186,7 +2068,6 @@ async function systemRestore(request, DB) {
   const usersToInsert = (data.users || []).filter(u => u.id !== currentUserId);
   const uCount = await safeInsert("users", usersToInsert, ["id","username","display_name","password_hash","role","status","created_at","updated_at"]);
 
-  const icCount  = await safeInsert("invite_codes",               data.inviteCodes || [],            ["id","code","max_uses","used_count","status","created_at","updated_at"]);
   const kCount   = await safeInsert("khatmas",                    data.khatmas || [],                ["id","title","week_number","khatma_type","khatma_date","hijri_date","gregorian_date","expires_at","division","selection_mode","owner_name","owner_key","coordinator_name","coordinator_whatsapp","created_by_user_id","dedication","quote_by","quote_text","quote_source","notes","status","deleted_at","created_at","updated_at"]);
   const kuCount  = await safeInsert("khatma_units",               data.khatmaUnits || [],            ["id","khatma_id","number","label","status","participant_name","phone","reading_at","completed_at","created_at","updated_at"]);
   const rgCount  = await safeInsert("managed_reader_groups",      data.readerGroups || [],           ["id","name","rotation_type","rotation_start_date","rotation_duration_years","status","created_by_user_id","created_at","updated_at"]);
@@ -2209,7 +2090,7 @@ async function systemRestore(request, DB) {
   return json({
     ok: true,
     message: "تمت الاستعادة بنجاح",
-    restored: { users: uCount, inviteCodes: icCount, khatmas: kCount, khatmaUnits: kuCount, managedKhatmas: mkCount, managedParticipants: mpCount, managedUnits: muCount, readers: rCount, readerGroups: rgCount, permissions: permCount, creatorGroups: cgCount, creatorGroupMembers: cgmCount, khatmaTemplates: tplCount }
+    restored: { users: uCount, khatmas: kCount, khatmaUnits: kuCount, managedKhatmas: mkCount, managedParticipants: mpCount, managedUnits: muCount, readers: rCount, readerGroups: rgCount, permissions: permCount, creatorGroups: cgCount, creatorGroupMembers: cgmCount, khatmaTemplates: tplCount }
   });
 }
 
@@ -2467,7 +2348,6 @@ export async function onRequest(context) {
       return json({ ok: true, db: true });
     }
     if (parts.length === 2 && parts[0] === "auth" && parts[1] === "login" && method === "POST") return login(request, env.DB);
-    if (parts.length === 2 && parts[0] === "auth" && parts[1] === "register" && method === "POST") return registerWithInvite(request, env.DB);
     if (parts.length === 2 && parts[0] === "auth" && parts[1] === "me" && method === "GET") return me(request, env.DB);
     if (parts.length === 2 && parts[0] === "auth" && parts[1] === "logout" && method === "POST") return logout(request, env.DB);
     if (parts.length === 1 && parts[0] === "users") {
@@ -2478,12 +2358,6 @@ export async function onRequest(context) {
     if (parts.length === 3 && parts[0] === "users" && parts[2] === "status" && method === "POST") return setUserStatus(request, env.DB, parts[1]);
     if (parts.length === 3 && parts[0] === "users" && parts[2] === "managed-permission" && method === "POST") return setManagedUserPermission(request, env.DB, parts[1]);
     if (parts.length === 2 && parts[0] === "users" && method === "DELETE") return deleteUser(request, env.DB, parts[1]);
-    if (parts.length === 1 && parts[0] === "invites") {
-      if (method === "GET") return listInvites(request, env.DB);
-      if (method === "POST") return createInvite(request, env.DB);
-    }
-    if (parts.length === 3 && parts[0] === "invites" && parts[2] === "status" && method === "POST") return setInviteStatus(request, env.DB, parts[1]);
-    if (parts.length === 2 && parts[0] === "invites" && method === "DELETE") return deleteInvite(request, env.DB, parts[1]);
     if (parts.length === 1 && parts[0] === "managed-creator-groups") {
       if (method === "GET") return listCreatorGroups(request, env.DB);
       if (method === "POST") return createCreatorGroup(request, env.DB);

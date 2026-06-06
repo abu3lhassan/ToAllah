@@ -2,7 +2,7 @@
 const APP_CONFIG = window.APP_CONFIG || {};
 const APP_NAME = APP_CONFIG.APP_NAME || 'إلى الله';
 const API_BASE = '/api';
-const state = { khatmas: [], managedKhatmas: [], managedReaders: [], activeUnitKey: '', activeManagedUnitKey: '', activeAdminKhatmaId: '', activeResetUserId: '', activeDeleteUserId: '', activeDeleteKhatmaId: '', activeUpdateKhatmaId: '', activeDeleteManagedKhatmaId: '', activeUpdateManagedKhatmaId: '', activeDuplicateManagedKhatmaId: '', activeUnitFilter: 'all', activeUnitSearch: '', activeManagedUnitFilter: 'all', activeManagedUnitSearch: '', loading: true, user: null, token: localStorage.getItem('auth_token') || '', currentManageMode: false, currentManagedManageMode: false, ownerCreateUserOpen: false, ownerCreateInviteOpen: false, activeReadersGroupId: '', editGroupId: '', currentReaderGroup: null, currentGroupReaders: [] };
+const state = { khatmas: [], managedKhatmas: [], managedReaders: [], activeUnitKey: '', activeManagedUnitKey: '', activeAdminKhatmaId: '', activeResetUserId: '', activeDeleteUserId: '', activeDeleteKhatmaId: '', activeUpdateKhatmaId: '', activeDeleteManagedKhatmaId: '', activeUpdateManagedKhatmaId: '', activeDuplicateManagedKhatmaId: '', activeUnitFilter: 'all', activeUnitSearch: '', activeManagedUnitFilter: 'all', activeManagedUnitSearch: '', loading: true, user: null, token: localStorage.getItem('auth_token') || '', currentManageMode: false, currentManagedManageMode: false, ownerCreateUserOpen: false, activeReadersGroupId: '', editGroupId: '', currentReaderGroup: null, currentGroupReaders: [] };
 
 const app = document.getElementById('app');
 const themeToggle = document.getElementById('themeToggle');
@@ -382,18 +382,8 @@ async function setupOwner(){
     createUserForm.addEventListener('submit', createUserFromOwnerPanel);
   }
 
-  const createInviteForm = document.getElementById('createInviteForm');
-  if(createInviteForm){
-    createInviteForm.hidden = !state.ownerCreateInviteOpen;
-    const inviteSection = createInviteForm.closest('.owner-section-card');
-    inviteSection?.classList.add('compact-owner-section');
-    const head = inviteSection?.querySelector('.sheet-head');
-    head?.insertAdjacentHTML('beforeend', `<button class="btn primary compact-btn" id="toggleCreateInvite" type="button">${state.ownerCreateInviteOpen ? 'إخفاء النموذج' : '+ إنشاء كود دعوة'}</button>`);
-    document.getElementById('toggleCreateInvite')?.addEventListener('click', ()=>{ state.ownerCreateInviteOpen = !state.ownerCreateInviteOpen; router(); });
-    createInviteForm.addEventListener('submit', createInviteFromOwnerPanel);
-  }
 
-  await Promise.all([renderUsers(), renderInvites(), renderCreatorGroups()]);
+  await Promise.all([renderUsers(), renderCreatorGroups()]);
 
   // Backup & Restore section
   const ownerRoot = document.getElementById('ownerView');
@@ -427,7 +417,6 @@ async function setupOwner(){
         const ts = new Date().toISOString().slice(0,10);
         const files = [
           [`users-${ts}.csv`, rowsToCsv(d.users||[])],
-          [`invite-codes-${ts}.csv`, rowsToCsv(d.inviteCodes||[])],
           [`khatmas-${ts}.csv`, rowsToCsv((d.khatmas||[]).map(k=>({id:k.id,title:k.title,status:k.status,created_at:k.created_at})))],
           [`managed-khatmas-${ts}.csv`, rowsToCsv((d.managedKhatmas||[]).map(k=>({id:k.id,title:k.title,khatma_type:k.khatma_type,archived_at:k.archived_at||'',status:k.status,created_at:k.created_at})))],
           [`readers-${ts}.csv`, rowsToCsv(d.readers||[])],
@@ -579,59 +568,8 @@ window.deleteCreatorGroup = async function(id){
   catch(err){ toast(err.message||'تعذر الحذف'); }
 };
 
-async function renderInvites(){
-  const list = document.getElementById('invitesList');
-  if(!list) return;
-  list.innerHTML = `<article class="feature-card empty-state"><h3>جاري تحميل أكواد الدعوة...</h3></article>`;
-  try{
-    const res = await api('/invites');
-    const invites = res.invites || [];
-    list.innerHTML = invites.length
-      ? invites.map(inviteCardHtml).join('')
-      : `<article class="feature-card empty-state"><h3>لا توجد أكواد دعوة</h3><p>أنشئ كودًا وأرسله لمن تريد أن يستطيع إنشاء حساب.</p></article>`;
-  }catch(err){ list.innerHTML = `<article class="feature-card empty-state"><h3>تعذر تحميل أكواد الدعوة</h3><p>${escapeHtml(err.message || '')}</p></article>`; }
-}
-function inviteCardHtml(i){
-  const active = i.status === 'active';
-  const max = i.max_uses ?? i.maxUses ?? 1;
-  const used = i.used_count ?? i.usedCount ?? 0;
-  return `<article class="owner-row invite-row" data-invite-id="${escapeHtml(i.id)}">
-    <div class="owner-row-main">
-      <strong class="owner-row-title">${escapeHtml(i.code)}</strong>
-      <span class="owner-row-meta">${active ? 'فعال' : 'معطل'} · الاستخدام ${escapeHtml(used)} من ${escapeHtml(max)}</span>
-    </div>
-    <div class="owner-row-actions">
-      <button class="btn ghost compact-btn" onclick="copyText('${escapeJs(i.code)}')">نسخ</button>
-      <button class="btn ghost compact-btn" onclick="toggleInviteStatus('${escapeJs(i.id)}','${active ? 'disabled' : 'active'}')">${active ? 'تعطيل' : 'تفعيل'}</button>
-      <button class="btn ghost danger-btn compact-btn" onclick="deleteInvite('${escapeJs(i.id)}')">حذف</button>
-    </div>
-  </article>`;
-}
-async function createInviteFromOwnerPanel(e){
-  e.preventDefault();
-  const form = e.currentTarget;
-  const data = Object.fromEntries(new FormData(form).entries());
-  const submit = form.querySelector('button[type="submit"]');
-  if(submit){ submit.disabled = true; submit.textContent = 'جاري الإنشاء...'; }
-  try{
-    const res = await api('/invites', {method:'POST', body:data});
-    form.reset();
-    const max = form.querySelector('input[name="maxUses"]'); if(max) max.value = 1;
-    toast('تم إنشاء كود الدعوة');
-    const list = document.getElementById('invitesList');
-    if(list && res.invite){ list.insertAdjacentHTML('afterbegin', inviteCardHtml(res.invite)); }
-    await renderInvites();
-  }catch(err){ toast(err.message || 'تعذر إنشاء كود الدعوة'); }
-  finally{ if(submit){ submit.disabled = false; submit.textContent = 'إنشاء كود دعوة'; } }
-}
-window.toggleInviteStatus = async function(id, status){
-  try{ await api('/invites/' + encodeURIComponent(id) + '/status', {method:'POST', body:{status}}); toast(status === 'active' ? 'تم تفعيل الكود' : 'تم تعطيل الكود'); await renderInvites(); }
-  catch(err){ toast(err.message || 'تعذر تحديث كود الدعوة'); }
-}
-window.deleteInvite = async function(id){
-  try{ await api('/invites/' + encodeURIComponent(id), {method:'DELETE'}); toast('تم حذف كود الدعوة'); await renderInvites(); }
-  catch(err){ toast(err.message || 'تعذر حذف كود الدعوة'); }
-}
+
+
 
 async function renderUsers(){
   const list = document.getElementById('usersList');

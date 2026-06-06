@@ -139,7 +139,7 @@ input,select,textarea{border-color:var(--premium-border);background:rgba(255,255
 .form-actions-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:18px}.form-actions-row .btn{width:100%}.create-preview{margin-top:16px}.unit-toolbar{border-radius:24px;padding:16px;margin:24px 0 8px;display:grid;grid-template-columns:260px 1fr;gap:14px;align-items:end}.unit-toolbar label{margin:0}.unit-toolbar input,.unit-toolbar select{height:48px}.tidy-admin-actions,.user-card-actions,.compact-actions,.unit-actions{gap:10px}.btn{position:relative;overflow:hidden}.btn:active{transform:translateY(0) scale(.99)}.btn.danger-btn{background:linear-gradient(135deg,#b94b4b,#7d2f2f)!important;color:#fff!important;border-color:rgba(185,75,75,.45)!important}.admin-danger-card input{border-color:rgba(185,75,75,.35)}.unit-toolbar.glass{box-shadow:var(--shadow-soft)}[data-theme="dark"] .unit-toolbar input,[data-theme="dark"] .unit-toolbar select{background:#102a22;color:var(--text)}@media(max-width:720px){.form-actions-row,.unit-toolbar{grid-template-columns:1fr}.unit-toolbar{padding:14px}}
 
 
-/* v5.9 header/menu fix + invite API compatible release */
+/* v5.9 header/menu compatibility release */
 .topbar{
   display:grid!important;
   grid-template-columns:auto minmax(360px,1fr) auto auto;
@@ -639,12 +639,10 @@ input,select,textarea{border-color:var(--premium-border);background:rgba(255,255
 }
 .owner-toolbar h3{margin:0 0 4px;font-size:20px}
 .owner-toolbar p{margin:0;color:var(--muted);font-weight:800;line-height:1.7}
-.collapsible-owner-form[hidden],
-#createInviteForm[hidden]{display:none!important}
+.collapsible-owner-form[hidden]{display:none!important}
 .collapsible-owner-form{margin-top:14px!important}
 .compact-owner-section .sheet-head{align-items:center;gap:14px}
 .compact-owner-section .sheet-head .compact-btn{margin-inline-start:auto;white-space:nowrap}
-.invite-list-head{margin-top:16px}
 .owner-row{
   grid-column:1/-1;
   display:grid;
@@ -662,8 +660,7 @@ input,select,textarea{border-color:var(--premium-border);background:rgba(255,255
 .owner-row-meta{color:var(--muted);font-weight:800;line-height:1.6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .owner-row-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 .owner-row .inline-panel{grid-column:1/-1;margin-top:4px}
-#usersList.cards-grid,
-#invitesList.cards-grid{grid-template-columns:1fr!important;gap:12px!important}
+#usersList.cards-grid{grid-template-columns:1fr!important;gap:12px!important}
 .compact-khatma-admin{padding:18px!important}
 .khatma-admin-actions{
   display:flex!important;
@@ -988,35 +985,24 @@ body.nav-open .topbar .menu-toggle span:nth-child(1){transform:none!important;wi
     <section id="khatmaView"></section>
   </template>
 
+<template id="loginTemplate">
+  <section class="page-head">
+    <span class="eyebrow">تسجيل الدخول</span>
+    <h1>دخول منشئي الختمات</h1>
+    <p>تسجيل الدخول لمنشئي الختمات والمشرفين فقط. هذه الصفحة مخصصة للدخول ولا تعرض نموذج إنشاء حساب.</p>
+  </section>
 
-
-  <template id="loginTemplate">
-    <section class="page-head">
-      <span class="eyebrow">تسجيل الدخول</span>
-      <h1>دخول منشئي الختمات</h1>
-      <p>تسجيل الدخول أو إنشاء حساب جديد باستخدام كود دعوة من المالك.</p>
-    </section>
-    <section class="auth-grid">
-      <form id="loginForm" class="form-card glass">
-        <h3>تسجيل الدخول</h3>
-        <div class="form-grid">
-          <label>اسم المستخدم<input name="username" required autocomplete="username" placeholder="ادخل اسم المستخدم" /></label>
-          <label>كلمة المرور<input name="password" type="password" required autocomplete="current-password" placeholder="ادخل كلمة المرور" /></label>
-        </div>
-        <button class="btn primary wide" type="submit">دخول</button>
-      </form>
-      <form id="registerForm" class="form-card glass">
-        <h3>إنشاء حساب بكود دعوة</h3>
-        <div class="form-grid">
-          <label>الاسم الظاهر<input name="displayName" required placeholder="اسمك الظاهر" /></label>
-          <label>اسم المستخدم<input name="username" required autocomplete="username" placeholder="اختر اسم مستخدم" /></label>
-          <label>كلمة المرور<input name="password" type="password" required autocomplete="new-password" placeholder="اختر كلمة مرور" /></label>
-          <label>كود الدعوة<input name="inviteCode" required autocomplete="off" placeholder="أدخل كود الدعوة" /></label>
-        </div>
-        <button class="btn ghost wide" type="submit">إنشاء الحساب</button>
-      </form>
-    </section>
-  </template>
+  <section class="auth-grid">
+    <form id="loginForm" class="form-card glass">
+      <h3>تسجيل الدخول</h3>
+      <div class="form-grid">
+        <label>اسم المستخدم<input name="username" required autocomplete="username" placeholder="ادخل اسم المستخدم" /></label>
+        <label>كلمة المرور<input name="password" type="password" required autocomplete="current-password" placeholder="ادخل كلمة المرور" /></label>
+      </div>
+      <button class="btn primary wide" type="submit">دخول</button>
+    </form>
+  </section>
+</template>
 
   <template id="ownerTemplate">
     <section class="page-head">
@@ -1035,21 +1021,6 @@ body.nav-open .topbar .menu-toggle span:nth-child(1){transform:none!important;wi
         </div>
         <button class="btn primary wide" type="submit">إنشاء المستخدم</button>
       </form>
-      <section class="form-card glass owner-section-card">
-        <div class="sheet-head"><h3>أكواد الدعوة</h3><span>تسجيل خاص</span></div>
-        <form id="createInviteForm" class="invite-form-grid">
-          <label>كود الدعوة اختياري<input name="code" placeholder="اتركه فارغًا لتوليد كود تلقائي" /></label>
-          <label>عدد الاستخدامات<input name="maxUses" type="number" min="1" value="1" /></label>
-          <button class="btn primary" type="submit">إنشاء كود دعوة</button>
-        </form>
-        <div class="owner-subhead invite-list-head">
-          <div>
-            <h3>الأكواد المنشأة</h3>
-            <p>هنا تظهر أكواد الدعوة التي أنشأتها، مع التحكم في النسخ والتفعيل والحذف.</p>
-          </div>
-        </div>
-        <div id="invitesList" class="cards-grid invites-grid invite-list-grid"></div>
-      </section>
 <div id="usersList" class="cards-grid" style="margin-top:22px"></div>
 <div id="creatorGroupsSection" style="margin-top:22px"></div>
 </section>
