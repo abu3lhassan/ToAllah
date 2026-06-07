@@ -317,6 +317,7 @@ async function router(){
   if(hash.startsWith('#/managed-create')) return renderTemplate('managedCreateTemplate', setupManagedCreate);
   if(hash.startsWith('#/managed-monitor')) return renderTemplate('managedMonitorTemplate', setupManagedMonitor);
   if(hash.startsWith('#/reader-login')) return renderTemplate('readerLoginTemplate', setupReaderLogin);
+  if(hash.startsWith('#/reader-khatma/')) return renderTemplate('readerKhatmaTemplate', () => { const parts = hash.split('/'); setupReaderKhatma(parts[2]); });
   if(hash.startsWith('#/reader-group/')) return renderTemplate('readerGroupTemplate', () => { const parts = hash.split('/'); setupReaderGroup(parts[2]); });
   if(hash.startsWith('#/managed-khatma/')) return renderTemplate('managedKhatmaTemplate', () => { const parts = hash.split('/'); setupManagedKhatma(parts[2], parts[3] === 'manage'); });
   if(hash.startsWith('#/managed-khatmas/archived')) return renderTemplate('managedKhatmasArchivedTemplate', setupManagedKhatmasArchived);
@@ -1301,10 +1302,11 @@ function csvRowsToManagedData(rows){
     const rawCode = String(row.accessCode || row.code || row['الكود'] || '').replace(/\D/g,'').slice(0,10);
     const accessCode = (rawCode.length >= 4 && rawCode.length <= 10) ? rawCode : managedRandomCode();
     const notes = row.notes || row['ملاحظات'] || '';
+    const country = String(row.country || row['الدولة'] || '').trim();
     const startJuz = Number(row.start_juz || row.startJuz || row['بداية الجزء'] || 0) || null;
     const partsCount = Number(row.parts_count || row.partsCount || row['عدد الأجزاء'] || 0) || null;
     if(!name && !phone && !accessCode) return;
-    const reader = {name, phone, accessCode, notes, startJuz, partsCount};
+    const reader = {name, phone, accessCode, notes, country, startJuz, partsCount};
     participants.push(reader);
     const explicitUnits = unitNumberList(row.unitNumbers || row.units || row['الأجزاء'] || '');
     const generatedUnits = explicitUnits.length ? explicitUnits : juzSequence(startJuz, partsCount);
@@ -1408,6 +1410,21 @@ async function setupManagedReaders(){
           <label>اسم القارئ<input name="name" required /></label>
           <label>رقم الجوال<input name="phone" inputmode="tel" placeholder="05XXXXXXXX" /></label>
           <label>الكود (4-10 أرقام)<input name="accessCode" inputmode="numeric" maxlength="10" value="${managedRandomCode()}" /></label>
+          <label>الدولة<select name="country">
+            <option value="">— اختياري —</option>
+            <option value="السعودية">السعودية</option>
+            <option value="البحرين">البحرين</option>
+            <option value="الكويت">الكويت</option>
+            <option value="عُمان">عُمان</option>
+            <option value="اليمن">اليمن</option>
+            <option value="العراق">العراق</option>
+            <option value="إيران">إيران</option>
+            <option value="قطر">قطر</option>
+            <option value="الإمارات">الإمارات</option>
+            <option value="الأردن">الأردن</option>
+            <option value="أخرى">أخرى</option>
+          </select></label>
+          <label id="serialCodeFieldLabel" style="display:none">الرقم التسلسلي<input name="serialCode" readonly placeholder="يُولَّد تلقائيًا" style="opacity:0.65;cursor:default" /></label>
           <label>المجموعة<select name="groupId"><option value="">بلا مجموعة</option>${groupOptionsHtml}</select></label>
           <label>بداية الجزء<input name="startJuz" type="number" min="1" max="30" placeholder="مثال: 4" /></label>
           <label>عدد الأجزاء / دورة<input name="partsCount" type="number" min="1" max="30" placeholder="مثال: 4" /></label>
@@ -1441,6 +1458,7 @@ async function setupManagedReaders(){
     const form = e.currentTarget;
     const data = Object.fromEntries(new FormData(form).entries());
     data.phone = normalizeLocalPhone(data.phone || '');
+    delete data.serialCode; // auto-generated, never user-supplied
     if(form.dataset.readerId) data.id = form.dataset.readerId;
     try{
       await api('/managed-readers', {method:'POST', body:{readers:[data], groupId: data.groupId || ''}});
@@ -1483,10 +1501,10 @@ function readerRowHtml(r, groupId){
     ? `window.openEditReaderInGroup('${escapeJs(r.id)}')`
     : `fillManagedReader('${escapeJs(r.id)}')`;
   // Store data on row for group-context edit
-  const rData = escapeHtml(JSON.stringify({name:r.name||'',phone:r.phone||'',accessCode:r.accessCode||'',startJuz:r.startJuz||'',partsCount:r.partsCount||'',notes:r.notes||''}));
+  const rData = escapeHtml(JSON.stringify({name:r.name||'',phone:r.phone||'',accessCode:r.accessCode||'',country:r.country||'',serialCode:r.serialCode||'',startJuz:r.startJuz||'',partsCount:r.partsCount||'',notes:r.notes||''}));
   const sharedBadge = r.sharedCreatorGroupId ? `<span class="mini-pill v32" style="background:rgba(15,95,69,.13);color:var(--primary);font-size:11px;margin-right:4px">مشارك</span>` : '';
   const shareBtn = state.user?.role === 'owner' ? `<button class="btn ghost compact-btn" onclick="window.openShareReader('${escapeJs(r.id)}')">مشاركة</button>` : '';
-  return `<div class="owner-row" data-reader-row-id="${escapeHtml(r.id)}" data-reader-data='${rData}'><div class="owner-row-main"><strong class="owner-row-title">${escapeHtml(r.name)}${sharedBadge}</strong><span class="owner-row-meta">${escapeHtml(normalizeLocalPhone(r.phone||'')||'بلا جوال')} · كود: ${escapeHtml(r.accessCode)}${r.startJuz ? ' · ج' + r.startJuz + '×' + r.partsCount : ''}${r.ownerName ? ' · ' + escapeHtml(r.ownerName) : ''}</span></div><div class="owner-row-actions"><button class="btn ghost compact-btn" onclick="${editCall}">تعديل</button>${shareBtn}<button class="btn ghost danger-btn compact-btn" onclick="deleteManagedReader('${escapeJs(r.id)}')">حذف</button></div></div>`;
+  return `<div class="owner-row" data-reader-row-id="${escapeHtml(r.id)}" data-reader-data='${rData}'><div class="owner-row-main"><strong class="owner-row-title">${escapeHtml(r.name)}${sharedBadge}</strong><span class="owner-row-meta">${r.serialCode ? escapeHtml(r.serialCode) + ' · ' : ''}${escapeHtml(normalizeLocalPhone(r.phone||'')||'بلا جوال')} · كود: ${escapeHtml(r.accessCode)}${r.country ? ' · ' + escapeHtml(r.country) : ''}${r.startJuz ? ' · ج' + r.startJuz + '×' + r.partsCount : ''}${r.ownerName ? ' · ' + escapeHtml(r.ownerName) : ''}</span></div><div class="owner-row-actions"><button class="btn ghost compact-btn" onclick="${editCall}">تعديل</button>${shareBtn}<button class="btn ghost danger-btn compact-btn" onclick="deleteManagedReader('${escapeJs(r.id)}')">حذف</button></div></div>`;
 }
 window.openEditReaderInGroup = function(readerId){
   // Find reader data from DOM row
@@ -1498,10 +1516,13 @@ window.openEditReaderInGroup = function(readerId){
   panel.hidden = false;
   const form = document.getElementById('addReaderGroupForm'); if(!form) return;
   form.dataset.readerId = readerId;
-  ['name','phone','accessCode','startJuz','partsCount','notes'].forEach(f => {
+  ['name','phone','accessCode','country','startJuz','partsCount','notes'].forEach(f => {
     const el = form.querySelector(`[name="${f}"]`);
     if(el) el.value = f === 'phone' ? normalizeLocalPhone(r[f]||'') : (r[f]||'');
   });
+  // Show serial code as read-only if available
+  const scInput2 = form.querySelector('[name="serialCode"]');
+  if(scInput2){ scInput2.value = r.serialCode || ''; const scLbl = scInput2.closest('label'); if(scLbl) scLbl.style.display = r.serialCode ? '' : 'none'; }
   panel.scrollIntoView({behavior:'smooth',block:'center'});
 };
 window.openShareReader = async function(readerId){
@@ -1548,6 +1569,7 @@ window.openAddReaderToGroup = function(groupId){
   form.dataset.readerId = '';
   form.reset();
   form.querySelector('[name="accessCode"]').value = managedRandomCode();
+  const scLabel = document.getElementById('serialCodeFieldLabel'); if(scLabel) scLabel.style.display = 'none';
   if(groupId){ const sel = form.querySelector('[name="groupId"]'); if(sel) sel.value = groupId; }
   document.getElementById('addReaderPanelTitle').textContent = 'إضافة قارئ';
   panel.scrollIntoView({behavior:'smooth', block:'center'});
@@ -1582,17 +1604,23 @@ function rotationDurationOptions(selected=5){
   return Array.from({length:15},(_,i)=>i+1).map(y=>`<option value="${y}" ${Number(selected)===y?'selected':''}>${y} ${y===1?'سنة':'سنوات'}</option>`).join('');
 }
 function managedTemplateCsvExtended(){
-  return '﻿' + ['name,phone,accessCode,start_juz,parts_count,unitNumbers,notes',
-    ['اسم قارئ تجريبي','05XXXXXXXX',managedRandomCode(),'1','1','','ملاحظة اختيارية'].map(csvEscape).join(',')].join('\n');
+  return '﻿' + ['name,phone,accessCode,country,start_juz,parts_count,unitNumbers,notes',
+    ['اسم قارئ تجريبي','05XXXXXXXX',managedRandomCode(),'السعودية','1','1','','ملاحظة اختيارية'].map(csvEscape).join(',')].join('\n');
 }
 window.fillManagedReader = function(id){
   const r = state.managedReaders.find(x=>x.id===id); if(!r) return;
+  const panel = document.getElementById('addReaderPanel'); if(panel) panel.style.display = '';
   const form = document.getElementById('managedReaderForm'); if(!form) return;
   form.dataset.readerId = r.id;
   form.querySelector('[name="name"]').value = r.name || '';
   form.querySelector('[name="phone"]').value = normalizeLocalPhone(r.phone || '');
   form.querySelector('[name="accessCode"]').value = r.accessCode || '';
   form.querySelector('[name="notes"]').value = r.notes || '';
+  const cSel = form.querySelector('[name="country"]'); if(cSel) cSel.value = r.country || '';
+  const scInput = form.querySelector('[name="serialCode"]'); if(scInput) scInput.value = r.serialCode || '';
+  const scLabel = document.getElementById('serialCodeFieldLabel');
+  if(scLabel) scLabel.style.display = r.serialCode ? '' : 'none';
+  document.getElementById('addReaderPanelTitle').textContent = 'تعديل قارئ';
   const gSel = form.querySelector('[name="groupId"]'); if(gSel) gSel.value = r.groupId || '';
   const sj = form.querySelector('[name="startJuz"]'); if(sj) sj.value = r.startJuz || '';
   const pc = form.querySelector('[name="partsCount"]'); if(pc) pc.value = r.partsCount || '';
@@ -1651,14 +1679,16 @@ async function setupReaderLogin(){
       const totalDone = allUnits.filter(u=>u.status==='completed').length;
       const totalAssigned = allUnits.filter(u=>u.status!=='available').length;
       const totalPct = totalAssigned ? Math.round(totalDone/totalAssigned*100) : 0;
-      const readerName = khatmas[0]?.participants?.find(p=>p.name)?.name || '';
+      const profile = res.readerProfile || null;
+      const readerName = profile?.name || khatmas[0]?.participants?.find(p=>p.name)?.name || '';
 
-      // ── Welcome header (name and greeting separated) ──────────────
+      // ── Welcome header ─────────────────────────────────────────────
       const welcomeHtml = readerName ? `
-        <div class="inline-panel action-sheet" style="margin-bottom:14px;padding:12px 16px;display:flex;justify-content:space-between;align-items:center">
+        <div class="inline-panel action-sheet" style="margin-bottom:14px;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
           <div>
             <span style="color:var(--muted);font-size:12px;display:block;margin-bottom:2px">مرحبًا بك</span>
             <strong style="font-size:16px">${escapeHtml(readerName)}</strong>
+            ${(profile?.serialCode || profile?.country) ? `<span style="color:var(--muted);font-size:12px;margin-top:3px;display:block">${[profile.serialCode, profile.country].filter(Boolean).map(escapeHtml).join(' · ')}</span>` : ''}
           </div>
           <button class="btn ghost compact-btn" id="readerLogoutBtn">تسجيل الخروج</button>
         </div>` : '';
@@ -1768,26 +1798,15 @@ async function setupReaderLogin(){
           </article>`;
       }
 
-      // ── Single khatma: show units directly ────────────────────────
+      // ── Single khatma: go directly to dedicated page ──────────────
       if(khatmas.length === 1){
-        result.innerHTML = welcomeHtml + renderKhatmaUnits(khatmas[0]) + statsHtml;
-        bindLogout();
-        bindCompleteActions();
+        location.hash = '#/reader-khatma/' + khatmas[0].id;
         return;
       }
 
-      // ── Multiple khatmas: list → detail flow ──────────────────────
-      function renderKhatmaDetail(k){
-        const backBtn = `<button class="btn ghost compact-btn" id="readerBackBtn" style="margin-bottom:14px">← العودة للقائمة</button>`;
-        result.innerHTML = welcomeHtml + backBtn + renderKhatmaUnits(k) + statsHtml;
-        bindLogout();
-        document.getElementById('readerBackBtn')?.addEventListener('click', renderKhatmaList);
-        bindCompleteActions();
-      }
-
+      // ── Multiple khatmas: list with links to dedicated pages ───────
       function renderKhatmaList(){
-        const listHtml = khatmas.map((k, idx) => {
-          const rotationStart = k.rotationStartDate || k.khatmaDate || k.createdAt || '';
+        const listHtml = khatmas.map(k => {
           const status = managedKhatmaStatus(k);
           const units = k.units || [];
           const done  = units.filter(u=>u.status==='completed').length;
@@ -1802,16 +1821,13 @@ async function setupReaderLogin(){
                 </div>
                 <div style="display:flex;align-items:center;gap:8px">
                   <span class="badge ${allDone ? 'done' : status.className}">${allDone ? '✓ مكتمل' : status.label}</span>
-                  <button class="btn ghost compact-btn" data-open-idx="${idx}">عرض أجزائي →</button>
+                  <a class="btn ghost compact-btn" href="#/reader-khatma/${escapeHtml(k.id)}">عرض أجزائي →</a>
                 </div>
               </div>
             </article>`;
         }).join('');
         result.innerHTML = welcomeHtml + listHtml + statsHtml;
         bindLogout();
-        result.querySelectorAll('[data-open-idx]').forEach(openBtn => {
-          openBtn.addEventListener('click', () => renderKhatmaDetail(khatmas[Number(openBtn.dataset.openIdx)]));
-        });
       }
 
       renderKhatmaList();
@@ -1836,6 +1852,99 @@ window.openReaderKhatma = function(khatmaId, identity){
   sessionStorage.setItem('managed_identity_' + khatmaId, identity);
   location.hash = '#/managed-khatma/' + khatmaId;
 };
+
+async function setupReaderKhatma(khatmaId){
+  const view = document.getElementById('readerKhatmaView');
+  const identity = localStorage.getItem('reader_portal_identity') || '';
+  if(!identity){ location.hash = '#/reader-login'; return; }
+  if(!khatmaId){ view.innerHTML = `<article class="feature-card empty-state"><h3>معرف الختمة غير صحيح</h3><a class="btn primary" href="#/reader-login">← ختماتي</a></article>`; return; }
+
+  view.innerHTML = `<article class="feature-card empty-state"><h3>جاري التحميل...</h3></article>`;
+  try{
+    const res = await api('/reader-portal', {method:'POST', body:{identity}});
+    const khatmas = res.khatmas || [];
+    const profile = res.readerProfile || null;
+    const khatma = khatmas.find(k => k.id === khatmaId);
+    if(!khatma){
+      view.innerHTML = `
+        <section class="page-head"><span class="eyebrow">بوابة القراء</span><h1>الختمة غير موجودة</h1></section>
+        <article class="feature-card empty-state">
+          <h3>لم يتم العثور على هذه الختمة ضمن ختماتك</h3>
+          <a class="btn primary" href="#/reader-login">← ختماتي</a>
+        </article>`;
+      return;
+    }
+    const readerName = profile?.name || khatma.participants?.find(p=>p.name)?.name || '';
+    const rotationStart = khatma.rotationStartDate || khatma.khatmaDate || khatma.createdAt || '';
+    const khatmaStartRef = khatma.khatmaDate || khatma.rotationStartDate || khatma.createdAt || '';
+    const started = khatmaHasStarted(khatmaStartRef);
+
+    let unitsHtml;
+    if(!started){
+      const startDate = new Date(khatmaStartRef);
+      const startDateStr = startDate.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn',{day:'numeric',month:'long',year:'numeric'}).replace('،','').trim();
+      const daysUntil = Math.ceil((startDate - Date.now()) / 86400000);
+      unitsHtml = `
+        <div class="inline-panel action-sheet" style="text-align:center;padding:24px 16px">
+          <p style="margin:0 0 6px;font-size:16px;font-weight:700">الختمة لم تبدأ بعد.</p>
+          <p style="margin:0;color:var(--muted);font-size:14px">تبدأ في: ${startDateStr}${daysUntil > 0 ? ' · متبقي ' + (daysUntil===1?'يوم واحد':daysUntil+' أيام') : ''}</p>
+        </div>`;
+    } else {
+      const displayUnits = khatma.units || [];
+      const periodLabel = (khatma.khatmaType==='monthly'||khatma.khatmaType==='weekly')
+        ? (currentHijriPeriodLabel(rotationStart, khatma.khatmaType)||'') : '';
+      const done = displayUnits.filter(u=>u.status==='completed').length;
+      const total = displayUnits.length;
+      const periodEndStr = formatPeriodEnd(rotationStart, khatma.khatmaType);
+      unitsHtml = `
+        <p style="color:var(--muted);font-size:13px;margin:0 0 12px">${periodLabel ? 'الفترة: '+escapeHtml(periodLabel)+' · ' : ''}${done}/${total} مكتمل${periodEndStr?' · ينتهي: '+escapeHtml(periodEndStr):''}</p>
+        <div class="units-grid" style="grid-template-columns:repeat(auto-fill,minmax(105px,1fr));gap:8px">
+          ${displayUnits.map(unit => {
+            const lbl = {assigned:'مُعيّن',reading:'جاري القراءة',completed:'تمت القراءة'}[unit.status]||'متاح';
+            const canComplete = unit.status==='assigned'||unit.status==='reading';
+            return `<article class="unit ${unit.status}">
+              <strong style="font-size:13px">${escapeHtml(unit.label)}</strong>
+              <small><span class="status-dot" style="font-size:11px">${lbl}</span></small>
+              ${canComplete?`<div class="unit-actions"><button class="btn primary" style="font-size:12px;padding:7px" data-portal-action="complete" data-khatma="${escapeHtml(khatma.id)}" data-unit="${unit.number}" data-unit-label="${escapeHtml(unit.label)}" data-identity="${escapeHtml(identity)}">تمت القراءة</button></div>`:''}
+            </article>`;
+          }).join('')||'<p style="color:var(--muted);grid-column:1/-1;font-size:13px">لا توجد أجزاء مُعيّنة لك في هذه الختمة.</p>'}
+        </div>`;
+    }
+
+    view.innerHTML = `
+      <section class="page-head">
+        <span class="eyebrow">بوابة القراء</span>
+        <h1>${escapeHtml(khatma.title)}</h1>
+        ${readerName ? `<p>${escapeHtml(readerName)}${profile?.serialCode?' · '+escapeHtml(profile.serialCode):''}${profile?.country?' · '+escapeHtml(profile.country):''}</p>` : ''}
+      </section>
+      <div style="margin-bottom:16px"><a class="btn ghost compact-btn" href="#/reader-login">← ختماتي</a></div>
+      <div class="form-card glass">${unitsHtml}</div>`;
+
+    // Bind تمت القراءة buttons
+    view.querySelectorAll('[data-portal-action="complete"]').forEach(btn2 => {
+      btn2.addEventListener('click', async () => {
+        const kid = btn2.dataset.khatma;
+        const unitNum = btn2.dataset.unit;
+        const unitLabel = btn2.dataset.unitLabel||('الجزء رقم '+unitNum);
+        const id2 = btn2.dataset.identity;
+        const confirmed = await showConfirmModal({
+          title:'تأكيد إتمام القراءة',
+          message:`هل فعلًا أتممت قراءة ${unitLabel}؟`,
+          confirmLabel:'نعم، أتممت القراءة', cancelLabel:'إلغاء'
+        });
+        if(!confirmed) return;
+        try{
+          await api(`/managed-khatmas/${encodeURIComponent(kid)}/units/${unitNum}/complete`,{method:'POST',body:{identity:id2}});
+          toast('تمت القراءة بنجاح');
+          setupReaderKhatma(khatmaId);
+        }catch(err){ toast(err.message||'تعذر التحديث'); }
+      });
+    });
+
+  }catch(err){
+    view.innerHTML = `<article class="feature-card empty-state"><h3>${escapeHtml(err.message||'تعذر التحميل')}</h3><a class="btn primary" href="#/reader-login">← ختماتي</a></article>`;
+  }
+}
 
 window.openShareReaderGroup = async function(groupId){
   let container = document.getElementById('shareReaderGroupPanel_' + groupId);
@@ -1941,6 +2050,7 @@ async function setupReaderGroup(id){
               <label>الاسم<input name="name" required /></label>
               <label>الجوال<input name="phone" inputmode="tel" /></label>
               <label>الكود (4-10 أرقام)<input name="accessCode" inputmode="numeric" maxlength="10" value="${managedRandomCode()}" /></label>
+              <label>الدولة<select name="country"><option value="">— اختياري —</option><option value="السعودية">السعودية</option><option value="البحرين">البحرين</option><option value="الكويت">الكويت</option><option value="عُمان">عُمان</option><option value="اليمن">اليمن</option><option value="العراق">العراق</option><option value="إيران">إيران</option><option value="قطر">قطر</option><option value="الإمارات">الإمارات</option><option value="الأردن">الأردن</option><option value="أخرى">أخرى</option></select></label>
               <label>بداية الجزء<input name="startJuz" type="number" min="1" max="30" /></label>
               <label>عدد الأجزاء / دورة<input name="partsCount" type="number" min="1" max="30" /></label>
               <label class="full">ملاحظات<input name="notes" /></label>
@@ -2120,19 +2230,8 @@ async function setupManagedMonitor(){
   const periodTotal = periodKhatmas.reduce((s,k)=>(k.units||[]).length+s,0);
   const periodPct = periodTotal ? Math.round(periodCompleted/periodTotal*100) : 0;
 
-  const topReadersHtml = topReaders.length ? `
-    <section class="khatma-detail glass" style="margin-bottom:20px">
-      <div class="sheet-head"><h3>أفضل القراء</h3><span>حسب عدد الأجزاء المكتملة</span></div>
-      <div class="managed-table">
-        ${topReaders.map((r,i)=>`<div class="owner-row">
-          <div class="owner-row-main">
-            <strong class="owner-row-title">${i+1}. ${escapeHtml(r.name)}</strong>
-            <span class="owner-row-meta">${r.completed} جزء مكتمل من ${r.total}</span>
-          </div>
-          <div class="owner-row-actions"><span class="mini-pill v32 status ${r.completed===r.total&&r.total>0?'done':''}">${r.total?Math.round(r.completed/r.total*100):0}%</span></div>
-        </div>`).join('')}
-      </div>
-    </section>` : '';
+  // "أفضل القراء" موجود في الداشبورد — لا نكرره هنا
+  const topReadersHtml = '';
 
   const activeKhatmasHtml = activeKhatmas.length ? `
     <section class="khatma-detail glass" style="margin-bottom:20px">
@@ -2589,6 +2688,7 @@ async function setupDashboard(){
                 ${r.type==='reader'?`مجموعة: ${escapeHtml(r.groupName||'—')}`:
                   `ختمة: ${escapeHtml(r.khatmaTitle||'—')} ${r.weekNumber?'('+r.weekNumber+')':''}`}
                  · كود: ${escapeHtml(r.accessCode||'—')}
+                ${r.serialCode?' · '+escapeHtml(r.serialCode):''}
                 ${r.phone?' · '+escapeHtml(normalizeLocalPhone(r.phone)):''}
                 ${r.startJuz?' · ج'+escapeHtml(String(r.startJuz)):''}
               </span>

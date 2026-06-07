@@ -998,6 +998,8 @@ function mapManagedReader(row) {
     name: row.reader_name || "",
     phone: row.phone || "",
     accessCode: row.access_code || "",
+    serialCode: row.serial_code || "",
+    country: row.country || "",
     groupId: row.group_id || "",
     sharedCreatorGroupId: row.shared_creator_group_id || "",
     startJuz: row.start_juz || null,
@@ -1027,7 +1029,8 @@ function parseManagedReaderItems(items = []) {
     if (!isValidAccessCode(accessCode)) return { ok: false, error: "كود القارئ يجب أن يكون من 4 إلى 10 أرقام" };
     if (seen.has(accessCode)) return { ok: false, error: "لا يمكن تكرار كود القارئ في نفس العملية" };
     seen.add(accessCode);
-    readers.push({ id, name, phone, accessCode, notes, groupId, startJuz, partsCount });
+    const country = String(item.country || "").trim();
+    readers.push({ id, name, phone, accessCode, notes, country, groupId, startJuz, partsCount });
   }
   if (!readers.length) return { ok: false, error: "أضف قارئًا واحدًا على الأقل" };
   return { ok: true, readers };
@@ -1082,6 +1085,22 @@ async function listManagedReaders(request, DB) {
   return json({ ok: true, readers: rows.map(r => ({ ...mapManagedReader(r), groupName: r.group_name || "", ownerName: r.owner_display_name || r.owner_username || "" })) });
 }
 
+// Generates the next available serial code in R-XXXXXX format.
+// `reserved` is a Set of codes already allocated in the current operation
+// but not yet committed to DB (used when inserting multiple readers in a batch).
+async function generateSerialCode(DB, reserved = new Set()) {
+  const row = await DB.prepare(
+    `SELECT COALESCE(MAX(CAST(SUBSTR(serial_code, 3) AS INTEGER)), 0) AS maxNum
+     FROM managed_reader_profiles WHERE serial_code LIKE 'R-%'`
+  ).first();
+  const baseNum = Number(row?.maxNum || 0);
+  for (let offset = 1; offset <= 10; offset++) {
+    const candidate = 'R-' + String(baseNum + offset).padStart(6, '0');
+    if (!reserved.has(candidate)) return candidate;
+  }
+  throw new Error("تعذر توليد رقم تسلسلي فريد، حاول مجددًا");
+}
+
 async function upsertManagedReaders(request, DB) {
   await ensureGroupSchema(DB);
   const check = await requireManagedCreator(request, DB);
@@ -1103,6 +1122,7 @@ async function upsertManagedReaders(request, DB) {
   const t = now();
   const stmts = [];
   const out = [];
+  const usedSerials = new Set();
   for (const reader of parsed.readers) {
     const readerGroupId = reader.groupId || groupId;
     let existing = reader.id
@@ -1119,21 +1139,25 @@ async function upsertManagedReaders(request, DB) {
     if (existing) {
       stmts.push(DB.prepare(`
         UPDATE managed_reader_profiles
-        SET reader_name = ?, phone = ?, access_code = ?, notes = ?, group_id = COALESCE(?, group_id),
+        SET reader_name = ?, phone = ?, access_code = ?, notes = ?,
+            country = COALESCE(NULLIF(?, ''), country),
+            group_id = COALESCE(?, group_id),
             start_juz = COALESCE(?, start_juz), parts_count = COALESCE(?, parts_count),
             status = 'active', updated_at = ?
         WHERE id = ?
-      `).bind(reader.name, reader.phone, reader.accessCode, reader.notes, readerGroupId || null,
-               reader.startJuz || null, reader.partsCount || null, t, existing.id));
+      `).bind(reader.name, reader.phone, reader.accessCode, reader.notes, reader.country || null,
+               readerGroupId || null, reader.startJuz || null, reader.partsCount || null, t, existing.id));
       out.push({ ...reader, id: existing.id, createdByUserId: existing.created_by_user_id, groupId: readerGroupId || existing.group_id || "" });
     } else {
       const id = newId("mreader");
+      const serialCode = await generateSerialCode(DB, usedSerials);
+      usedSerials.add(serialCode);
       stmts.push(DB.prepare(`
-        INSERT INTO managed_reader_profiles (id, created_by_user_id, reader_name, phone, access_code, notes, group_id, start_juz, parts_count, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-      `).bind(id, ownerId, reader.name, reader.phone, reader.accessCode, reader.notes, readerGroupId || null,
-               reader.startJuz || null, reader.partsCount || null, t, t));
-      out.push({ ...reader, id, createdByUserId: ownerId, groupId: readerGroupId || "" });
+        INSERT INTO managed_reader_profiles (id, created_by_user_id, reader_name, phone, access_code, notes, country, group_id, start_juz, parts_count, serial_code, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+      `).bind(id, ownerId, reader.name, reader.phone, reader.accessCode, reader.notes, reader.country || null,
+               readerGroupId || null, reader.startJuz || null, reader.partsCount || null, serialCode, t, t));
+      out.push({ ...reader, id, createdByUserId: ownerId, groupId: readerGroupId || "", serialCode });
     }
   }
   await DB.batch(stmts);
@@ -1188,11 +1212,12 @@ async function syncManagedReadersForKhatma(DB, user, participants) {
     } else {
       const id = newId("mreader");
       const t = now();
+      const serialCode = await generateSerialCode(DB);
       await DB.prepare(`
-        INSERT INTO managed_reader_profiles (id, created_by_user_id, reader_name, phone, access_code, notes, start_juz, parts_count, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+        INSERT INTO managed_reader_profiles (id, created_by_user_id, reader_name, phone, access_code, notes, country, start_juz, parts_count, serial_code, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
       `).bind(id, ownerId, participant.name, participant.phone, participant.accessCode, participant.notes,
-               participant.startJuz || null, participant.partsCount || null, t, t).run();
+               participant.country || null, participant.startJuz || null, participant.partsCount || null, serialCode, t, t).run();
       synced.push({ ...participant, readerProfileId: id });
     }
   }
@@ -1971,7 +1996,17 @@ async function readerPortal(request, DB) {
   const base = `SELECT mcp.* FROM managed_khatma_participants mcp
     JOIN managed_khatmas mk ON mk.id = mcp.khatma_id AND mk.deleted_at IS NULL`;
   let participants = [];
-  if (accessCode && isValidAccessCode(accessCode)) {
+  // Serial code lookup (R-XXXXXX) — view-only; does not grant mark-as-complete rights
+  if (/^R-\d{1,6}$/i.test(identityRaw.trim())) {
+    const normalizedSerial = identityRaw.trim().toUpperCase();
+    const profileRow = await DB.prepare(
+      "SELECT id FROM managed_reader_profiles WHERE serial_code = ? AND status != 'deleted' LIMIT 1"
+    ).bind(normalizedSerial).first();
+    if (profileRow) {
+      participants = (await DB.prepare(base + " WHERE mcp.reader_profile_id = ?").bind(profileRow.id).all()).results || [];
+    }
+  }
+  if (!participants.length && accessCode && isValidAccessCode(accessCode)) {
     participants = (await DB.prepare(base + " WHERE mcp.access_code = ?").bind(accessCode).all()).results || [];
   }
   if (!participants.length && phone && phone.length >= 9) {
@@ -1986,7 +2021,20 @@ async function readerPortal(request, DB) {
     const view = await getManagedKhatmaParticipantView(DB, p.khatma_id, p);
     if (view) khatmas.push(view);
   }
-  return json({ ok: true, identity: identityRaw, khatmas });
+  // Fetch reader profile data for display in portal welcome card
+  const profileId = participants.find(p => p.reader_profile_id)?.reader_profile_id;
+  let readerProfile = null;
+  if (profileId) {
+    const profileRow = await DB.prepare(
+      "SELECT serial_code, country, reader_name FROM managed_reader_profiles WHERE id = ? LIMIT 1"
+    ).bind(profileId).first();
+    if (profileRow) readerProfile = {
+      serialCode: profileRow.serial_code || "",
+      country:    profileRow.country || "",
+      name:       profileRow.reader_name || ""
+    };
+  }
+  return json({ ok: true, identity: identityRaw, khatmas, readerProfile });
 }
 
 async function systemBackup(request, DB) {
@@ -2264,16 +2312,16 @@ async function readerGlobalSearch(request, DB) {
 
   const [readerRows, participantRows] = await Promise.all([
     safeAll(DB.prepare(`
-      SELECT mrp.id, mrp.reader_name AS name, mrp.phone, mrp.access_code,
+      SELECT mrp.id, mrp.reader_name AS name, mrp.phone, mrp.access_code, mrp.serial_code,
              mrp.start_juz, mrp.parts_count, mrp.notes,
              mrg.name AS group_name, mrg.id AS group_id
       FROM managed_reader_profiles mrp
       LEFT JOIN managed_reader_groups mrg ON mrg.id = mrp.group_id
       WHERE mrp.status != 'deleted'
-        AND (mrp.reader_name LIKE ? OR mrp.phone LIKE ? OR mrp.access_code LIKE ?)
+        AND (mrp.reader_name LIKE ? OR mrp.phone LIKE ? OR mrp.access_code LIKE ? OR mrp.serial_code LIKE ?)
         ${rClause}
       LIMIT 15
-    `).bind(like, like, like, ...kp)),
+    `).bind(like, like, like, like, ...kp)),
 
     safeAll(DB.prepare(`
       SELECT mcp.id, mcp.participant_name AS name, mcp.phone, mcp.access_code,
@@ -2293,6 +2341,7 @@ async function readerGlobalSearch(request, DB) {
     readers: readerRows.map(r => ({
       type: "reader", id: r.id, name: r.name || "",
       phone: r.phone || "", accessCode: r.access_code || "",
+      serialCode: r.serial_code || "",
       startJuz: r.start_juz || "", partsCount: r.parts_count || "",
       notes: r.notes || "", groupName: r.group_name || "", groupId: r.group_id || "",
     })),
