@@ -2175,7 +2175,7 @@ async function setupReaderGroup(id){
     const rowLabel = group.rotation_type === 'monthly'
       ? (() => { const hm = getHijriMonthAtOffset(group.rotation_start_date || '', p); return `${hm.name} ${hm.year} هـ`; })()
       : group.rotation_type === 'weekly'
-        ? (() => { const s = new Date(group.rotation_start_date||''); const ws = new Date(s.getTime()+p*7*86400000); const we = new Date(s.getTime()+(p+1)*7*86400000-86400000); const fmt = d=>d.toLocaleDateString('ar-SA-u-ca-gregory',{day:'numeric',month:'numeric'}); return `أسبوع ${p+1} (${fmt(ws)}–${fmt(we)})`; })()
+        ? (() => { const s = parseDateOnlyLocal(group.rotation_start_date||'')||new Date(); const ws = new Date(s); ws.setDate(s.getDate()+p*7); const we = new Date(s); we.setDate(s.getDate()+(p+1)*7-1); const fmt = d=>d.toLocaleDateString('ar-SA-u-ca-gregory',{day:'numeric',month:'numeric'}); return `أسبوع ${p+1} (${fmt(ws)}–${fmt(we)})`; })()
         : `${typeLabel} ${p+1}`;
     return `<tr style="${i===0?'font-weight:700;background:var(--primary-soft)':''}">
       <td>${rowLabel}${i===0?' ← الحالية':i===1?' (التالية)':''}</td>
@@ -2228,7 +2228,7 @@ async function setupReaderGroup(id){
             const rowLabel = group.rotation_type==='monthly'
               ? (()=>{const hm=getHijriMonthAtOffset(group.rotation_start_date||'',p);return `${hm.name} ${hm.year} هـ`;})()
               : group.rotation_type==='weekly'
-                ? (()=>{const s=new Date(group.rotation_start_date||'');const ws=new Date(s.getTime()+p*7*86400000);const we=new Date(s.getTime()+(p+1)*7*86400000-86400000);const fmt=d=>d.toLocaleDateString('ar-SA-u-ca-gregory',{day:'numeric',month:'numeric'});return `أسبوع ${p+1} (${fmt(ws)}–${fmt(we)})`;})()
+                ? (()=>{const s=parseDateOnlyLocal(group.rotation_start_date||'')||new Date();const ws=new Date(s);ws.setDate(s.getDate()+p*7);const we=new Date(s);we.setDate(s.getDate()+(p+1)*7-1);const fmt=d=>d.toLocaleDateString('ar-SA-u-ca-gregory',{day:'numeric',month:'numeric'});return `أسبوع ${p+1} (${fmt(ws)}–${fmt(we)})`;})()
                 : `${typeLabel} ${p+1}`;
             return `<tr style="border-top:1px solid var(--line)${isCurrent?';background:var(--primary-soft);font-weight:700':''}"><td style="padding:7px 8px">${rowLabel}${isCurrent?' ← الحالية':''}</td>${readersWithRot.map(r=>{const j=computeRotationJuz(r.startJuz,r.partsCount,p);return `<td style="padding:7px 8px">ج${j.join('، ج')}</td>`;}).join('')}</tr>`;
           }).join('')}</tbody>
@@ -3078,9 +3078,9 @@ function rotationMonitorHtml(k){
       rowLabel = `${hm.name} ${hm.year} هـ`;
       rowMeta = i === 0 ? `<span style="color:var(--muted);font-size:12px">ينتهي: ${periodEndLabel}</span> &nbsp;` : '';
     } else if(rotationType === 'weekly'){
-      const s = new Date(rotationStartDate || Date.now());
-      const ws = new Date(s.getTime() + p * 7 * 86400000);
-      const we = new Date(s.getTime() + (p + 1) * 7 * 86400000 - 86400000);
+      const s = parseDateOnlyLocal(rotationStartDate) || new Date();
+      const ws = new Date(s); ws.setDate(s.getDate() + p * 7);
+      const we = new Date(s); we.setDate(s.getDate() + (p + 1) * 7 - 1);
       const fmt = d => d.toLocaleDateString('ar-SA-u-ca-gregory', {day:'numeric', month:'numeric'});
       rowLabel = `أسبوع ${p + 1}`;
       rowMeta = `<span style="color:var(--muted);font-size:12px">${fmt(ws)} – ${fmt(we)}</span> &nbsp;`;

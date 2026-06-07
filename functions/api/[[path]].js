@@ -50,7 +50,10 @@ function computeRotationPeriodEnd(rotationStartDate, rotationType) {
   if (rotationType === 'weekly') {
     const start = new Date(rotationStartDate);
     if (isNaN(start)) return null;
-    const idx = Math.floor((now - start) / (7 * 86400000));
+    // Math.max(0,...) prevents negative idx when khatma start date is in the future
+    // Workers run in UTC so new Date("YYYY-MM-DD") = midnight UTC is correct here
+    const idx = Math.max(0, Math.floor((now - start) / (7 * 86400000)));
+    // end = last second of the last day of current week (start of next week − 1s)
     const end = new Date(start.getTime() + (idx + 1) * 7 * 86400000 - 1000);
     return end;
   }
