@@ -1278,9 +1278,46 @@ function formatPeriodEnd(rotationStartDate, rotationType){
   if(daysLeft > 0) return `${dateStr} · متبقي ${daysLeft} ${daysLeft === 1 ? 'يوم' : 'أيام'}`;
   return dateStr;
 }
+// ── Date-only helpers (timezone-safe) ────────────────────────────────────────
+// "YYYY-MM-DD" strings must be treated as local calendar dates, not UTC midnight.
+// new Date("2026-06-08") parses as 00:00 UTC which is wrong for UTC+N timezones.
+
+/** Parse a "YYYY-MM-DD" (or ISO datetime) value as midnight in the LOCAL timezone. */
+function parseDateOnlyLocal(value){
+  if(!value) return null;
+  const m = String(value).trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])); // local midnight
+}
+
+/** Midnight of the given date (or today) in local time. */
+function startOfLocalDay(date){
+  const d = date ? new Date(date) : new Date();
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+/** True if the date-string represents today or a past date (local calendar). */
+function hasDateStarted(dateValue){
+  if(!dateValue) return true;
+  const target = parseDateOnlyLocal(dateValue);
+  if(!target) return true;
+  return target <= startOfLocalDay();
+}
+
+/**
+ * Full calendar days from today (local) until dateValue.
+ * Returns 0 if today, 1 if tomorrow, negative if already past.
+ */
+function daysUntilDate(dateValue){
+  const target = parseDateOnlyLocal(dateValue);
+  if(!target) return 0;
+  return Math.round((target - startOfLocalDay()) / 86400000);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 function khatmaHasStarted(rotationStart){
   if(!rotationStart) return true; // no start date → treat as already started
-  return new Date(rotationStart) <= new Date();
+  return hasDateStarted(rotationStart);
 }
 function currentHijriPeriodLabel(rotationStartDate, rotationType){
   if(rotationType === 'monthly'){
@@ -1753,9 +1790,9 @@ async function setupReaderLogin(){
 
         // Khatma hasn't started yet → show a clear notice instead of units
         if(!started){
-          const startDate = new Date(khatmaStartRef);
+          const startDate = parseDateOnlyLocal(khatmaStartRef);
           const startDateStr = startDate.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn', {day:'numeric', month:'long', year:'numeric'}).replace('،','').trim();
-          const daysUntil = Math.ceil((startDate - Date.now()) / 86400000);
+          const daysUntil = daysUntilDate(khatmaStartRef);
           const daysStr = daysUntil === 1 ? 'يوم واحد' : `${daysUntil} أيام`;
           return `
             <article class="form-card glass" style="margin-bottom:18px">
@@ -1881,9 +1918,9 @@ async function setupReaderKhatma(khatmaId){
 
     let unitsHtml;
     if(!started){
-      const startDate = new Date(khatmaStartRef);
+      const startDate = parseDateOnlyLocal(khatmaStartRef);
       const startDateStr = startDate.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn',{day:'numeric',month:'long',year:'numeric'}).replace('،','').trim();
-      const daysUntil = Math.ceil((startDate - Date.now()) / 86400000);
+      const daysUntil = daysUntilDate(khatmaStartRef);
       unitsHtml = `
         <div class="inline-panel action-sheet" style="text-align:center;padding:24px 16px">
           <p style="margin:0 0 6px;font-size:16px;font-weight:700">الختمة لم تبدأ بعد.</p>
@@ -3704,4 +3741,11 @@ function showConfirmModal({ title, message, confirmLabel = 'تأكيد', cancelL
   });
 }
 function escapeJs(value){ return String(value || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'"); }
+
+// PWA — register service worker (static shell only, no API caching)
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js').catch(() => {});
+  });
+}
 function escapeHtml(value=''){ return String(value ?? '').replace(/[&<>'"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[c])); }
