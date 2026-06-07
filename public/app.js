@@ -1917,8 +1917,18 @@ async function setupReaderKhatma(khatmaId){
         <h1>${escapeHtml(khatma.title)}</h1>
         ${readerName ? `<p>${escapeHtml(readerName)}${profile?.serialCode?' · '+escapeHtml(profile.serialCode):''}${profile?.country?' · '+escapeHtml(profile.country):''}</p>` : ''}
       </section>
-      <div style="margin-bottom:16px"><a class="btn ghost compact-btn" href="#/reader-login">← ختماتي</a></div>
+      <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center">
+        <a class="btn ghost compact-btn" href="#/reader-login">← ختماتي</a>
+        <button class="btn ghost compact-btn" id="readerKhatmaLogoutBtn" type="button">تسجيل الخروج</button>
+      </div>
       <div class="form-card glass">${unitsHtml}</div>`;
+
+    // Logout button
+    view.querySelector('#readerKhatmaLogoutBtn')?.addEventListener('click', () => {
+      localStorage.removeItem('reader_portal_identity');
+      Object.keys(localStorage).filter(k => k.startsWith('managed_identity_')).forEach(k => localStorage.removeItem(k));
+      location.hash = '#/reader-login';
+    });
 
     // Bind تمت القراءة buttons
     view.querySelectorAll('[data-portal-action="complete"]').forEach(btn2 => {
@@ -2871,7 +2881,7 @@ async function setupManagedCreate(){
           customSection.hidden = false;
           renderCustomUnitsPicker(customSection, form.querySelector('[name="division"]')?.value || 'juz');
           customSection.querySelectorAll('input[name="selectedUnit"]').forEach(cb => {
-            cb.checked = allJuz.includes(Number(cb.value));
+            cb.checked = true; // Show all units; group-covered ones are pre-assigned, uncovered ones stay available for manual assignment
           });
         }
       }
