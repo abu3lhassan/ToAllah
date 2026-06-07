@@ -1223,33 +1223,43 @@ function computeCurrentPeriodEnd(rotationStartDate, rotationType){
   if(!rotationStartDate || !rotationType || rotationType === 'none') return null;
   if(rotationType === 'monthly') return hijriMonthEndDate(new Date());
   if(rotationType === 'weekly'){
-    const start = new Date(rotationStartDate);
-    const idx = Math.floor((Date.now() - start) / (7 * 86400000));
-    const d = new Date(start.getTime() + (idx + 1) * 7 * 86400000);
-    d.setDate(d.getDate() - 1);
-    return d;
+    // Use local calendar dates — never UTC midnight arithmetic
+    const start = parseDateOnlyLocal(rotationStartDate);
+    if(!start) return null;
+    const idx = computeCurrentPeriodIndex(rotationStartDate, 'weekly');
+    // End = last day of current week: start + (idx+1)*7 - 1 calendar days
+    const end = new Date(start);
+    end.setDate(start.getDate() + (idx + 1) * 7 - 1);
+    return end; // local midnight of end day
   }
   if(rotationType === 'yearly'){
-    const start = new Date(rotationStartDate);
+    const start = parseDateOnlyLocal(rotationStartDate);
+    if(!start) return null;
     const idx = computeCurrentPeriodIndex(rotationStartDate, 'yearly');
-    return new Date(start.getTime() + (idx + 1) * 365 * 86400000);
+    // End = one year later minus 1 day
+    const end = new Date(start);
+    end.setFullYear(start.getFullYear() + idx + 1);
+    end.setDate(end.getDate() - 1);
+    return end;
   }
   return null;
 }
 function computeCurrentPeriodIndex(rotationStartDate, rotationType){
   if(!rotationStartDate) return 0;
-  const start = new Date(rotationStartDate);
-  const now = new Date();
-  if(now <= start) return 0;
+  // Use local calendar dates — parseDateOnlyLocal treats "YYYY-MM-DD" as local midnight
+  const start = parseDateOnlyLocal(rotationStartDate);
+  if(!start) return 0;
+  const today = startOfLocalDay(); // local midnight of today
+  if(today <= start) return 0;    // not started yet → period 0
   if(rotationType === 'monthly'){
     const sh = getHijriParts(start);
-    const nh = getHijriParts(now);
+    const nh = getHijriParts(today);
     return Math.max(0, (nh.year - sh.year) * 12 + (nh.month - sh.month));
   }
-  if(rotationType === 'weekly') return Math.floor((now - start) / (7 * 86400000));
+  if(rotationType === 'weekly') return Math.floor((today - start) / (7 * 86400000));
   if(rotationType === 'yearly'){
     const sh = getHijriParts(start);
-    const nh = getHijriParts(now);
+    const nh = getHijriParts(today);
     return Math.max(0, nh.year - sh.year);
   }
   return 0;
@@ -1271,10 +1281,10 @@ function generateRotationPlan(startJuz, partsCount, rotationStartDate, rotationT
 function formatPeriodEnd(rotationStartDate, rotationType){
   const end = computeCurrentPeriodEnd(rotationStartDate, rotationType);
   if(!end) return '';
-  // Always return Gregorian date with remaining-days suffix
   const dateStr = end.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn', {day:'numeric', month:'long', year:'numeric'}).replace('،','').trim();
-  const msLeft = end.getTime() + 86400000 - Date.now(); // include the end-day itself
-  const daysLeft = Math.ceil(msLeft / 86400000);
+  // Compare local calendar days only — no UTC ms arithmetic
+  // +1 because the end day itself counts as a remaining day
+  const daysLeft = Math.round((startOfLocalDay(end) - startOfLocalDay()) / 86400000) + 1;
   if(daysLeft > 0) return `${dateStr} · متبقي ${daysLeft} ${daysLeft === 1 ? 'يوم' : 'أيام'}`;
   return dateStr;
 }
