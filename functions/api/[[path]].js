@@ -853,7 +853,10 @@ function assignmentValueFor(assignments, unitNumber) {
 }
 
 function mapManagedKhatma(row, units = [], participants = [], includeSecrets = false, visibleParticipantId = "") {
-  const visibleId = String(visibleParticipantId || "");
+  // visibleParticipantId may be a single string ID or an array of IDs (for sibling participants)
+  const visibleIdSet = Array.isArray(visibleParticipantId)
+    ? new Set(visibleParticipantId.map(String).filter(Boolean))
+    : (visibleParticipantId ? new Set([String(visibleParticipantId)]) : new Set());
   const khatmaType = row.khatma_type || "monthly";
   const rotationStart = row.rotation_start_date || "";
   let expiresAt = row.expires_at || "";
@@ -890,7 +893,7 @@ function mapManagedKhatma(row, units = [], participants = [], includeSecrets = f
     groupId: row.group_id || "",
     rotationDurationYears: row.rotation_duration_years || 5,
     participants: participants.map(p => {
-      const canSeeParticipant = includeSecrets || (visibleId && String(p.id) === visibleId);
+      const canSeeParticipant = includeSecrets || visibleIdSet.has(String(p.id || ""));
       return {
       id: includeSecrets ? p.id : "",
       readerProfileId: includeSecrets ? (p.reader_profile_id || "") : "",
@@ -904,7 +907,7 @@ function mapManagedKhatma(row, units = [], participants = [], includeSecrets = f
     }),
     units: units.map(u => {
       const participantId = String(u.participant_id || "");
-      const canSeeParticipant = includeSecrets || (visibleId && participantId === visibleId);
+      const canSeeParticipant = includeSecrets || visibleIdSet.has(participantId);
       return {
       id: u.id,
       number: u.unit_number,
@@ -983,7 +986,9 @@ async function getManagedKhatmaParticipantView(DB, id, participant) {
     WHERE u.khatma_id = ? AND u.participant_id IN (${inClause})
     ORDER BY u.unit_number ASC
   `).bind(id, ...participantIds).all()).results || [];
-  return mapManagedKhatma(row, units, [participant], false, participant.id);
+  // Pass all participantIds so mapManagedKhatma reveals names/status for all the
+  // reader's units, including those linked via sibling participant records.
+  return mapManagedKhatma(row, units, [participant], false, participantIds);
 }
 
 function mapManagedReader(row) {

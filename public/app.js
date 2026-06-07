@@ -82,7 +82,7 @@ function syncHeaderMode(){
     mobileUserNav.hidden = !(isMobile && isLoggedIn);
     mobileUserNav.style.display = (isMobile && isLoggedIn) ? 'flex' : 'none';
     mobileUserNav.textContent = state.user ? `الحساب: ${state.user.displayName}` : '';
-    mobileUserNav.href = isOwner ? '#/owner' : (canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home');
+    mobileUserNav.href = isOwner ? '#/owner' : (canUseManagedKhatmas() ? '#/dashboard' : '#/home');
   }
 
   if (mobileLogoutNav) {
@@ -219,7 +219,7 @@ function renderAuthLinks(){
   }
   if(mobileUserNav){
     mobileUserNav.textContent = state.user ? `الحساب: ${state.user.displayName}` : '';
-    mobileUserNav.href = isOwner ? '#/owner' : (canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home');
+    mobileUserNav.href = isOwner ? '#/owner' : (canUseManagedKhatmas() ? '#/dashboard' : '#/home');
   }
 
   syncHeaderMode();
@@ -355,7 +355,7 @@ function setupLogin(){
       if(state.user?.role === 'owner') await refreshKhatmas();
       if(canUseManagedKhatmas()) await refreshManagedKhatmas();
       toast('تم تسجيل الدخول');
-      location.hash = state.user?.role === 'owner' ? '#/owner' : (canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home');
+      location.hash = state.user?.role === 'owner' ? '#/owner' : (canUseManagedKhatmas() ? '#/dashboard' : '#/home');
     }catch(err){ toast(err.message || 'تعذر تسجيل الدخول'); }
   });
   const registerForm = document.getElementById('registerForm');
@@ -1037,7 +1037,9 @@ function applyAssignmentsToGrid(form, assignments){
 }
 function managedParticipantRowHtml(p={}, index=0){
   const readerProfileId = p.readerProfileId || (p.createdByUserId ? p.id : '');
-  const participantId = p.readerProfileId ? (p.id || '') : '';
+  // Always preserve the participant's existing ID so the backend can match it
+  // and avoid re-generating a new ID (which would unassign their units).
+  const participantId = p.id || '';
   return `<div class="managed-table-row" data-managed-participant-row data-participant-id="${escapeHtml(participantId)}" data-reader-profile-id="${escapeHtml(readerProfileId)}" data-group-id="${escapeHtml(p.groupId || '')}">
     <label>الاسم<input data-participant-name value="${escapeHtml(p.name || p.participantName || '')}" placeholder="اسم القارئ" /></label>
     <label>الجوال<input data-participant-phone value="${escapeHtml(normalizeLocalPhone(p.phone || ''))}" inputmode="tel" placeholder="05XXXXXXXX" /></label>
