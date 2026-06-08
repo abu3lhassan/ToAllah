@@ -2204,15 +2204,30 @@ async function dashboardStats(request, DB) {
   await ensureGroupSchema(DB);
 
   const isOwner = check.user.role === "owner";
-  const memberIds = isOwner ? [] : await getCreatorGroupMemberIds(DB, check.user.id);
+  const memberIds    = isOwner ? [] : await getCreatorGroupMemberIds(DB, check.user.id);
+  const userGroupIds = isOwner ? [] : await getUserGroupIds(DB, check.user.id);
 
   const safeFirst = async (stmt) => { try { return (await stmt.first()) || {}; } catch { return {}; } };
   const safeAll   = async (stmt) => { try { return (await stmt.all()).results || []; } catch { return []; } };
 
-  // Build WHERE clauses
-  const khatmaClause = isOwner ? "" : `AND mk.created_by_user_id IN (${memberIds.map(() => "?").join(",")})`;
+  // Build khatma WHERE clause — mirrors /managed-khatmas logic:
+  // include khatmas created by group members OR shared with any of the user's creator groups
+  let khatmaClause, kp;
+  if (isOwner) {
+    khatmaClause = "";
+    kp = [];
+  } else if (userGroupIds.length) {
+    const sharedClause = `OR (mk.shared_creator_group_id IS NOT NULL AND mk.shared_creator_group_id IN (${userGroupIds.map(() => "?").join(",")}))`;
+    khatmaClause = `AND (mk.created_by_user_id IN (${memberIds.map(() => "?").join(",")}) ${sharedClause})`;
+    kp = [...memberIds, ...userGroupIds];
+  } else {
+    khatmaClause = `AND mk.created_by_user_id IN (${memberIds.map(() => "?").join(",")})`;
+    kp = memberIds;
+  }
+
+  // Reader/group clause stays scoped to creator-group membership (not shared records)
   const readerClause = isOwner ? "" : `AND created_by_user_id IN (${memberIds.map(() => "?").join(",")})`;
-  const kp = isOwner ? [] : memberIds;
+  const rp = isOwner ? [] : memberIds; // separate params — readerClause has no shared sub-clause
 
   const [khatmaStats, unitStats, topReadersRows, byMonthRows, readerCount, groupCount] = await Promise.all([
     safeFirst(DB.prepare(`
@@ -2261,12 +2276,12 @@ async function dashboardStats(request, DB) {
     safeFirst(DB.prepare(`
       SELECT COUNT(*) as total FROM managed_reader_profiles
       WHERE status != 'deleted' ${readerClause}
-    `).bind(...kp)),
+    `).bind(...rp)),
 
     safeFirst(DB.prepare(`
       SELECT COUNT(*) as total FROM managed_reader_groups
       WHERE status != 'deleted' ${readerClause}
-    `).bind(...kp)),
+    `).bind(...rp)),
   ]);
 
   return json({
