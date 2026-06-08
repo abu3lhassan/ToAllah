@@ -63,6 +63,24 @@ function computeRotationPeriodEnd(rotationStartDate, rotationType) {
     const end = new Date(start.getTime() + (idx + 1) * 7 * 86400000 - 1000);
     return end;
   }
+  if (rotationType === 'yearly') {
+    const start = new Date(rotationStartDate);
+    if (isNaN(start)) return null;
+    // Count complete years elapsed since start (handles leap years via setUTCFullYear)
+    let idx = 0;
+    const ref = new Date(start);
+    while (true) {
+      ref.setUTCFullYear(ref.getUTCFullYear() + 1);
+      if (ref <= now) idx++;
+      else break;
+    }
+    // End = start + (idx+1) years, minus 1 day, at 20:59:59 UTC (= 23:59:59 Saudi/UTC+3)
+    const end = new Date(start);
+    end.setUTCFullYear(start.getUTCFullYear() + idx + 1);
+    end.setUTCDate(end.getUTCDate() - 1);
+    end.setUTCHours(20, 59, 59, 999);
+    return end;
+  }
   return null;
 }
 function adminCode() { return String(Math.floor(10000000 + Math.random() * 90000000)); }
@@ -869,7 +887,7 @@ function mapManagedKhatma(row, units = [], participants = [], includeSecrets = f
   const khatmaType = row.khatma_type || "monthly";
   const rotationStart = row.rotation_start_date || "";
   let expiresAt = row.expires_at || "";
-  if (rotationStart && (khatmaType === 'monthly' || khatmaType === 'weekly')) {
+  if (rotationStart && (khatmaType === 'monthly' || khatmaType === 'weekly' || khatmaType === 'yearly')) {
     const periodEnd = computeRotationPeriodEnd(rotationStart, khatmaType);
     if (periodEnd) expiresAt = periodEnd.toISOString();
   }
