@@ -36,17 +36,23 @@ function hijriMonthEndDateServer(date) {
     const n = getHijriPartsServer(d);
     if (n.year !== y || n.month !== m) {
       d.setUTCDate(d.getUTCDate() - 1);
-      d.setUTCHours(23, 59, 59, 999);
+      d.setUTCHours(20, 59, 59, 999); // = 23:59:59 UTC+3 (Saudi time)
       return new Date(d);
     }
   }
-  d.setUTCHours(23, 59, 59, 999);
+  d.setUTCHours(20, 59, 59, 999); // = 23:59:59 UTC+3 (Saudi time)
   return new Date(d);
 }
 function computeRotationPeriodEnd(rotationStartDate, rotationType) {
   if (!rotationStartDate || !rotationType || rotationType === 'none') return null;
   const now = new Date();
-  if (rotationType === 'monthly') return hijriMonthEndDateServer(now);
+  if (rotationType === 'monthly') {
+    // Use rotationStartDate as reference when the khatma hasn't started yet,
+    // so the period end is the end of the khatma's first Hijri month, not today's.
+    const start = new Date(rotationStartDate);
+    const refDate = (!isNaN(start) && start > now) ? start : now;
+    return hijriMonthEndDateServer(refDate);
+  }
   if (rotationType === 'weekly') {
     const start = new Date(rotationStartDate);
     if (isNaN(start)) return null;

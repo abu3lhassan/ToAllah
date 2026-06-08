@@ -1224,7 +1224,14 @@ function computeRotationJuz(startJuz, partsCount, periodIndex){
 }
 function computeCurrentPeriodEnd(rotationStartDate, rotationType){
   if(!rotationStartDate || !rotationType || rotationType === 'none') return null;
-  if(rotationType === 'monthly') return hijriMonthEndDate(new Date());
+  if(rotationType === 'monthly'){
+    // Use rotationStartDate as reference if the khatma hasn't started yet;
+    // otherwise use today so started khatmas always show the current Hijri month end.
+    const start = parseDateOnlyLocal(rotationStartDate);
+    const today = startOfLocalDay();
+    const refDate = (start && today < start) ? start : new Date();
+    return hijriMonthEndDate(refDate);
+  }
   if(rotationType === 'weekly'){
     // Use local calendar dates — never UTC midnight arithmetic
     const start = parseDateOnlyLocal(rotationStartDate);
@@ -1334,7 +1341,11 @@ function khatmaHasStarted(rotationStart){
 }
 function currentHijriPeriodLabel(rotationStartDate, rotationType){
   if(rotationType === 'monthly'){
-    const {year, month} = getHijriParts(new Date());
+    // Mirror computeCurrentPeriodEnd logic: use start date if khatma is future
+    const start = parseDateOnlyLocal(rotationStartDate);
+    const today = startOfLocalDay();
+    const refDate = (start && today < start) ? start : new Date();
+    const {year, month} = getHijriParts(refDate);
     return `${hijriMonthName(month)} ${year} هـ`;
   }
   if(rotationType === 'weekly'){
