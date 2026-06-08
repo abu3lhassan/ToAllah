@@ -56,11 +56,14 @@ function computeRotationPeriodEnd(rotationStartDate, rotationType) {
   if (rotationType === 'weekly') {
     const start = new Date(rotationStartDate);
     if (isNaN(start)) return null;
-    // Math.max(0,...) prevents negative idx when khatma start date is in the future
-    // Workers run in UTC so new Date("YYYY-MM-DD") = midnight UTC is correct here
+    // Math.max(0,...) handles future khatmas: idx=0 when start hasn't arrived yet
     const idx = Math.max(0, Math.floor((now - start) / (7 * 86400000)));
-    // end = last second of the last day of current week (start of next week − 1s)
-    const end = new Date(start.getTime() + (idx + 1) * 7 * 86400000 - 1000);
+    // Use calendar date arithmetic (not ms) so the end-of-day lands at
+    // 20:59:59 UTC = 23:59:59 Saudi (UTC+3), matching the monthly convention.
+    // end date = start + (idx+1)*7 - 1 calendar days
+    const end = new Date(start);
+    end.setUTCDate(start.getUTCDate() + (idx + 1) * 7 - 1);
+    end.setUTCHours(20, 59, 59, 999);
     return end;
   }
   if (rotationType === 'yearly') {
@@ -1601,8 +1604,10 @@ async function createManagedKhatma(request, DB) {
   }
 
   const groupId = String(data.groupId || data.group_id || "").trim() || null;
-  const rotationStartDate = String(data.rotationStartDate || data.rotation_start_date || "").trim() || null;
-  const autoExpiresAt = rotationStartDate && (khatmaType === 'monthly' || khatmaType === 'weekly')
+  // Use khatmaDate as fallback so rotation_start_date is always aligned with the
+  // khatma's declared start date when the form doesn't send rotationStartDate explicitly.
+  const rotationStartDate = String(data.rotationStartDate || data.khatmaDate || data.rotation_start_date || "").trim() || null;
+  const autoExpiresAt = rotationStartDate && (khatmaType === 'monthly' || khatmaType === 'weekly' || khatmaType === 'yearly')
     ? (computeRotationPeriodEnd(rotationStartDate, khatmaType)?.toISOString() || data.expiresAt || "")
     : (data.expiresAt || "");
   await DB.prepare(`
@@ -1775,7 +1780,7 @@ async function updateManagedKhatma(request, DB, id) {
     data.gregorianDate || "",
     (() => {
       const rs = newRotationStartDate || "";
-      if (rs && (khatmaType === 'monthly' || khatmaType === 'weekly')) {
+      if (rs && (khatmaType === 'monthly' || khatmaType === 'weekly' || khatmaType === 'yearly')) {
         return computeRotationPeriodEnd(rs, khatmaType)?.toISOString() || data.expiresAt || "";
       }
       return data.expiresAt || "";
