@@ -913,10 +913,11 @@ body.nav-open .topbar .menu-toggle span:nth-child(1){transform:none!important;wi
       <div class="form-grid">
         <label>عنوان الختمة<input name="title" required placeholder="عنوان الختمة" /></label>
         <label>رقم الختمة<input name="weekNumber" type="number" min="1" placeholder="رقم الختمة" /></label>
-        <label>نوع الختمة<select name="khatmaType"><option value="weekly" selected>أسبوعية</option><option value="monthly">شهرية</option><option value="yearly">سنوية</option><option value="special">خاصة</option><option value="separate">منفصلة</option><option value="sub">فرعية</option><option value="specific">محددة</option></select></label>
+        <label>نوع الختمة<select name="khatmaType"><option value="weekly">أسبوعية</option><option value="monthly" selected>شهرية</option><option value="yearly">سنوية</option><option value="special">خاصة</option><option value="separate">منفصلة</option><option value="sub">فرعية</option><option value="specific">محددة</option></select></label>
         <label>تاريخ الختمة<input name="khatmaDate" type="date" /></label>
         <label>اليوم والتاريخ الهجري<input name="hijriDate" placeholder="يُعبأ بعد اختيار تاريخ الختمة ويمكن تعديله" /></label>
         <label>التاريخ الميلادي<input name="gregorianDate" placeholder="يُعبأ بعد اختيار تاريخ الختمة ويمكن تعديله" /></label>
+        <label data-expires-at-label class="full" hidden>تاريخ نهاية الختمة<input name="expiresAt" type="date" /></label>
         <label>نوع التقسيم<select name="division" id="managedDivisionSelect"><option value="juz">أجزاء - 30</option><option value="hizb">أحزاب - 60</option><option value="quarter">أرباع - 240</option></select></label>
         <label>إتاحة الوحدات<select name="selectionMode" id="managedSelectionModeSelect"><option value="all">جميع الوحدات</option><option value="custom">اختيار وحدات محددة</option></select></label>
         <label>اسم منسق الختمة<input name="coordinatorName" placeholder="يُعبأ تلقائيًا ويمكن تعديله" /></label>

@@ -156,6 +156,9 @@ function normalizeKhatmaType(value=''){
   const raw = String(value || '').trim();
   return KHATMA_TYPE_OPTIONS.some(([key]) => key === raw) ? raw : 'monthly';
 }
+function isPeriodicKhatmaType(type){
+  return type === 'weekly' || type === 'monthly' || type === 'yearly';
+}
 function khatmaTypeOptionsHtml(selected='monthly'){
   const current = normalizeKhatmaType(selected);
   return KHATMA_TYPE_OPTIONS.map(([key,label]) => `<option value="${key}" ${current === key ? 'selected' : ''}>${label}</option>`).join('');
@@ -2842,6 +2845,17 @@ async function setupManagedCreate(){
     const box = document.getElementById('managedCreatePreviewBox');
     if(box){ box.hidden = false; box.innerHTML = `<div class="sheet-head"><h3>معاينة رسالة المشاركة</h3><span>قبل الحفظ</span></div><div class="message-preview">${escapeHtml(buildManagedWhatsAppMessage(draft)).replace(/#\/managed-khatma\/managed-preview/g, '#/managed-khatma/بعد-الحفظ')}</div>`; }
   });
+  // Show/hide expiresAt field based on khatmaType
+  function syncManagedCreateTypeUi(){
+    const type = form.querySelector('[name="khatmaType"]')?.value || 'monthly';
+    const isPeriodic = isPeriodicKhatmaType(type);
+    const exLabel = form.querySelector('[data-expires-at-label]');
+    const exInput = form.querySelector('[name="expiresAt"]');
+    if(exLabel) exLabel.hidden = isPeriodic;
+    if(exInput){ exInput.required = !isPeriodic; if(isPeriodic) exInput.value = ''; }
+  }
+  form.querySelector('[name="khatmaType"]')?.addEventListener('change', syncManagedCreateTypeUi);
+  syncManagedCreateTypeUi();
   form.addEventListener('submit', async event => {
     event.preventDefault();
     try{
@@ -3122,7 +3136,8 @@ function managedUpdateFormHtml(k){
     <label>تاريخ الختمة<input name="khatmaDate" type="date" value="${escapeHtml(k.khatmaDate || '')}" /></label>
     <label>اليوم والتاريخ الهجري<input name="hijriDate" value="${escapeHtml(k.hijriDate || '')}" /></label>
     <label>التاريخ الميلادي<input name="gregorianDate" value="${escapeHtml(k.gregorianDate || '')}" /></label>
-    ${k.rotationStartDate ? `<div class="full" style="padding:8px 0"><span style="display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px">⟳ تاريخ انتهاء الدورة يُحدَّث تلقائيًا · <strong style="color:var(--primary)">${formatPeriodEnd(k.rotationStartDate, k.khatmaType) || '—'}</strong></span></div>` : ''}
+    <div class="full" data-period-end-info style="padding:8px 0${isPeriodicKhatmaType(k.khatmaType) && k.rotationStartDate ? '' : ';display:none'}"><span style="display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px">⟳ تاريخ انتهاء الدورة يُحدَّث تلقائيًا · <strong style="color:var(--primary)">${formatPeriodEnd(k.rotationStartDate || '', k.khatmaType) || '—'}</strong></span></div>
+    <label data-expires-at-label class="full" style="${isPeriodicKhatmaType(k.khatmaType) ? 'display:none' : ''}">تاريخ نهاية الختمة<input name="expiresAt" type="date" value="${escapeHtml(k.expiresAt ? k.expiresAt.slice(0, 10) : '')}" ${isPeriodicKhatmaType(k.khatmaType) ? '' : 'required'} /></label>
     ${divisionField}
     <label>اسم منسق الختمة<input name="coordinatorName" value="${escapeHtml(k.coordinatorName || currentUserDisplayName())}" /></label>
     ${phoneFields}
@@ -3133,7 +3148,26 @@ function bindManagedAdminActions(k){
   document.getElementById('openUpdateManagedKhatma')?.addEventListener('click', ()=>{ state.activeUpdateManagedKhatmaId = k.id; setupManagedKhatma(k.id, true); });
   document.getElementById('cancelUpdateManagedKhatma')?.addEventListener('click', ()=>{ state.activeUpdateManagedKhatmaId = ''; setupManagedKhatma(k.id, true); });
   const updateForm = document.getElementById('updateManagedKhatmaForm');
-  if(updateForm){ setupManagedEditor(updateForm, k); updateForm.addEventListener('submit', e=>saveManagedKhatmaUpdate(e, k.id)); }
+  if(updateForm){
+    setupManagedEditor(updateForm, k);
+    updateForm.addEventListener('submit', e=>saveManagedKhatmaUpdate(e, k.id));
+    const khatmaTypeSel = updateForm.querySelector('[name="khatmaType"]');
+    khatmaTypeSel?.addEventListener('change', e => {
+      const type = e.target.value;
+      const isPeriodic = isPeriodicKhatmaType(type);
+      const rotStart = k.rotationStartDate || k.khatmaDate || '';
+      const infoEl = updateForm.querySelector('[data-period-end-info]');
+      const exLabel = updateForm.querySelector('[data-expires-at-label]');
+      const exInput = updateForm.querySelector('[name="expiresAt"]');
+      if(infoEl){
+        infoEl.style.display = (isPeriodic && rotStart) ? '' : 'none';
+        const st = infoEl.querySelector('strong');
+        if(st) st.textContent = (isPeriodic && rotStart ? formatPeriodEnd(rotStart, type) : '') || '—';
+      }
+      if(exLabel) exLabel.style.display = isPeriodic ? 'none' : '';
+      if(exInput){ exInput.required = !isPeriodic; if(isPeriodic) exInput.value = ''; }
+    });
+  }
   document.getElementById('toggleCloseManagedKhatma')?.addEventListener('click', ()=>toggleCloseManagedKhatma(k.id));
   document.getElementById('archiveManagedKhatmaBtn')?.addEventListener('click', ()=>archiveManagedKhatmaAction(k.id, !k.archivedAt));
   document.getElementById('duplicateManagedKhatmaBtn')?.addEventListener('click', ()=>{ state.activeDuplicateManagedKhatmaId = k.id; state.activeDeleteManagedKhatmaId = ''; state.activeUpdateManagedKhatmaId = ''; setupManagedKhatma(k.id, true); });
