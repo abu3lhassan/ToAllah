@@ -908,6 +908,9 @@ input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--mute
 .modal-card h3    { margin: 0 0 8px }
 .modal-card p     { color: var(--muted); line-height: 1.8 }
 .modal-actions    { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; margin-top: 14px }
+.delete-confirm-label { display: block; font-weight: 800; color: var(--text); margin-top: 14px }
+.input-error { border-color: #b94b4b !important; box-shadow: 0 0 0 4px rgba(185,75,75,.18) !important; animation: shake .35s ease !important; }
+@keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-6px)} 75%{transform:translateX(6px)} }
 
 /* Progress ring */
 .progress-ring {

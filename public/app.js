@@ -583,7 +583,8 @@ window.removeCreatorMember = async function(groupId, userId){
   catch(err){ toast(err.message||'تعذر الحذف'); }
 };
 window.deleteCreatorGroup = async function(id){
-  if(!confirm('حذف المجموعة؟')) return;
+  const ok = await showDeleteConfirmModal({title:'حذف المجموعة', message:'سيتم حذف هذه المجموعة نهائيًا.'});
+  if(!ok) return;
   try{ await api('/managed-creator-groups/' + encodeURIComponent(id), {method:'DELETE'}); toast('تم الحذف'); renderCreatorGroups(); }
   catch(err){ toast(err.message||'تعذر الحذف'); }
 };
@@ -665,6 +666,8 @@ window.openDeleteUser = function(id){
   renderUsers();
 }
 window.confirmDeleteUser = async function(id){
+  const ok = await showDeleteConfirmModal({title:'حذف المستخدم', message:'سيتم حذف المستخدم نهائيًا من قاعدة البيانات وتسجيل خروجه من جميع الجلسات.'});
+  if(!ok) return;
   try{
     await api('/users/' + encodeURIComponent(id), {method:'DELETE'});
     state.activeDeleteUserId = '';
@@ -1739,7 +1742,8 @@ window.exportGroupCsv = function(groupId){
   downloadTextFile('readers-group.csv', rowsToCsv(rows), 'text/csv;charset=utf-8');
 };
 window.deleteReaderGroup = async function(id){
-  if(!confirm('حذف المجموعة؟ ستُفكّ ارتباطات القراء بها، لكنهم لن يُحذفوا.')) return;
+  const ok = await showDeleteConfirmModal({title:'حذف المجموعة', message:'ستُفكّ ارتباطات القراء بها، لكنهم لن يُحذفوا.'});
+  if(!ok) return;
   try{ await api('/managed-reader-groups/' + encodeURIComponent(id), {method:'DELETE'}); toast('تم حذف المجموعة'); setupManagedReaders(); }
   catch(err){ toast(err.message || 'تعذر حذف المجموعة'); }
 };
@@ -1771,6 +1775,8 @@ window.fillManagedReader = function(id){
   form.scrollIntoView({behavior:'smooth', block:'center'});
 }
 window.deleteManagedReader = async function(id){
+  const ok = await showDeleteConfirmModal({title:'حذف القارئ', message:'سيتم حذف القارئ نهائيًا.'});
+  if(!ok) return;
   try{ await api('/managed-readers/' + encodeURIComponent(id), {method:'DELETE'}); toast('تم حذف القارئ'); setupManagedReaders(); }
   catch(err){ toast(err.message || 'تعذر حذف القارئ'); }
 }
@@ -2236,7 +2242,8 @@ async function setupReaderGroup(id){
       }catch(err){ toast(err.message || 'تعذر التحديث'); }
     });
     document.getElementById('deleteGroupBtn')?.addEventListener('click', async () => {
-      if(!confirm('حذف المجموعة؟ لن يُحذف القراء.')) return;
+      const ok = await showDeleteConfirmModal({title:'حذف المجموعة', message:'لن يُحذف القراء، ستُفكّ ارتباطاتهم بالمجموعة فقط.'});
+      if(!ok) return;
       try{ await api('/managed-reader-groups/' + encodeURIComponent(id), {method:'DELETE'}); toast('تم الحذف'); location.hash = '#/managed-readers'; }
       catch(err){ toast(err.message || 'تعذر الحذف'); }
     });
@@ -3918,6 +3925,36 @@ function showConfirmModal({ title, message, confirmLabel = 'تأكيد', cancelL
     backdrop.querySelector('#confirmModalCancel').addEventListener('click', () => close(false));
     backdrop.addEventListener('click', e => { if(e.target === backdrop) close(false); });
     backdrop.querySelector('#confirmModalOk').focus();
+  });
+}
+function showDeleteConfirmModal({ title, message }) {
+  return new Promise(resolve => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" dir="rtl">
+      <div class="sheet-head"><h3>${escapeHtml(title)}</h3></div>
+      <p>${escapeHtml(message)}</p>
+      <label class="delete-confirm-label">اكتب <strong>حذف</strong> للتأكيد<input id="deleteConfirmInput" type="text" autocomplete="off" placeholder="حذف" /></label>
+      <div class="modal-actions">
+        <button class="btn ghost" id="deleteModalCancel" type="button">إلغاء</button>
+        <button class="btn danger-btn" id="deleteModalOk" type="button">حذف</button>
+      </div>
+    </div>`;
+    document.body.appendChild(backdrop);
+    const input = backdrop.querySelector('#deleteConfirmInput');
+    const close = val => { backdrop.remove(); resolve(val); };
+    const tryConfirm = () => {
+      if (input.value.trim() === 'حذف') { close(true); }
+      else { input.classList.add('input-error'); setTimeout(() => input.classList.remove('input-error'), 500); input.focus(); }
+    };
+    backdrop.querySelector('#deleteModalOk').addEventListener('click', tryConfirm);
+    backdrop.querySelector('#deleteModalCancel').addEventListener('click', () => close(false));
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) close(false); });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') tryConfirm();
+      if (e.key === 'Escape') close(false);
+    });
+    setTimeout(() => input.focus(), 20);
   });
 }
 function escapeJs(value){ return String(value || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'"); }
