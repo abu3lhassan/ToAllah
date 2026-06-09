@@ -2247,13 +2247,19 @@ async function setupReaderGroup(id){
       try{ await api('/managed-reader-groups/' + encodeURIComponent(id), {method:'DELETE'}); toast('تم الحذف'); location.hash = '#/managed-readers'; }
       catch(err){ toast(err.message || 'تعذر الحذف'); }
     });
-    document.getElementById('addReaderBtn')?.addEventListener('click', () => { document.getElementById('addReaderInline').hidden = false; });
+    document.getElementById('addReaderBtn')?.addEventListener('click', () => {
+      const form = document.getElementById('addReaderGroupForm');
+      if(form){ form.dataset.readerId = ''; form.reset(); const ac = form.querySelector('[name="accessCode"]'); if(ac) ac.value = managedRandomCode(); }
+      document.getElementById('addReaderInline').hidden = false;
+    });
     document.getElementById('addReaderGroupForm')?.addEventListener('submit', async e => {
       e.preventDefault();
-      const data = Object.fromEntries(new FormData(e.currentTarget).entries());
+      const form = e.currentTarget;
+      const data = Object.fromEntries(new FormData(form).entries());
       data.phone = normalizeLocalPhone(data.phone || '');
-      try{ await api('/managed-readers', {method:'POST', body:{readers:[data], groupId: data.groupId !== undefined ? data.groupId : id}}); toast('تم إضافة القارئ'); setupReaderGroup(id); }
-      catch(err){ toast(err.message || 'تعذر الإضافة'); }
+      if(form.dataset.readerId) data.id = form.dataset.readerId;
+      try{ await api('/managed-readers', {method:'POST', body:{readers:[data], groupId: data.groupId !== undefined ? data.groupId : id}}); toast('تم حفظ القارئ'); setupReaderGroup(id); }
+      catch(err){ toast(err.message || 'تعذر الحفظ'); }
     });
     document.getElementById('exportGroupCsvBtn2')?.addEventListener('click', () => {
       if(!readers.length){ toast('لا يوجد قراء'); return; }
