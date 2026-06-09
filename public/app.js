@@ -1025,18 +1025,39 @@ function managedParticipantOptions(participants, selected=''){
     return `<option value="${escapeHtml(p.accessCode)}" data-reader-id="${escapeHtml(p.readerProfileId || p.id || '')}" ${isSelected ? 'selected' : ''}>${escapeHtml(p.name)}${p.phone ? ' - ' + escapeHtml(p.phone) : ''}</option>`;
   }).join('');
 }
+function managedAssignmentValues(assignments, unitNumber){
+  const raw = assignments?.[unitNumber] ?? assignments?.[String(unitNumber)] ?? [];
+  const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+  return [...new Set(list.map(v => String(v || '').trim()).filter(Boolean))];
+}
+function addManagedAssignment(assignments, unitNumber, value){
+  const clean = String(value || '').trim();
+  if(!clean) return;
+  const key = String(unitNumber);
+  if(!assignments[key]) assignments[key] = [];
+  if(!assignments[key].includes(clean)) assignments[key].push(clean);
+}
+function managedParticipantCheckboxes(participants, unitNumber, selected=[]){
+  const clean = participants.filter(p => p.name && p.accessCode);
+  if(!clean.length) return '<small class="managed-assignment-empty">أضف قارئًا أولًا</small>';
+  const selectedSet = new Set(Array.isArray(selected) ? selected.map(String) : [String(selected || '')]);
+  const choices = clean.map(p => {
+    const checked = selectedSet.has(String(p.accessCode)) || selectedSet.has(String(p.readerProfileId || '')) || selectedSet.has(String(p.id || ''));
+    const value = p.id || p.readerProfileId || p.accessCode;
+    return `<label class="managed-assignment-choice"><input type="checkbox" data-managed-unit-assignment="${unitNumber}" data-participant-id="${escapeHtml(p.id || '')}" data-reader-profile-id="${escapeHtml(p.readerProfileId || '')}" data-access-code="${escapeHtml(p.accessCode || '')}" value="${escapeHtml(value)}" ${checked ? 'checked' : ''} /><span>${escapeHtml(p.name)}${p.phone ? '<small>' + escapeHtml(normalizeLocalPhone(p.phone)) + '</small>' : ''}</span></label>`;
+  }).join('');
+  return `<div class="managed-assignment-summary"></div><div class="managed-assignment-menu" hidden><input class="managed-assignment-search" type="text" placeholder="بحث في القراء…" autocomplete="off" /><div class="managed-assignment-list">${choices}</div></div>`;
+}
 function applyAssignmentsToGrid(form, assignments){
   if(!assignments || !Object.keys(assignments).length) return;
   const grid = form.querySelector('#managedAssignmentsGrid, [data-managed-assignments-grid]');
   if(!grid) return;
-  grid.querySelectorAll('[data-managed-unit-assignment]').forEach(select => {
-    const code = String(assignments[Number(select.dataset.managedUnitAssignment)] || '');
-    if(!code) return;
-    // Try exact value match first (value = accessCode now)
-    if(Array.from(select.options).some(o => o.value === code)){
-      select.value = code;
-    }
+  grid.querySelectorAll('[data-managed-unit-assignment]').forEach(control => {
+    const values = new Set(managedAssignmentValues(assignments, control.dataset.managedUnitAssignment));
+    if(control.type === 'checkbox') control.checked = values.has(control.value) || values.has(control.dataset.participantId || '') || values.has(control.dataset.readerProfileId || '') || values.has(control.dataset.accessCode || '');
+    else if(values.size && Array.from(control.options || []).some(o => values.has(o.value))) control.value = [...values].find(v => Array.from(control.options).some(o => o.value === v)) || '';
   });
+  grid.querySelectorAll('.managed-assignment-item').forEach(itemEl => updateAssignmentPickerSummary(itemEl));
   syncManagedAssignmentCounter(form);
 }
 function managedParticipantRowHtml(p={}, index=0){
@@ -1068,8 +1089,66 @@ function selectedManagedUnitNumbers(form){
 }
 function currentManagedAssignments(container){
   const out = {};
-  container?.querySelectorAll('[data-managed-unit-assignment]').forEach(select => { out[select.dataset.managedUnitAssignment] = select.value; });
+  container?.querySelectorAll('[data-managed-assignment-unit]').forEach(item => { out[item.dataset.managedAssignmentUnit] = []; });
+  container?.querySelectorAll('input[data-managed-unit-assignment]:checked').forEach(input => {
+    addManagedAssignment(out, input.dataset.managedUnitAssignment, input.value);
+  });
+  container?.querySelectorAll('select[data-managed-unit-assignment]').forEach(select => {
+    if(select.value) addManagedAssignment(out, select.dataset.managedUnitAssignment, select.value);
+  });
   return out;
+}
+function updateAssignmentPickerSummary(itemEl){
+  const summary = itemEl.querySelector('.managed-assignment-summary');
+  if(!summary) return;
+  const checked = Array.from(itemEl.querySelectorAll('input[data-managed-unit-assignment]:checked'));
+  const MAX = 4;
+  const chips = checked.slice(0, MAX).map(cb => {
+    const firstText = cb.closest('label')?.querySelector('span')?.childNodes[0]?.textContent?.trim() || cb.value;
+    return `<span class="managed-assignment-chip" title="${escapeHtml(firstText)}">${escapeHtml(firstText)}</span>`;
+  }).join('');
+  const extra = checked.length > MAX ? `<span class="managed-assignment-extra">+${checked.length - MAX}</span>` : '';
+  const btnLabel = checked.length ? 'تعديل ▾' : 'اختيار القراء ▾';
+  summary.innerHTML = `<span class="managed-assignment-chips-row">${chips}${extra}</span><button type="button" class="btn ghost compact-btn managed-assignment-open-btn">${btnLabel}</button>`;
+}
+function bindAssignmentPickerEvents(grid){
+  if(grid._pickerClickHandler){
+    document.removeEventListener('click', grid._pickerClickHandler);
+    grid._pickerClickHandler = null;
+  }
+  grid.querySelectorAll('.managed-assignment-item').forEach(itemEl => {
+    updateAssignmentPickerSummary(itemEl);
+    const menu = itemEl.querySelector('.managed-assignment-menu');
+    if(!menu) return;
+    itemEl.querySelector('.managed-assignment-summary')?.addEventListener('click', e => {
+      if(!e.target.closest('.managed-assignment-open-btn')) return;
+      const wasOpen = !menu.hidden;
+      grid.querySelectorAll('.managed-assignment-menu').forEach(m => { m.hidden = true; });
+      if(!wasOpen){
+        menu.hidden = false;
+        requestAnimationFrame(() => menu.querySelector('.managed-assignment-search')?.focus());
+      }
+    });
+    menu.querySelector('.managed-assignment-search')?.addEventListener('input', function(){
+      const q = this.value.trim().toLowerCase();
+      menu.querySelectorAll('.managed-assignment-choice').forEach(lbl => {
+        lbl.hidden = !!q && !(lbl.querySelector('span')?.textContent || '').toLowerCase().includes(q);
+      });
+    });
+    menu.querySelectorAll('input[data-managed-unit-assignment]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        updateAssignmentPickerSummary(itemEl);
+        const form = grid.closest('form');
+        if(form) syncManagedAssignmentCounter(form);
+      });
+    });
+  });
+  grid._pickerClickHandler = e => {
+    if(!e.target.closest('.managed-assignment-item')){
+      grid.querySelectorAll('.managed-assignment-menu').forEach(m => { m.hidden = true; });
+    }
+  };
+  document.addEventListener('click', grid._pickerClickHandler);
 }
 function syncManagedAssignments(form, existingAssignments={}){
   const grid = form.querySelector('#managedAssignmentsGrid, [data-managed-assignments-grid]');
@@ -1080,17 +1159,18 @@ function syncManagedAssignments(form, existingAssignments={}){
   const division = form.querySelector('[name="division"]')?.value || 'juz';
   const meta = managedUnitMeta(division);
   const unitNumbers = selectedManagedUnitNumbers(form);
-  grid.innerHTML = unitNumbers.map(num => `<label class="managed-assignment-item">${meta.label} ${num}<select data-managed-unit-assignment="${num}">${managedParticipantOptions(participants, previous[num] || '')}</select></label>`).join('');
-  const assigned = unitNumbers.filter(num => grid.querySelector(`[data-managed-unit-assignment="${num}"]`)?.value).length;
-  if(count) count.textContent = `${assigned} تعيين من ${unitNumbers.length}`;
-  grid.querySelectorAll('select').forEach(select => select.addEventListener('change', () => syncManagedAssignmentCounter(form)));
+  grid.innerHTML = unitNumbers.map(num => `<div class="managed-assignment-item" data-managed-assignment-unit="${num}"><strong class="managed-assignment-title">${meta.label} ${num}</strong><div class="managed-assignment-options">${managedParticipantCheckboxes(participants, num, managedAssignmentValues(previous, num))}</div></div>`).join('');
+  syncManagedAssignmentCounter(form);
+  bindAssignmentPickerEvents(grid);
 }
 function syncManagedAssignmentCounter(form){
   const grid = form.querySelector('#managedAssignmentsGrid, [data-managed-assignments-grid]');
   const count = form.querySelector('#managedAssignmentCount, [data-managed-assignment-count]');
   if(!grid || !count) return;
-  const selects = Array.from(grid.querySelectorAll('[data-managed-unit-assignment]'));
-  count.textContent = `${selects.filter(s=>s.value).length} تعيين من ${selects.length}`;
+  const selected = Array.from(grid.querySelectorAll('input[data-managed-unit-assignment]:checked'));
+  const units = new Set(selected.map(input => input.dataset.managedUnitAssignment));
+  const totalUnits = grid.querySelectorAll('.managed-assignment-item').length;
+  count.textContent = `${selected.length} تعيين في ${units.size} جزء من ${totalUnits}`;
 }
 function setupManagedEditor(form, khatma=null){
   fillDefaultCoordinatorName(form);
@@ -1105,7 +1185,7 @@ function setupManagedEditor(form, khatma=null){
   (khatma?.units || []).forEach(unit => {
     if(unit.participantId){
       const p = participantById[unit.participantId];
-      initialAssignments[unit.number] = p?.accessCode || unit.participantId;
+      addManagedAssignment(initialAssignments, unit.number, unit.participantId || p?.readerProfileId || p?.accessCode);
     }
   });
   if(participantsBox) renderManagedParticipantRows(participantsBox, khatma?.participants || []);
@@ -1157,8 +1237,11 @@ function managedEditorPayload(form){
     if(!data.selectedUnits.length) throw new Error('يجب اختيار وحدة واحدة على الأقل');
   }
   const assignments = {};
-  form.querySelectorAll('[data-managed-unit-assignment]').forEach(select => {
-    assignments[select.dataset.managedUnitAssignment] = select.value;
+  form.querySelectorAll('input[data-managed-unit-assignment]:checked').forEach(input => {
+    addManagedAssignment(assignments, input.dataset.managedUnitAssignment, input.value);
+  });
+  form.querySelectorAll('select[data-managed-unit-assignment]').forEach(select => {
+    if(select.value) addManagedAssignment(assignments, select.dataset.managedUnitAssignment, select.value);
   });
   data.unitAssignments = assignments;
   return data;
@@ -1371,7 +1454,7 @@ function csvRowsToManagedData(rows){
     participants.push(reader);
     const explicitUnits = unitNumberList(row.unitNumbers || row.units || row['الأجزاء'] || '');
     const generatedUnits = explicitUnits.length ? explicitUnits : juzSequence(startJuz, partsCount);
-    generatedUnits.forEach(num => { assignments[num] = reader.accessCode; });
+    generatedUnits.forEach(num => { addManagedAssignment(assignments, num, reader.accessCode); });
   });
   return {participants, assignments};
 }
@@ -1562,7 +1645,7 @@ function readerRowHtml(r, groupId){
     ? `window.openEditReaderInGroup('${escapeJs(r.id)}')`
     : `fillManagedReader('${escapeJs(r.id)}')`;
   // Store data on row for group-context edit
-  const rData = escapeHtml(JSON.stringify({name:r.name||'',phone:r.phone||'',accessCode:r.accessCode||'',country:r.country||'',serialCode:r.serialCode||'',startJuz:r.startJuz||'',partsCount:r.partsCount||'',notes:r.notes||''}));
+  const rData = escapeHtml(JSON.stringify({name:r.name||'',phone:r.phone||'',accessCode:r.accessCode||'',country:r.country||'',serialCode:r.serialCode||'',startJuz:r.startJuz||'',partsCount:r.partsCount||'',notes:r.notes||'',groupId:r.groupId||''}));
   const sharedBadge = r.sharedCreatorGroupId ? `<span class="mini-pill v32" style="background:rgba(15,95,69,.13);color:var(--primary);font-size:11px;margin-right:4px">مشارك</span>` : '';
   const shareBtn = state.user?.role === 'owner' ? `<button class="btn ghost compact-btn" onclick="window.openShareReader('${escapeJs(r.id)}')">مشاركة</button>` : '';
   return `<div class="owner-row" data-reader-row-id="${escapeHtml(r.id)}" data-reader-data='${rData}'><div class="owner-row-main"><strong class="owner-row-title">${escapeHtml(r.name)}${sharedBadge}</strong><span class="owner-row-meta">${r.serialCode ? escapeHtml(r.serialCode) + ' · ' : ''}${escapeHtml(normalizeLocalPhone(r.phone||'')||'بلا جوال')} · كود: ${escapeHtml(r.accessCode)}${r.country ? ' · ' + escapeHtml(r.country) : ''}${r.startJuz ? ' · ج' + r.startJuz + '×' + r.partsCount : ''}${r.ownerName ? ' · ' + escapeHtml(r.ownerName) : ''}</span></div><div class="owner-row-actions"><button class="btn ghost compact-btn" onclick="${editCall}">تعديل</button>${shareBtn}<button class="btn ghost danger-btn compact-btn" onclick="deleteManagedReader('${escapeJs(r.id)}')">حذف</button></div></div>`;
@@ -1577,7 +1660,7 @@ window.openEditReaderInGroup = function(readerId){
   panel.hidden = false;
   const form = document.getElementById('addReaderGroupForm'); if(!form) return;
   form.dataset.readerId = readerId;
-  ['name','phone','accessCode','country','startJuz','partsCount','notes'].forEach(f => {
+  ['name','phone','accessCode','country','startJuz','partsCount','notes','groupId'].forEach(f => {
     const el = form.querySelector(`[name="${f}"]`);
     if(el) el.value = f === 'phone' ? normalizeLocalPhone(r[f]||'') : (r[f]||'');
   });
@@ -1792,7 +1875,7 @@ async function setupReaderLogin(){
             });
             if(!confirmed) return;
             try{
-              await api(`/managed-khatmas/${encodeURIComponent(khatmaId)}/units/${unitNum}/complete`, {method:'POST', body:{identity:id2}});
+              await api(`/managed-khatmas/${encodeURIComponent(khatmaId)}/units/${unitNum}/complete`, {method:'POST', body:{identity:id2, unitId: btn2.dataset.unitId || '', participantId: btn2.dataset.participantId || ''}});
               toast('تمت القراءة بنجاح');
               await doLookup(identity);
             }catch(err){ toast(err.message||'تعذر التحديث'); }
@@ -1852,7 +1935,7 @@ async function setupReaderLogin(){
                 return `<article class="unit ${unit.status}">
                   <strong style="font-size:13px">${escapeHtml(unit.label)}</strong>
                   <small><span class="status-dot" style="font-size:11px">${lbl}</span></small>
-                  ${canComplete ? `<div class="unit-actions"><button class="btn primary" style="font-size:12px;padding:7px" data-portal-action="complete" data-khatma="${escapeHtml(k.id)}" data-unit="${unit.number}" data-unit-label="${escapeHtml(unit.label)}" data-identity="${escapeHtml(identity)}">تمت القراءة</button></div>` : ''}
+                  ${canComplete ? `<div class="unit-actions"><button class="btn primary" style="font-size:12px;padding:7px" data-portal-action="complete" data-khatma="${escapeHtml(k.id)}" data-unit="${unit.number}" data-unit-id="${escapeHtml(unit.id || '')}" data-participant-id="${escapeHtml(unit.participantId || '')}" data-unit-label="${escapeHtml(unit.label)}" data-identity="${escapeHtml(identity)}">تمت القراءة</button></div>` : ''}
                 </article>`;
               }).join('') || '<p style="color:var(--muted);grid-column:1/-1;font-size:13px">لا توجد أجزاء مُعيّنة لك في هذه الختمة.</p>'}
             </div>
@@ -1966,7 +2049,7 @@ async function setupReaderKhatma(khatmaId){
             return `<article class="unit ${unit.status}">
               <strong style="font-size:13px">${escapeHtml(unit.label)}</strong>
               <small><span class="status-dot" style="font-size:11px">${lbl}</span></small>
-              ${canComplete?`<div class="unit-actions"><button class="btn primary" style="font-size:12px;padding:7px" data-portal-action="complete" data-khatma="${escapeHtml(khatma.id)}" data-unit="${unit.number}" data-unit-label="${escapeHtml(unit.label)}" data-identity="${escapeHtml(identity)}">تمت القراءة</button></div>`:''}
+              ${canComplete?`<div class="unit-actions"><button class="btn primary" style="font-size:12px;padding:7px" data-portal-action="complete" data-khatma="${escapeHtml(khatma.id)}" data-unit="${unit.number}" data-unit-id="${escapeHtml(unit.id || '')}" data-participant-id="${escapeHtml(unit.participantId || '')}" data-unit-label="${escapeHtml(unit.label)}" data-identity="${escapeHtml(identity)}">تمت القراءة</button></div>`:''}
             </article>`;
           }).join('')||'<p style="color:var(--muted);grid-column:1/-1;font-size:13px">لا توجد أجزاء مُعيّنة لك في هذه الختمة.</p>'}
         </div>`;
@@ -2005,7 +2088,7 @@ async function setupReaderKhatma(khatmaId){
         });
         if(!confirmed) return;
         try{
-          await api(`/managed-khatmas/${encodeURIComponent(kid)}/units/${unitNum}/complete`,{method:'POST',body:{identity:id2}});
+          await api(`/managed-khatmas/${encodeURIComponent(kid)}/units/${unitNum}/complete`,{method:'POST',body:{identity:id2, unitId: btn2.dataset.unitId || '', participantId: btn2.dataset.participantId || ''}});
           toast('تمت القراءة بنجاح');
           setupReaderKhatma(khatmaId);
         }catch(err){ toast(err.message||'تعذر التحديث'); }
@@ -2063,13 +2146,14 @@ async function setupReaderGroup(id){
   const manageMode = hash.endsWith('/manage');
   if(!canUseManagedKhatmas()){ view.innerHTML = `<article class="feature-card empty-state"><h3>غير مصرح</h3></article>`; return; }
 
-  let group = null, readers = [];
+  let group = null, readers = [], groups = [];
   try{
     const [gRes, rRes] = await Promise.all([
       api('/managed-reader-groups'),
       api('/managed-readers?groupId=' + encodeURIComponent(id))
     ]);
-    group = (gRes.groups || []).find(g => g.id === id);
+    groups = gRes.groups || [];
+    group = groups.find(g => g.id === id);
     readers = rRes.readers || [];
   }catch(err){ view.innerHTML = `<article class="feature-card empty-state"><h3>تعذر تحميل المجموعة</h3><p>${escapeHtml(err.message)}</p></article>`; return; }
   if(!group){ view.innerHTML = `<article class="feature-card empty-state"><h3>المجموعة غير موجودة</h3><a class="btn primary" href="#/managed-readers">الرجوع</a></article>`; return; }
@@ -2122,6 +2206,7 @@ async function setupReaderGroup(id){
               <label>الجوال<input name="phone" inputmode="tel" /></label>
               <label>الكود (4-10 أرقام)<input name="accessCode" inputmode="numeric" maxlength="10" value="${managedRandomCode()}" /></label>
               <label>الدولة<select name="country"><option value="">— اختياري —</option><option value="السعودية">السعودية</option><option value="البحرين">البحرين</option><option value="الكويت">الكويت</option><option value="عُمان">عُمان</option><option value="اليمن">اليمن</option><option value="العراق">العراق</option><option value="إيران">إيران</option><option value="قطر">قطر</option><option value="الإمارات">الإمارات</option><option value="الأردن">الأردن</option><option value="أخرى">أخرى</option></select></label>
+              <label>المجموعة<select name="groupId"><option value="">— بلا مجموعة —</option>${groups.map(g => `<option value="${escapeHtml(g.id)}" ${g.id === id ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('')}</select></label>
               <label>بداية الجزء<input name="startJuz" type="number" min="1" max="30" /></label>
               <label>عدد الأجزاء / دورة<input name="partsCount" type="number" min="1" max="30" /></label>
               <label class="full">ملاحظات<input name="notes" /></label>
@@ -2160,7 +2245,7 @@ async function setupReaderGroup(id){
       e.preventDefault();
       const data = Object.fromEntries(new FormData(e.currentTarget).entries());
       data.phone = normalizeLocalPhone(data.phone || '');
-      try{ await api('/managed-readers', {method:'POST', body:{readers:[data], groupId: id}}); toast('تم إضافة القارئ'); setupReaderGroup(id); }
+      try{ await api('/managed-readers', {method:'POST', body:{readers:[data], groupId: data.groupId !== undefined ? data.groupId : id}}); toast('تم إضافة القارئ'); setupReaderGroup(id); }
       catch(err){ toast(err.message || 'تعذر الإضافة'); }
     });
     document.getElementById('exportGroupCsvBtn2')?.addEventListener('click', () => {
@@ -2938,7 +3023,7 @@ async function setupManagedCreate(){
       const assignments = {};
       readers.forEach(r => {
         const juz = (r.startJuz && r.partsCount) ? computeRotationJuz(r.startJuz, r.partsCount, periodIndex) : [];
-        juz.forEach(n => { assignments[n] = r.accessCode; });
+        juz.forEach(n => { addManagedAssignment(assignments, n, r.accessCode); });
       });
 
       renderManagedParticipantRows(document.getElementById('managedParticipantsRows'), readers);
@@ -3012,22 +3097,23 @@ async function setupManagedKhatma(id, manageMode=false){
     return;
   }
   const filteredUnits = filterManagedUnits(k.units || []);
-  const emptyUnits = filteredUnits.length ? '' : '<article class="feature-card empty-state"><h3>لا توجد نتائج</h3><p>غيّر الفلتر أو البحث لعرض الأجزاء.</p></article>';
+  const groupedFilteredUnits = groupManagedUnitsByNumber(filteredUnits);
+  const emptyUnits = groupedFilteredUnits.length ? '' : '<article class="feature-card empty-state"><h3>لا توجد نتائج</h3><p>غيّر الفلتر أو البحث لعرض الأجزاء.</p></article>';
   const viewerBlock = isVerifiedPublic ? `<div class="inline-panel action-sheet"><div class="sheet-head"><h3>${escapeHtml(viewerName)}</h3><span>أجزاؤك في هذه الختمة</span></div><p>يمكنك تحديث حالة الأجزاء المخصصة لك فقط.</p></div>` : '';
   const toolsBlock = isAdmin ? managedKhatmaToolsHtml(k) : '';
   const rotStart = k.rotationStartDate || k.khatmaDate || k.createdAt || '';
   const periodEndDisplay = rotStart ? formatPeriodEnd(rotStart, k.khatmaType) : '';
   const periodLabelDisplay = rotStart ? currentHijriPeriodLabel(rotStart, k.khatmaType) : '';
   const periodStatHtml = periodEndDisplay ? `<div><strong>${periodLabelDisplay || '—'}</strong><span>الدورة الحالية</span></div><div><strong>${periodEndDisplay}</strong><span>نهاية الدورة</span></div>` : '';
-  view.innerHTML = `<section class="page-head"><span class="eyebrow">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : khatmaFallbackLabel())}</span><h1>${escapeHtml(k.title)}</h1><p>${escapeHtml(k.hijriDate || '')} - ${escapeHtml(k.gregorianDate || '')}</p><div class="status-line"><span class="badge ${status.className}">${status.label}</span>${manageBadge}</div></section><section class="khatma-detail glass"><div class="mini-stats"><div><strong>${p.pct}%</strong><span>الإنجاز</span></div><div><strong>${p.completed}</strong><span>مكتمل</span></div><div><strong>${p.active}</strong><span>مُعيّن / جاري</span></div>${periodStatHtml}</div><div class="countdown-card ${countdownClass(k)}" data-countdown-for="${k.id}">${countdownHtml(k)}</div>${viewerBlock}${shareBlock}${toolsBlock}${adminBlock}</section><section class="unit-toolbar glass"><label>تصفية الأجزاء<select id="managedUnitStatusFilter"><option value="all">الكل</option><option value="available">غير معيّن</option><option value="assigned">مُعيّن</option><option value="reading">جاري القراءة</option><option value="completed">تمت القراءة</option></select></label><label>بحث<input id="managedUnitSearchInput" placeholder="ابحث في أجزائك" /></label></section><section class="units-grid">${filteredUnits.map(unit => managedUnitCardHtml(k, unit, isAdmin)).join('')}${emptyUnits}</section>`;
+  view.innerHTML = `<section class="page-head"><span class="eyebrow">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : khatmaFallbackLabel())}</span><h1>${escapeHtml(k.title)}</h1><p>${escapeHtml(k.hijriDate || '')} - ${escapeHtml(k.gregorianDate || '')}</p><div class="status-line"><span class="badge ${status.className}">${status.label}</span>${manageBadge}</div></section><section class="khatma-detail glass"><div class="mini-stats"><div><strong>${p.pct}%</strong><span>الإنجاز</span></div><div><strong>${p.completed}</strong><span>مكتمل</span></div><div><strong>${p.active}</strong><span>مُعيّن / جاري</span></div>${periodStatHtml}</div><div class="countdown-card ${countdownClass(k)}" data-countdown-for="${k.id}">${countdownHtml(k)}</div>${viewerBlock}${shareBlock}${toolsBlock}${adminBlock}</section><section class="unit-toolbar glass"><label>تصفية الأجزاء<select id="managedUnitStatusFilter"><option value="all">الكل</option><option value="available">غير معيّن</option><option value="assigned">مُعيّن</option><option value="reading">جاري القراءة</option><option value="completed">تمت القراءة</option></select></label><label>بحث<input id="managedUnitSearchInput" placeholder="ابحث في أجزائك" /></label></section><section class="units-grid">${groupedFilteredUnits.map(rows => managedUnitCardHtml(k, rows, isAdmin)).join('')}${emptyUnits}</section>`;
   document.getElementById('copyManagedMessage')?.addEventListener('click', ()=>copyText(message));
   document.getElementById('shareManagedWhatsApp')?.addEventListener('click', ()=> window.open('https://wa.me/?text=' + encodeURIComponent(message), '_blank'));
   const filterSelect = document.getElementById('managedUnitStatusFilter');
   const searchInput = document.getElementById('managedUnitSearchInput');
   if(filterSelect){ filterSelect.value = state.activeManagedUnitFilter; filterSelect.addEventListener('change', e=>{ state.activeManagedUnitFilter = e.target.value; setupManagedKhatma(k.id, manageMode); }); }
   if(searchInput){ searchInput.value = state.activeManagedUnitSearch; searchInput.addEventListener('change', e=>{ state.activeManagedUnitSearch = e.target.value; setupManagedKhatma(k.id, manageMode); }); }
-  view.querySelectorAll('[data-managed-action]').forEach(btn => btn.addEventListener('click', event => { event.stopPropagation(); handleManagedUnitAction(k.id, Number(btn.dataset.unit), btn.dataset.managedAction, isAdmin); }));
-  view.querySelectorAll('[data-managed-identity]').forEach(input => input.addEventListener('keydown', event => { if(event.key === 'Enter'){ event.preventDefault(); const [unit, action] = input.dataset.managedIdentity.split(':'); handleManagedUnitAction(k.id, Number(unit), action, false); } }));
+  view.querySelectorAll('[data-managed-action]').forEach(btn => btn.addEventListener('click', event => { event.stopPropagation(); handleManagedUnitAction(k.id, Number(btn.dataset.unit), btn.dataset.managedAction, isAdmin, btn.dataset.participantId || '', btn.dataset.unitId || ''); }));
+  view.querySelectorAll('[data-managed-identity]').forEach(input => input.addEventListener('keydown', event => { if(event.key === 'Enter'){ event.preventDefault(); const [unit, action] = input.dataset.managedIdentity.split(':'); handleManagedUnitAction(k.id, Number(unit), action, false, input.dataset.participantId || '', input.dataset.unitId || ''); } }));
   if(isAdmin) bindManagedAdminActions(k);
 }
 function filterManagedUnits(units){
@@ -3039,24 +3125,61 @@ function filterManagedUnits(units){
     return byStatus && (!q || hay.includes(q));
   });
 }
-function managedUnitCardHtml(k, unit, isAdmin){
-  const openKey = `${k.id}:${unit.number}`;
+function groupManagedUnitsByNumber(units){
+  const map = new Map();
+  for(const u of units){
+    if(!map.has(u.number)) map.set(u.number, []);
+    map.get(u.number).push(u);
+  }
+  return [...map.values()];
+}
+function managedUnitCardHtml(k, unitOrRows, isAdmin){
+  const rows = Array.isArray(unitOrRows) ? unitOrRows : [unitOrRows];
+  const unit = rows[0];
+  const unitNum = unit.number;
+  const openKey = `${k.id}:${unitNum}`;
   const isOpen = state.activeManagedUnitKey.startsWith(openKey + ':');
   const action = isOpen ? state.activeManagedUnitKey.split(':')[2] : '';
-  const name = escapeHtml(unit.participantName || '');
-  const title = `<strong>${escapeHtml(unit.label)}</strong><small><span class="status-dot">${managedStatusLabel(unit.status)}${name ? ': ' + name : ''}</span></small>`;
-  const identityPanel = isOpen ? `<div class="unit-inline"><input data-managed-identity="${unit.number}:${action}" placeholder="رقم الجوال أو الكود المكون من 10 أرقام" autocomplete="off" inputmode="numeric" /><div class="unit-actions two"><button class="btn primary" data-managed-action="${action}" data-unit="${unit.number}">تأكيد</button><button class="btn ghost" data-managed-action="cancel" data-unit="${unit.number}">إلغاء</button></div></div>` : '';
-  if(unit.status === 'available') return `<article class="unit available" data-unit="${unit.number}">${title}<small>يتم تعيين القارئ من صفحة الإدارة.</small></article>`;
-  const reset = isAdmin ? `<button class="btn ghost" data-managed-action="available" data-unit="${unit.number}">إعادة إتاحة</button>` : '';
-  const reading = `<button class="btn ghost" data-managed-action="reading-open" data-unit="${unit.number}">جاري القراءة</button>`;
-  const complete = `<button class="btn primary" data-managed-action="complete-open" data-unit="${unit.number}">تمت القراءة</button>`;
-  const directReading = `<button class="btn ghost" data-managed-action="reading" data-unit="${unit.number}">جاري القراءة</button>`;
-  const directComplete = `<button class="btn primary" data-managed-action="complete" data-unit="${unit.number}">تمت القراءة</button>`;
-  const actions = isAdmin ? `<div class="unit-actions three">${directReading}${directComplete}${reset}</div>` : `<div class="unit-actions two">${reading}${complete}</div>`;
-  return `<article class="unit ${unit.status}" data-unit="${unit.number}">${title}${actions}${identityPanel}</article>`;
+
+  const statuses = rows.map(r => r.status);
+  const allAvailable = statuses.every(s => s === 'available');
+  const allCompleted = statuses.every(s => s === 'completed');
+  const hasReading = statuses.includes('reading');
+  const hasAssigned = statuses.includes('assigned');
+  const cardStatus = allAvailable ? 'available' : allCompleted ? 'completed' : hasReading ? 'reading' : hasAssigned ? 'assigned' : 'available';
+
+  const assignedRows = rows.filter(r => r.status !== 'available' && r.participantName);
+  const statusIcon = s => s === 'completed' ? '✅' : s === 'reading' ? '📖' : '🔵';
+  const readersInfo = assignedRows.map(r => `${statusIcon(r.status)} ${escapeHtml(r.participantName)}`).join(' · ');
+  const title = `<strong>${escapeHtml(unit.label)}</strong><small><span class="status-dot">${managedStatusLabel(cardStatus)}${readersInfo ? ': ' + readersInfo : ''}</span></small>`;
+  const unitIdAttr = escapeHtml(unit.id || '');
+  const participantIdAttr = escapeHtml(unit.participantId || '');
+
+  const identityPanel = isOpen ? `<div class="unit-inline"><input data-managed-identity="${unitNum}:${action}" data-unit-id="${unitIdAttr}" data-participant-id="${participantIdAttr}" placeholder="رقم الجوال أو الكود المكون من 10 أرقام" autocomplete="off" inputmode="numeric" /><div class="unit-actions two"><button class="btn primary" data-managed-action="${action}" data-unit="${unitNum}" data-unit-id="${unitIdAttr}" data-participant-id="${participantIdAttr}">تأكيد</button><button class="btn ghost" data-managed-action="cancel" data-unit="${unitNum}" data-unit-id="${unitIdAttr}" data-participant-id="${participantIdAttr}">إلغاء</button></div></div>` : '';
+
+  if(allAvailable) return `<article class="unit available" data-unit="${unitNum}">${title}<small>يتم تعيين القارئ من صفحة الإدارة.</small></article>`;
+
+  if(isAdmin){
+    const perReader = rows.filter(r => r.status !== 'available').map(r => {
+      const pid = escapeHtml(r.participantId || '');
+      const name = escapeHtml(r.participantName || '...');
+      const icon = statusIcon(r.status);
+      const canAct = r.status === 'assigned' || r.status === 'reading';
+      const uid = escapeHtml(r.id || '');
+      const readBtn = canAct ? `<button class="btn ghost managed-reader-action" data-managed-action="reading" data-unit="${unitNum}" data-participant-id="${pid}" data-unit-id="${uid}" title="جاري القراءة">📖</button>` : '';
+      const doneBtn = canAct ? `<button class="btn primary managed-reader-action" data-managed-action="complete" data-unit="${unitNum}" data-participant-id="${pid}" data-unit-id="${uid}" title="تمت القراءة">✅</button>` : '';
+      const resetBtn = `<button class="btn ghost managed-reader-action" data-managed-action="available" data-unit="${unitNum}" data-participant-id="${pid}" data-unit-id="${uid}" title="إعادة إتاحة">↩</button>`;
+      return `<div class="managed-unit-reader-row"><span>${icon} ${name}</span>${readBtn}${doneBtn}${resetBtn}</div>`;
+    }).join('');
+    return `<article class="unit ${cardStatus}" data-unit="${unitNum}">${title}${perReader}${identityPanel}</article>`;
+  }
+
+  const reading = `<button class="btn ghost" data-managed-action="reading-open" data-unit="${unitNum}" data-unit-id="${unitIdAttr}" data-participant-id="${participantIdAttr}">جاري القراءة</button>`;
+  const complete = `<button class="btn primary" data-managed-action="complete-open" data-unit="${unitNum}" data-unit-id="${unitIdAttr}" data-participant-id="${participantIdAttr}">تمت القراءة</button>`;
+  return `<article class="unit ${cardStatus}" data-unit="${unitNum}">${title}<div class="unit-actions two">${reading}${complete}</div>${identityPanel}</article>`;
 }
 function canManageManagedKhatma(k){ return !!(state.user && (state.user.role === 'owner' || state.user.managedKhatmaCreator)); }
-async function handleManagedUnitAction(khatmaId, num, action, isAdmin){
+async function handleManagedUnitAction(khatmaId, num, action, isAdmin, participantId='', unitId=''){
   if(action === 'cancel'){ state.activeManagedUnitKey = ''; setupManagedKhatma(khatmaId, state.currentManagedManageMode); return; }
   const savedIdentity = getManagedIdentity(khatmaId) || '';
   if(!isAdmin && (action === 'reading-open' || action === 'complete-open')){
@@ -3070,6 +3193,8 @@ async function handleManagedUnitAction(khatmaId, num, action, isAdmin){
     }
   }
   const body = {};
+  if(participantId) body.participantId = participantId;
+  if(unitId) body.unitId = unitId;
   if(!isAdmin && (action === 'reading' || action === 'complete')){
     const input = document.querySelector(`[data-managed-identity="${num}:${action}"]`);
     const identity = savedIdentity || input?.value.trim() || '';

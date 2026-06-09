@@ -1511,10 +1511,10 @@ input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--mute
 
 .managed-assignments-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
   gap: 10px;
   margin-top: 10px;
-  max-height: 520px;
+  max-height: 560px;
   overflow: auto;
   padding-inline-end: 4px;
 }
@@ -1529,6 +1529,119 @@ input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--mute
 }
 [data-theme="dark"] .managed-assignment-item { background: rgba(255,255,255,.055) }
 .managed-assignment-item select { margin-top: 7px; min-height: 44px; border-radius: 14px }
+.managed-assignment-title { display: block; margin-bottom: 8px; color: var(--primary); font-size: 13px }
+.managed-assignment-options { display: grid; gap: 7px }
+.managed-assignment-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255,255,255,.22);
+  font-size: 13px;
+  line-height: 1.4;
+}
+[data-theme="dark"] .managed-assignment-choice { background: rgba(255,255,255,.045) }
+.managed-assignment-choice input { width: auto; min-height: 0; margin: 0; accent-color: var(--primary) }
+.managed-assignment-choice span { min-width: 0; display: grid; gap: 1px }
+.managed-assignment-choice small,
+.managed-assignment-empty { color: var(--muted); font-size: 11px; line-height: 1.4 }
+/* ── Assignment Picker (compact chip + dropdown) ── */
+.managed-assignment-options { overflow: visible; position: relative }
+.managed-assignment-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 30px;
+}
+.managed-assignment-chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+}
+.managed-assignment-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 20px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.5;
+}
+.managed-assignment-extra {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 20px;
+  background: var(--line);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.managed-assignment-open-btn {
+  font-size: 11px !important;
+  padding: 3px 9px !important;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.managed-assignment-menu {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 8px;
+  background: var(--glass-bg, rgba(255,255,255,.97));
+  box-shadow: 0 4px 20px rgba(0,0,0,.12);
+  display: grid;
+  gap: 6px;
+}
+[data-theme="dark"] .managed-assignment-menu { background: #1a1a2e }
+.managed-assignment-search {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+}
+.managed-assignment-search:focus { outline: 2px solid var(--primary); outline-offset: -1px }
+.managed-assignment-list {
+  display: grid;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.managed-unit-reader-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+}
+.managed-unit-reader-row span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.managed-reader-action {
+  min-height: 28px;
+  padding: 3px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+}
 
 
 /* ─── 16. Reports & Templates ─── */

@@ -878,8 +878,28 @@ function parseManagedUnits(data, division) {
 }
 
 function assignmentValueFor(assignments, unitNumber) {
-  if (!assignments || typeof assignments !== "object") return "";
-  return String(assignments[unitNumber] || assignments[String(unitNumber)] || "").trim();
+  return assignmentValuesFor(assignments, unitNumber)[0] || "";
+}
+
+function assignmentValuesFor(assignments, unitNumber) {
+  if (!assignments || typeof assignments !== "object") return [];
+  const raw = assignments[unitNumber] ?? assignments[String(unitNumber)];
+  const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+  return [...new Set(list.map(v => String(v || "").trim()).filter(Boolean))];
+}
+
+function assignmentParticipantsForUnit(assignments, unitNumber, participantLookup) {
+  const seen = new Set();
+  const out = [];
+  for (const rawAssignment of assignmentValuesFor(assignments, unitNumber)) {
+    const normalized = normalizeAccessCode(rawAssignment) || normalizePhone(rawAssignment) || rawAssignment;
+    const participant = participantLookup.get(rawAssignment) || participantLookup.get(normalized);
+    if (participant && !seen.has(participant.id)) {
+      seen.add(participant.id);
+      out.push(participant);
+    }
+  }
+  return out;
 }
 
 function mapManagedKhatma(row, units = [], participants = [], includeSecrets = false, visibleParticipantId = "") {
@@ -931,8 +951,8 @@ function mapManagedKhatma(row, units = [], participants = [], includeSecrets = f
       phone: includeSecrets ? (p.phone || "") : "",
       accessCode: includeSecrets ? (p.access_code || "") : "",
       notes: includeSecrets ? (p.notes || "") : "",
-      startJuz: (includeSecrets || canSeeParticipant) ? (p.start_juz || null) : null,
-      partsCount: (includeSecrets || canSeeParticipant) ? (p.parts_count || null) : null
+      startJuz: (includeSecrets || canSeeParticipant) ? (p.start_juz || p.profile_start_juz || null) : null,
+      partsCount: (includeSecrets || canSeeParticipant) ? (p.parts_count || p.profile_parts_count || null) : null
       };
     }),
     units: units.map(u => {
@@ -958,13 +978,19 @@ async function getManagedKhatma(DB, id, includeSecrets = false) {
   await ensureManagedSchema(DB);
   const row = await DB.prepare("SELECT * FROM managed_khatmas WHERE id = ? AND deleted_at IS NULL LIMIT 1").bind(id).first();
   if (!row) return null;
-  const participants = (await DB.prepare("SELECT * FROM managed_khatma_participants WHERE khatma_id = ? ORDER BY created_at ASC").bind(id).all()).results || [];
+  const participants = (await DB.prepare(`
+    SELECT mcp.*, mrp.start_juz AS profile_start_juz, mrp.parts_count AS profile_parts_count
+    FROM managed_khatma_participants mcp
+    LEFT JOIN managed_reader_profiles mrp ON mrp.id = mcp.reader_profile_id
+    WHERE mcp.khatma_id = ?
+    ORDER BY mcp.created_at ASC
+  `).bind(id).all()).results || [];
   const units = (await DB.prepare(`
     SELECT u.*, p.participant_name, p.phone AS participant_phone
     FROM managed_khatma_units u
     LEFT JOIN managed_khatma_participants p ON p.id = u.participant_id
     WHERE u.khatma_id = ?
-    ORDER BY u.unit_number ASC
+    ORDER BY u.unit_number ASC, u.id ASC
   `).bind(id).all()).results || [];
   return mapManagedKhatma(row, units, participants, includeSecrets);
 }
@@ -972,6 +998,17 @@ async function getManagedKhatma(DB, id, includeSecrets = false) {
 async function findManagedParticipantByIdentity(DB, id, identityRaw) {
   const identity = String(identityRaw || "").trim();
   if (!identity) return null;
+  if (/^R-\d{1,6}$/i.test(identity)) {
+    const normalizedSerial = identity.toUpperCase();
+    const bySerial = await DB.prepare(`
+      SELECT mcp.*
+      FROM managed_khatma_participants mcp
+      JOIN managed_reader_profiles mrp ON mrp.id = mcp.reader_profile_id
+      WHERE mcp.khatma_id = ? AND mrp.serial_code = ? AND mrp.status != 'deleted'
+      LIMIT 1
+    `).bind(id, normalizedSerial).first();
+    if (bySerial) return bySerial;
+  }
   const accessCode = normalizeAccessCode(identity);
   if (accessCode && isValidAccessCode(accessCode)) {
     const byCode = await DB.prepare("SELECT * FROM managed_khatma_participants WHERE khatma_id = ? AND access_code = ? LIMIT 1").bind(id, accessCode).first();
@@ -1014,7 +1051,7 @@ async function getManagedKhatmaParticipantView(DB, id, participant) {
     FROM managed_khatma_units u
     JOIN managed_khatma_participants p ON p.id = u.participant_id
     WHERE u.khatma_id = ? AND u.participant_id IN (${inClause})
-    ORDER BY u.unit_number ASC
+    ORDER BY u.unit_number ASC, u.id ASC
   `).bind(id, ...participantIds).all()).results || [];
   // Pass all participantIds so mapManagedKhatma reveals names/status for all the
   // reader's units, including those linked via sibling participant records.
@@ -1171,7 +1208,7 @@ async function upsertManagedReaders(request, DB) {
         UPDATE managed_reader_profiles
         SET reader_name = ?, phone = ?, access_code = ?, notes = ?,
             country = COALESCE(NULLIF(?, ''), country),
-            group_id = COALESCE(?, group_id),
+            group_id = ?,
             start_juz = COALESCE(?, start_juz), parts_count = COALESCE(?, parts_count),
             status = 'active', updated_at = ?
         WHERE id = ?
@@ -1558,7 +1595,7 @@ async function listManagedKhatmas(request, DB) {
     FROM managed_khatma_units u
     LEFT JOIN managed_khatma_participants p ON p.id = u.participant_id
     WHERE u.khatma_id IN (${ids.map(() => "?").join(",")})
-    ORDER BY u.khatma_id, u.unit_number ASC
+    ORDER BY u.khatma_id, u.unit_number ASC, u.id ASC
   `).bind(...ids).all()).results || [];
   const byKhatma = new Map();
   for (const unit of units) {
@@ -1653,18 +1690,30 @@ async function createManagedKhatma(request, DB) {
   const assignments = data.unitAssignments || data.assignments || {};
   const batch = participants.map(p => participantStmt.bind(p.id, id, p.name, p.phone, p.accessCode, p.readerProfileId || null, p.notes, p.startJuz || null, p.partsCount || null, t, t));
   for (const unitNumber of parsedUnits.unitNumbers) {
-    const rawAssignment = assignmentValueFor(assignments, unitNumber);
-    const normalized = normalizeAccessCode(rawAssignment) || normalizePhone(rawAssignment) || rawAssignment;
-    const participant = participantLookup.get(rawAssignment) || participantLookup.get(normalized);
-    batch.push(unitStmt.bind(
-      newId("munit"),
-      id,
-      unitNumber,
-      `${parsedUnits.meta.label} ${unitNumber}`,
-      participant ? "assigned" : "available",
-      participant ? participant.id : null,
-      t
-    ));
+    const assignedParticipants = assignmentParticipantsForUnit(assignments, unitNumber, participantLookup);
+    if (!assignedParticipants.length) {
+      batch.push(unitStmt.bind(
+        newId("munit"),
+        id,
+        unitNumber,
+        `${parsedUnits.meta.label} ${unitNumber}`,
+        "available",
+        null,
+        t
+      ));
+      continue;
+    }
+    for (const participant of assignedParticipants) {
+      batch.push(unitStmt.bind(
+        newId("munit"),
+        id,
+        unitNumber,
+        `${parsedUnits.meta.label} ${unitNumber}`,
+        "assigned",
+        participant.id,
+        t
+      ));
+    }
   }
   await DB.batch(batch);
   const khatma = await getManagedKhatma(DB, id, true);
@@ -1742,7 +1791,14 @@ async function updateManagedKhatma(request, DB, id) {
   }
   const participantIds = new Set(participants.map(p => p.id));
   const assignments = data.unitAssignments || data.assignments || {};
-  const existingUnitMap = new Map(existingUnits.map(u => [u.unit_number, u]));
+  const existingUnitMap = new Map(
+    existingUnits.map(u => [`${u.unit_number}:${u.participant_id || ""}`, u])
+  );
+  const existingUnitsByNumber = new Map();
+  for (const unit of existingUnits) {
+    if (!existingUnitsByNumber.has(unit.unit_number)) existingUnitsByNumber.set(unit.unit_number, []);
+    existingUnitsByNumber.get(unit.unit_number).push(unit);
+  }
   const stmts = [];
 
   // Determine new rotation_start_date:
@@ -1822,34 +1878,68 @@ async function updateManagedKhatma(request, DB, id) {
   }
 
   for (const unitNumber of parsedUnits.unitNumbers) {
-    const rawAssignment = assignmentValueFor(assignments, unitNumber);
-    const normalized = normalizeAccessCode(rawAssignment) || normalizePhone(rawAssignment) || rawAssignment;
-    const participant = participantLookup.get(rawAssignment) || participantLookup.get(normalized);
-    const existing = existingUnitMap.get(unitNumber);
-    const participantId = participant ? participant.id : null;
-    if (existing && (existing.status === "reading" || existing.status === "completed") && existing.participant_id !== participantId) {
-      return json({ ok: false, error: "لا يمكن تغيير قارئ جزء قيد القراءة أو مكتمل" }, 409);
+    const assignedParticipants = assignmentParticipantsForUnit(assignments, unitNumber, participantLookup);
+    const desiredParticipantIds = new Set(assignedParticipants.map(p => p.id));
+    const existingForUnit = existingUnitsByNumber.get(unitNumber) || [];
+
+    for (const participantId of desiredParticipantIds) {
+      if (!participantIds.has(participantId)) return json({ ok: false, error: "تعيين غير صحيح لأحد الأجزاء" }, 400);
     }
-    if (participantId && !participantIds.has(participantId)) return json({ ok: false, error: "تعيين غير صحيح لأحد الأجزاء" }, 400);
-    if (existing) {
-      const nextStatus = participantId ? (existing.status === "available" ? "assigned" : existing.status) : "available";
-      stmts.push(DB.prepare(`
-        UPDATE managed_khatma_units
-        SET label = ?, status = ?, participant_id = ?, reading_at = CASE WHEN ? = 'available' THEN NULL ELSE reading_at END, completed_at = CASE WHEN ? = 'available' THEN NULL ELSE completed_at END, updated_at = ?
-        WHERE khatma_id = ? AND unit_number = ?
-      `).bind(`${parsedUnits.meta.label} ${unitNumber}`, nextStatus, participantId, nextStatus, nextStatus, t, id, unitNumber));
-    } else {
+    for (const existing of existingForUnit) {
+      if ((existing.status === "reading" || existing.status === "completed") && !desiredParticipantIds.has(existing.participant_id || "")) {
+        return json({ ok: false, error: "لا يمكن تغيير قارئ جزء قيد القراءة أو مكتمل" }, 409);
+      }
+    }
+
+    let keptAvailableId = "";
+    for (const existing of existingForUnit) {
+      if (existing.participant_id) continue;
+      if (!desiredParticipantIds.size && !keptAvailableId && existing.status === "available") {
+        keptAvailableId = existing.id;
+        stmts.push(DB.prepare("UPDATE managed_khatma_units SET label = ?, status = 'available', reading_at = NULL, completed_at = NULL, updated_at = ? WHERE id = ?").bind(`${parsedUnits.meta.label} ${unitNumber}`, t, existing.id));
+      } else if (existing.status === "available" || existing.status === "assigned") {
+        stmts.push(DB.prepare("DELETE FROM managed_khatma_units WHERE id = ?").bind(existing.id));
+      }
+    }
+
+    for (const participant of assignedParticipants) {
+      const existing = existingUnitMap.get(`${unitNumber}:${participant.id}`);
+      if (existing) {
+        const nextStatus = existing.status === "available" ? "assigned" : existing.status;
+        stmts.push(DB.prepare(`
+          UPDATE managed_khatma_units
+          SET label = ?, status = ?, participant_id = ?, reading_at = CASE WHEN ? = 'available' THEN NULL ELSE reading_at END, completed_at = CASE WHEN ? = 'available' THEN NULL ELSE completed_at END, updated_at = ?
+          WHERE id = ?
+        `).bind(`${parsedUnits.meta.label} ${unitNumber}`, nextStatus, participant.id, nextStatus, nextStatus, t, existing.id));
+      } else {
+        stmts.push(DB.prepare(`
+          INSERT INTO managed_khatma_units (id, khatma_id, unit_number, label, status, participant_id, reading_at, completed_at, updated_at)
+          VALUES (?, ?, ?, ?, 'assigned', ?, NULL, NULL, ?)
+        `).bind(newId("munit"), id, unitNumber, `${parsedUnits.meta.label} ${unitNumber}`, participant.id, t));
+      }
+    }
+
+    for (const existing of existingForUnit) {
+      const existingParticipantId = existing.participant_id || "";
+      if (!existingParticipantId || desiredParticipantIds.has(existingParticipantId)) continue;
+      if (existing.status === "available" || existing.status === "assigned") {
+        stmts.push(DB.prepare("DELETE FROM managed_khatma_units WHERE id = ?").bind(existing.id));
+      }
+    }
+
+    if (!desiredParticipantIds.size && !keptAvailableId) {
       stmts.push(DB.prepare(`
         INSERT INTO managed_khatma_units (id, khatma_id, unit_number, label, status, participant_id, reading_at, completed_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)
-      `).bind(newId("munit"), id, unitNumber, `${parsedUnits.meta.label} ${unitNumber}`, participantId ? "assigned" : "available", participantId, t));
+        VALUES (?, ?, ?, ?, 'available', NULL, NULL, NULL, ?)
+      `).bind(newId("munit"), id, unitNumber, `${parsedUnits.meta.label} ${unitNumber}`, t));
     }
   }
 
-  for (const existing of existingUnits) {
-    if (!nextUnitSet.has(existing.unit_number)) {
-      stmts.push(DB.prepare("DELETE FROM managed_khatma_units WHERE khatma_id = ? AND unit_number = ? AND status IN ('available', 'assigned')").bind(id, existing.unit_number));
-    }
+  const deletedUnitNumbers = new Set(
+    existingUnits.filter(u => !nextUnitSet.has(u.unit_number)).map(u => u.unit_number)
+  );
+  for (const unitNumber of deletedUnitNumbers) {
+    stmts.push(DB.prepare("DELETE FROM managed_khatma_units WHERE khatma_id = ? AND unit_number = ? AND status IN ('available', 'assigned')").bind(id, unitNumber));
   }
 
   await DB.batch(stmts);
@@ -1948,14 +2038,6 @@ async function managedUnitAction(request, DB, khatmaId, number, action) {
   const khatma = await DB.prepare("SELECT * FROM managed_khatmas WHERE id = ? AND deleted_at IS NULL LIMIT 1").bind(khatmaId).first();
   if (!khatma) return json({ ok: false, error: "الختمة المُدارة غير موجودة" }, 404);
   const unitNumber = Number(number);
-  const unit = await DB.prepare(`
-    SELECT u.*, p.participant_name, p.phone, p.access_code
-    FROM managed_khatma_units u
-    LEFT JOIN managed_khatma_participants p ON p.id = u.participant_id
-    WHERE u.khatma_id = ? AND u.unit_number = ?
-    LIMIT 1
-  `).bind(khatmaId, unitNumber).first();
-  if (!unit) return json({ ok: false, error: "الجزء غير موجود" }, 404);
 
   const user = await currentUser(request, DB);
   const manager = user && (user.role === "owner" || (user.id === khatma.created_by_user_id && await hasManagedPermission(DB, user)));
@@ -1963,29 +2045,89 @@ async function managedUnitAction(request, DB, khatmaId, number, action) {
 
   if (action === "available") {
     if (!manager) return json({ ok: false, error: "إعادة الإتاحة مخصصة لصاحب الختمة" }, 403);
-    await DB.prepare("UPDATE managed_khatma_units SET status = 'available', participant_id = NULL, reading_at = NULL, completed_at = NULL, updated_at = ? WHERE khatma_id = ? AND unit_number = ?").bind(now(), khatmaId, unitNumber).run();
+    const targetUnitId = String(body.unitId || body.id || "").trim();
+    const targetParticipantId = String(body.participantId || body.participant_id || "").trim();
+    if (!targetUnitId && !targetParticipantId) return json({ ok: false, error: "حدد القارئ المطلوب تحديثه" }, 400);
+    const targetUnit = targetUnitId
+      ? await DB.prepare("SELECT id FROM managed_khatma_units WHERE id = ? AND khatma_id = ? LIMIT 1").bind(targetUnitId, khatmaId).first()
+      : await DB.prepare("SELECT id FROM managed_khatma_units WHERE khatma_id = ? AND unit_number = ? AND participant_id = ? LIMIT 1").bind(khatmaId, unitNumber, targetParticipantId).first();
+    if (!targetUnit) return json({ ok: false, error: "الجزء غير موجود" }, 404);
+    await DB.prepare("UPDATE managed_khatma_units SET status = 'available', participant_id = NULL, reading_at = NULL, completed_at = NULL, updated_at = ? WHERE id = ?")
+      .bind(now(), targetUnit.id).run();
     return json({ ok: true, khatma: await getManagedKhatma(DB, khatmaId, manager) });
   }
 
+  const targetUnitId = String(body.unitId || body.id || "").trim();
+  const targetParticipantId = String(body.participantId || body.participant_id || "").trim();
+  let resolvedParticipant = null;
+  if (!manager) {
+    const identityRaw = String(body.identity || body.phone || body.accessCode || body.code || "").trim();
+    resolvedParticipant = await findManagedParticipantByIdentity(DB, khatmaId, identityRaw);
+    if (!resolvedParticipant) return json({ ok: false, error: "الكود أو رقم الجوال أو الاسم غير صحيح" }, 403);
+  } else if (!targetUnitId && !targetParticipantId) {
+    return json({ ok: false, error: "حدد القارئ المطلوب تحديثه" }, 400);
+  }
+
+  const unit = targetUnitId
+    ? await DB.prepare(`
+        SELECT u.*, p.participant_name, p.phone, p.access_code
+        FROM managed_khatma_units u
+        LEFT JOIN managed_khatma_participants p ON p.id = u.participant_id
+        WHERE u.id = ? AND u.khatma_id = ?
+        LIMIT 1
+      `).bind(targetUnitId, khatmaId).first()
+    : manager
+    ? await DB.prepare(`
+        SELECT u.*, p.participant_name, p.phone, p.access_code
+        FROM managed_khatma_units u
+        LEFT JOIN managed_khatma_participants p ON p.id = u.participant_id
+        WHERE u.khatma_id = ? AND u.unit_number = ? AND u.participant_id = ?
+        LIMIT 1
+      `).bind(khatmaId, unitNumber, targetParticipantId).first()
+    : resolvedParticipant.reader_profile_id
+    ? await DB.prepare(`
+        SELECT u.*, p.participant_name, p.phone, p.access_code
+        FROM managed_khatma_units u
+        LEFT JOIN managed_khatma_participants p ON p.id = u.participant_id
+        WHERE u.khatma_id = ? AND u.unit_number = ? AND (u.participant_id = ? OR p.reader_profile_id = ?)
+        ORDER BY CASE WHEN u.participant_id = ? THEN 0 ELSE 1 END
+        LIMIT 1
+      `).bind(khatmaId, unitNumber, resolvedParticipant.id, resolvedParticipant.reader_profile_id, resolvedParticipant.id).first()
+    : await DB.prepare(`
+        SELECT u.*, p.participant_name, p.phone, p.access_code
+        FROM managed_khatma_units u
+        LEFT JOIN managed_khatma_participants p ON p.id = u.participant_id
+        WHERE u.khatma_id = ? AND u.unit_number = ? AND u.participant_id = ?
+        LIMIT 1
+      `).bind(khatmaId, unitNumber, resolvedParticipant.id).first();
+
+  if (!unit) return json({ ok: false, error: "الجزء غير موجود" }, 404);
   if (!unit.participant_id) return json({ ok: false, error: "لم يتم تعيين قارئ لهذا الجزء" }, 409);
+
   let viewerParticipant = null;
   if (!manager) {
     const identityRaw = String(body.identity || body.phone || body.accessCode || body.code || "").trim();
     const identityCode = normalizeAccessCode(identityRaw);
     const identityPhone = normalizePhone(identityRaw);
+    const identitySerial = /^R-\d{1,6}$/i.test(identityRaw) ? identityRaw.toUpperCase() : "";
     const validCode = identityCode && identityCode === String(unit.access_code || "");
     const validPhone = identityPhone && identityPhone.length >= 9 && identityPhone === normalizePhone(unit.phone || "");
     const validName = identityRaw && identityRaw.trim() === String(unit.participant_name || "").trim();
 
     if (!validCode && !validPhone && !validName) {
-      // Fallback: check if the incoming identity matches any sibling participant
-      // in this khatma that shares reader_profile_id with the unit's participant.
-      // This covers readers who have multiple participant records in the same khatma.
+      // Fallback: check sibling participants sharing the same reader_profile_id.
+      // Covers readers with multiple participant records in the same khatma.
       let allowedViaSiblingProfile = false;
       const unitParticipantRow = await DB.prepare(
         "SELECT reader_profile_id FROM managed_khatma_participants WHERE id = ? LIMIT 1"
       ).bind(unit.participant_id).first();
       if (unitParticipantRow?.reader_profile_id) {
+        if (identitySerial) {
+          const serialProfile = await DB.prepare(
+            "SELECT id FROM managed_reader_profiles WHERE id = ? AND serial_code = ? AND status != 'deleted' LIMIT 1"
+          ).bind(unitParticipantRow.reader_profile_id, identitySerial).first();
+          allowedViaSiblingProfile = !!serialProfile;
+        }
         const conditions = [];
         const params = [khatmaId, unitParticipantRow.reader_profile_id];
         if (identityCode && isValidAccessCode(identityCode)) { conditions.push("access_code = ?"); params.push(identityCode); }
@@ -2007,10 +2149,10 @@ async function managedUnitAction(request, DB, khatmaId, number, action) {
   const t = now();
   if (action === "reading") {
     if (unit.status !== "assigned" && unit.status !== "reading") return json({ ok: false, error: "لا يمكن تحويل هذا الجزء إلى جاري القراءة" }, 409);
-    await DB.prepare("UPDATE managed_khatma_units SET status = 'reading', reading_at = ?, completed_at = NULL, updated_at = ? WHERE khatma_id = ? AND unit_number = ?").bind(t, t, khatmaId, unitNumber).run();
+    await DB.prepare("UPDATE managed_khatma_units SET status = 'reading', reading_at = ?, completed_at = NULL, updated_at = ? WHERE id = ?").bind(t, t, unit.id).run();
   } else if (action === "complete") {
     if (unit.status !== "assigned" && unit.status !== "reading" && unit.status !== "completed") return json({ ok: false, error: "لا يمكن إغلاق هذا الجزء قبل تعيين قارئه" }, 409);
-    await DB.prepare("UPDATE managed_khatma_units SET status = 'completed', completed_at = ?, updated_at = ? WHERE khatma_id = ? AND unit_number = ?").bind(t, t, khatmaId, unitNumber).run();
+    await DB.prepare("UPDATE managed_khatma_units SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?").bind(t, t, unit.id).run();
   } else {
     return json({ ok: false, error: "إجراء غير معروف" }, 400);
   }
@@ -2028,7 +2170,7 @@ async function readerPortal(request, DB) {
   const base = `SELECT mcp.* FROM managed_khatma_participants mcp
     JOIN managed_khatmas mk ON mk.id = mcp.khatma_id AND mk.deleted_at IS NULL`;
   let participants = [];
-  // Serial code lookup (R-XXXXXX) — view-only; does not grant mark-as-complete rights
+  // Serial code lookup (R-XXXXXX) uses the reader profile to resolve all linked participations.
   if (/^R-\d{1,6}$/i.test(identityRaw.trim())) {
     const normalizedSerial = identityRaw.trim().toUpperCase();
     const profileRow = await DB.prepare(
