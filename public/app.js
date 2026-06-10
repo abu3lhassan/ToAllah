@@ -295,9 +295,16 @@ async function api(path, options={}){
     headers: {'Content-Type':'application/json', ...(state.token ? {'Authorization':'Bearer ' + state.token} : {}), ...(options.headers || {})},
     body: options.body ? JSON.stringify(options.body) : undefined
   });
-  const data = await res.json().catch(()=>({}));
-  if(!res.ok) throw new Error(data.error || 'API error');
-  return data;
+  if(!res.ok){
+    const raw = await res.text();
+    console.error('[api error raw]', res.status, raw);
+    let data = {};
+    try { data = raw ? JSON.parse(raw) : {}; } catch {}
+    if(data.error) console.error('[api error]', data.error);
+    if(data.stack) console.error('[api error stack]', data.stack);
+    throw new Error(data.error || raw || 'API error');
+  }
+  return await res.json().catch(()=>({}));
 }
 function getOwnerKey(){
   if(state.user) return state.user.id;
