@@ -2399,7 +2399,7 @@ async function setupReaderGroup(id){
           <div class="compact-actions">
             <button class="btn ghost compact-btn" id="addReaderBtn">+ إضافة قارئ</button>
             ${isOwner ? '<button class="btn ghost compact-btn" id="importGroupCsvBtn">رفع CSV</button>' : ''}
-            <button class="btn ghost compact-btn" id="exportGroupCsvBtn2">تصدير للتعديل</button>
+            <button class="btn ghost compact-btn" id="exportGroupCsvBtn2">تحميل قائمة القراء</button>
           </div>
         </div>
         ${isOwner ? '<input id="groupCsvFileInput" type="file" accept=".csv,text/csv" hidden />' : ''}
