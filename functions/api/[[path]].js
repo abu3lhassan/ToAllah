@@ -707,7 +707,10 @@ async function ensureGroupSchema(DB) {
     DB.prepare("ALTER TABLE managed_reader_groups ADD COLUMN rotation_duration_years INTEGER DEFAULT 5").run(),
     DB.prepare("ALTER TABLE managed_khatmas ADD COLUMN rotation_duration_years INTEGER DEFAULT 5").run(),
     DB.prepare("ALTER TABLE managed_reader_profiles ADD COLUMN shared_creator_group_id TEXT").run(),
-    DB.prepare("ALTER TABLE managed_reader_groups ADD COLUMN shared_creator_group_id TEXT").run()
+    DB.prepare("ALTER TABLE managed_reader_groups ADD COLUMN shared_creator_group_id TEXT").run(),
+    DB.prepare("ALTER TABLE managed_reader_profiles ADD COLUMN serial_code TEXT").run(),
+    DB.prepare("ALTER TABLE managed_reader_profiles ADD COLUMN country TEXT").run(),
+    DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_mrp_serial_code ON managed_reader_profiles(serial_code) WHERE serial_code IS NOT NULL").run()
   ]);
   _groupSchemaReady = true;
 }
