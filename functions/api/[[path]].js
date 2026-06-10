@@ -1192,16 +1192,21 @@ async function upsertManagedReaders(request, DB) {
   const usedSerials = new Set();
   for (const reader of parsed.readers) {
     const readerGroupId = reader.groupId || groupId;
-    let existing = reader.id
-      ? await DB.prepare("SELECT * FROM managed_reader_profiles WHERE id = ? LIMIT 1").bind(reader.id).first()
-      : null;
-    if (existing && check.user.role !== "owner") {
-      await ensureCreatorGroupSchema(DB);
-      const visibleIds = await getCreatorGroupMemberIds(DB, check.user.id);
-      if (!visibleIds.includes(existing.created_by_user_id)) return json({ ok: false, error: "لا تملك صلاحية تعديل هذا القارئ" }, 403);
-    }
-    if (!existing) {
-      existing = await DB.prepare("SELECT * FROM managed_reader_profiles WHERE created_by_user_id = ? AND access_code = ? LIMIT 1").bind(ownerId, reader.accessCode).first();
+    const hasReaderId = Boolean(reader.id);
+    let existing = null;
+    if (hasReaderId) {
+      existing = await DB.prepare("SELECT * FROM managed_reader_profiles WHERE id = ? LIMIT 1").bind(reader.id).first();
+      if (!existing) return json({ ok: false, error: "معرّف قارئ في ملف التعديل غير موجود" }, 404);
+      if (check.user.role !== "owner") {
+        await ensureCreatorGroupSchema(DB);
+        const visibleIds = await getCreatorGroupMemberIds(DB, check.user.id);
+        if (!visibleIds.includes(existing.created_by_user_id)) return json({ ok: false, error: "لا تملك صلاحية تعديل هذا القارئ" }, 403);
+      }
+      const duplicate = await DB.prepare("SELECT id FROM managed_reader_profiles WHERE created_by_user_id = ? AND access_code = ? AND id != ? LIMIT 1").bind(existing.created_by_user_id, reader.accessCode, existing.id).first();
+      if (duplicate) return json({ ok: false, error: "كود القارئ مستخدم لقارئ آخر. اختر كودًا مختلفًا." }, 409);
+    } else {
+      const duplicate = await DB.prepare("SELECT id FROM managed_reader_profiles WHERE created_by_user_id = ? AND access_code = ? LIMIT 1").bind(ownerId, reader.accessCode).first();
+      if (duplicate) return json({ ok: false, error: "كود القارئ مستخدم لقارئ موجود. استخدم تصدير التعديل لتحديثه أو غيّر الكود." }, 409);
     }
     if (existing) {
       stmts.push(DB.prepare(`

@@ -1453,7 +1453,7 @@ function csvRowsToManagedData(rows){
     const startJuz = Number(row.start_juz || row.startJuz || row['بداية الجزء'] || 0) || null;
     const partsCount = Number(row.parts_count || row.partsCount || row['عدد الأجزاء'] || 0) || null;
     if(!name && !phone && !accessCode) return;
-    const readerId = String(row.id || '').trim();
+    const readerId = String(row.id || row.ID || row.readerId || row.reader_id || row['المعرّف'] || row['المعرف'] || '').trim();
     const reader = {readerId, name, phone, accessCode, notes, country, startJuz, partsCount};
     participants.push(reader);
     const explicitUnits = unitNumberList(row.unitNumbers || row.units || row['الأجزاء'] || '');
@@ -1581,7 +1581,7 @@ async function setupManagedReaders(){
         <div class="compact-actions" style="margin-top:10px">
           <button class="btn primary compact-btn" type="submit">حفظ القارئ</button>
           <button class="btn ghost compact-btn" type="button" onclick="window.closeAddReaderPanel()">إلغاء</button>
-          <button class="btn ghost compact-btn" type="button" id="downloadReadersTemplate">قالب CSV</button>
+          <button class="btn ghost compact-btn" type="button" id="downloadReadersTemplate">تحميل قالب إضافة قراء</button>
         </div>
       </form>
     </div>`;
@@ -1614,7 +1614,7 @@ async function setupManagedReaders(){
     }catch(err){ toast(err.message || 'تعذر حفظ القارئ'); }
   });
 
-  document.getElementById('downloadReadersTemplate')?.addEventListener('click',()=>downloadTextFile('managed-readers-template.csv', managedTemplateCsvExtended(), 'text/csv;charset=utf-8'));
+  document.getElementById('downloadReadersTemplate')?.addEventListener('click',()=>downloadTextFile('managed-readers-add-template.csv', managedTemplateCsvExtended(), 'text/csv;charset=utf-8'));
 
   document.getElementById('readersCsvFile')?.addEventListener('change', async e => {
     const file = e.target.files?.[0]; if(!file) return;
@@ -1739,9 +1739,7 @@ window.uploadGroupCsv = function(groupId){
 };
 window.exportGroupCsv = function(groupId){
   const readers = state.managedReaders.filter(r => r.groupId === groupId);
-  if(!readers.length){ toast('لا يوجد قراء في هذه المجموعة'); return; }
-  const rows = readers.map(r => ({id:r.id||'', name:r.name, phone:normalizeLocalPhone(r.phone||''), accessCode:r.accessCode, country:r.country||'', start_juz:r.startJuz||'', parts_count:r.partsCount||'', notes:r.notes||''}));
-  downloadTextFile('readers-group.csv', rowsToCsv(rows), 'text/csv;charset=utf-8');
+  exportManagedReadersForEdit('readers-group-edit.csv', readers);
 };
 window.deleteReaderGroup = async function(id){
   const ok = await showDeleteConfirmModal({title:'حذف المجموعة', message:'ستُفكّ ارتباطات القراء بها، لكنهم لن يُحذفوا.'});
@@ -1756,6 +1754,27 @@ function rotationDurationOptions(selected=5){
 function managedTemplateCsvExtended(){
   return '﻿' + ['name,phone,accessCode,country,start_juz,parts_count,unitNumbers,notes',
     ['اسم قارئ تجريبي','05XXXXXXXX',managedRandomCode(),'السعودية','1','1','','ملاحظة اختيارية'].map(csvEscape).join(',')].join('\n');
+}
+function managedReaderCsvId(reader){
+  return String(reader?.id || reader?.readerId || reader?.readerProfileId || reader?.reader_profile_id || '').trim();
+}
+function managedReaderExportRows(readers){
+  return (readers || []).map(r => ({
+    id: managedReaderCsvId(r),
+    name: r.name || '',
+    phone: normalizeLocalPhone(r.phone || ''),
+    accessCode: r.accessCode || '',
+    country: r.country || '',
+    start_juz: r.startJuz || '',
+    parts_count: r.partsCount || '',
+    notes: r.notes || ''
+  }));
+}
+function exportManagedReadersForEdit(filename, readers){
+  const rows = managedReaderExportRows(readers);
+  if(!rows.length){ toast('لا يوجد قراء'); return; }
+  if(rows.some(row => !row.id)){ toast('تعذر التصدير: بعض القراء بلا id. أعد تحميل الصفحة وحاول مجددًا.'); return; }
+  downloadTextFile(filename, rowsToCsv(rows), 'text/csv;charset=utf-8');
 }
 window.fillManagedReader = function(id){
   const r = state.managedReaders.find(x=>x.id===id); if(!r) return;
@@ -2203,7 +2222,7 @@ async function setupReaderGroup(id){
           <div class="compact-actions">
             <button class="btn ghost compact-btn" id="addReaderBtn">+ إضافة قارئ</button>
             <button class="btn ghost compact-btn" id="importGroupCsvBtn">رفع CSV</button>
-            <button class="btn ghost compact-btn" id="exportGroupCsvBtn2">تصدير CSV</button>
+            <button class="btn ghost compact-btn" id="exportGroupCsvBtn2">تصدير للتعديل</button>
           </div>
         </div>
         <input id="groupCsvFileInput" type="file" accept=".csv,text/csv" hidden />
@@ -2264,8 +2283,7 @@ async function setupReaderGroup(id){
       catch(err){ toast(err.message || 'تعذر الحفظ'); }
     });
     document.getElementById('exportGroupCsvBtn2')?.addEventListener('click', () => {
-      if(!readers.length){ toast('لا يوجد قراء'); return; }
-      downloadTextFile('readers-group.csv', rowsToCsv(readers.map(r => ({id:r.id||'', name:r.name, phone:normalizeLocalPhone(r.phone||''), accessCode:r.accessCode, country:r.country||'', start_juz:r.startJuz||'', parts_count:r.partsCount||'', notes:r.notes||''}))), 'text/csv;charset=utf-8');
+      exportManagedReadersForEdit('readers-group-edit.csv', readers);
     });
     document.getElementById('importGroupCsvBtn')?.addEventListener('click', () => document.getElementById('groupCsvFileInput').click());
     document.getElementById('groupCsvFileInput')?.addEventListener('change', async e => {
