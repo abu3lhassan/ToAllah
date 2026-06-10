@@ -1447,14 +1447,15 @@ function csvRowsToManagedData(rows){
     const name = row.name || row['اسم القارئ'] || row.reader || '';
     const phone = normalizeLocalPhone(row.phone || row['رقم الجوال'] || '');
     const rawCode = String(row.accessCode || row.code || row['الكود'] || '').replace(/\D/g,'').slice(0,10);
-    const accessCode = (rawCode.length >= 4 && rawCode.length <= 10) ? rawCode : managedRandomCode();
+    const accessCodeProvided = rawCode.length >= 4 && rawCode.length <= 10;
+    const accessCode = accessCodeProvided ? rawCode : managedRandomCode();
     const notes = row.notes || row['ملاحظات'] || '';
     const country = String(row.country || row['الدولة'] || '').trim();
     const startJuz = Number(row.start_juz || row.startJuz || row['بداية الجزء'] || 0) || null;
     const partsCount = Number(row.parts_count || row.partsCount || row['عدد الأجزاء'] || 0) || null;
     if(!name && !phone && !accessCode) return;
     const readerId = String(row.id || row.ID || row.readerId || row.reader_id || row['المعرّف'] || row['المعرف'] || '').trim();
-    const reader = {readerId, name, phone, accessCode, notes, country, startJuz, partsCount};
+    const reader = {readerId, name, phone, accessCode, accessCodeProvided, notes, country, startJuz, partsCount};
     participants.push(reader);
     const explicitUnits = unitNumberList(row.unitNumbers || row.units || row['الأجزاء'] || '');
     const generatedUnits = explicitUnits.length ? explicitUnits : juzSequence(startJuz, partsCount);
@@ -1621,7 +1622,7 @@ async function setupManagedReaders(){
     const gId = e.target.dataset.groupId || '';
     const {participants} = csvRowsToManagedData(parseCsvRows(await file.text()));
     if(!participants.length){ toast('ملف CSV لا يحتوي قراء'); e.target.value=''; return; }
-    const readers = participants.map(p => p.readerId ? {...p, id: p.readerId} : p);
+    const readers = managedReadersImportPayload(participants);
     const body = {readers}; if(gId) body.groupId = gId;
     try{ await api('/managed-readers', {method:'POST', body}); toast('تم استيراد القراء'); setupManagedReaders(); }
     catch(err){ console.error('[import readers]', err.message, err); toast(err.message || 'تعذر استيراد القراء'); }
@@ -1752,8 +1753,19 @@ function rotationDurationOptions(selected=5){
   return Array.from({length:15},(_,i)=>i+1).map(y=>`<option value="${y}" ${Number(selected)===y?'selected':''}>${y} ${y===1?'سنة':'سنوات'}</option>`).join('');
 }
 function managedTemplateCsvExtended(){
-  return '﻿' + ['name,phone,accessCode,country,start_juz,parts_count,unitNumbers,notes',
-    ['اسم قارئ تجريبي','05XXXXXXXX',managedRandomCode(),'السعودية','1','1','','ملاحظة اختيارية'].map(csvEscape).join(',')].join('\n');
+  // Add-readers template: no id/accessCode/serialCode — the server generates them
+  return '﻿' + ['name,phone,country,start_juz,parts_count,notes',
+    ['اسم قارئ تجريبي','05XXXXXXXX','السعودية','1','1','ملاحظة اختيارية'].map(csvEscape).join(',')].join('\n');
+}
+// Builds the /managed-readers payload from parsed CSV rows: empty accessCode
+// (not provided in the file) stays empty so the server generates a unique one.
+function managedReadersImportPayload(participants){
+  return participants.map(p => {
+    const reader = {...p, accessCode: p.accessCodeProvided ? p.accessCode : ''};
+    delete reader.accessCodeProvided;
+    if(p.readerId) reader.id = p.readerId;
+    return reader;
+  });
 }
 function managedReaderCsvId(reader){
   return String(reader?.id || reader?.readerId || reader?.readerProfileId || reader?.reader_profile_id || '').trim();
@@ -2290,7 +2302,7 @@ async function setupReaderGroup(id){
       const file = e.target.files?.[0]; if(!file) return;
       const {participants} = csvRowsToManagedData(parseCsvRows(await file.text()));
       if(!participants.length){ toast('ملف CSV لا يحتوي قراء'); e.target.value=''; return; }
-      const readers = participants.map(p => p.readerId ? {...p, id: p.readerId} : p);
+      const readers = managedReadersImportPayload(participants);
       try{ await api('/managed-readers', {method:'POST', body:{readers, groupId:id}}); toast('تم استيراد القراء'); setupReaderGroup(id); }
       catch(err){ console.error('[import readers group]', err.message, err); toast(err.message || 'تعذر الاستيراد'); }
       e.target.value = '';

@@ -1096,9 +1096,12 @@ function parseManagedReaderItems(items = []) {
     const partsCount = (item.partsCount || item.parts_count) ? Number(item.partsCount || item.parts_count) : null;
     if (!name && !phone && !accessCode && !notes) continue;
     if (!name) return { ok: false, error: "اسم القارئ مطلوب" };
-    if (!isValidAccessCode(accessCode)) return { ok: false, error: "كود القارئ يجب أن يكون من 4 إلى 10 أرقام" };
-    if (seen.has(accessCode)) return { ok: false, error: "لا يمكن تكرار كود القارئ في نفس العملية" };
-    seen.add(accessCode);
+    // accessCode is optional: when empty it is auto-generated in upsertManagedReaders
+    if (accessCode) {
+      if (!isValidAccessCode(accessCode)) return { ok: false, error: "كود القارئ يجب أن يكون من 4 إلى 10 أرقام" };
+      if (seen.has(accessCode)) return { ok: false, error: "لا يمكن تكرار كود القارئ في نفس العملية" };
+      seen.add(accessCode);
+    }
     const country = String(item.country || "").trim();
     readers.push({ id, name, phone, accessCode, notes, country, groupId, startJuz, partsCount });
   }
@@ -1171,6 +1174,19 @@ async function generateSerialCode(DB, reserved = new Set()) {
   throw new Error("تعذر توليد رقم تسلسلي فريد، حاول مجددًا");
 }
 
+// Generates a unique numeric access code (PIN) for a reader owned by ownerId.
+// `reserved` is a Set of codes already allocated in the current batch
+// but not yet committed to DB.
+async function generateReaderAccessCode(DB, ownerId, reserved = new Set()) {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const candidate = String(Math.floor(1000000000 + Math.random() * 9000000000));
+    if (reserved.has(candidate)) continue;
+    const used = await DB.prepare("SELECT id FROM managed_reader_profiles WHERE created_by_user_id = ? AND access_code = ? LIMIT 1").bind(ownerId, candidate).first();
+    if (!used) return candidate;
+  }
+  throw new Error("تعذر توليد كود قارئ فريد، حاول مجددًا");
+}
+
 async function upsertManagedReaders(request, DB) {
   await ensureGroupSchema(DB);
   const check = await requireManagedCreator(request, DB);
@@ -1193,6 +1209,8 @@ async function upsertManagedReaders(request, DB) {
   const stmts = [];
   const out = [];
   const usedSerials = new Set();
+  // Seed with codes provided in this batch so generated codes never collide with them
+  const usedCodes = new Set(parsed.readers.map(r => r.accessCode).filter(Boolean));
   for (const reader of parsed.readers) {
     const readerGroupId = reader.groupId || groupId;
     const hasReaderId = Boolean(reader.id);
@@ -1205,11 +1223,19 @@ async function upsertManagedReaders(request, DB) {
         const visibleIds = await getCreatorGroupMemberIds(DB, check.user.id);
         if (!visibleIds.includes(existing.created_by_user_id)) return json({ ok: false, error: "لا تملك صلاحية تعديل هذا القارئ" }, 403);
       }
+      // Empty code on an update keeps the reader's current code
+      if (!reader.accessCode) reader.accessCode = String(existing.access_code || "");
       const duplicate = await DB.prepare("SELECT id FROM managed_reader_profiles WHERE created_by_user_id = ? AND access_code = ? AND id != ? LIMIT 1").bind(existing.created_by_user_id, reader.accessCode, existing.id).first();
       if (duplicate) return json({ ok: false, error: "كود القارئ مستخدم لقارئ آخر. اختر كودًا مختلفًا." }, 409);
+      usedCodes.add(reader.accessCode);
     } else {
-      const duplicate = await DB.prepare("SELECT id FROM managed_reader_profiles WHERE created_by_user_id = ? AND access_code = ? LIMIT 1").bind(ownerId, reader.accessCode).first();
-      if (duplicate) return json({ ok: false, error: "كود القارئ مستخدم لقارئ موجود. استخدم تصدير التعديل لتحديثه أو غيّر الكود." }, 409);
+      if (!reader.accessCode) {
+        reader.accessCode = await generateReaderAccessCode(DB, ownerId, usedCodes);
+      } else {
+        const duplicate = await DB.prepare("SELECT id FROM managed_reader_profiles WHERE created_by_user_id = ? AND access_code = ? LIMIT 1").bind(ownerId, reader.accessCode).first();
+        if (duplicate) return json({ ok: false, error: "كود القارئ مستخدم لقارئ موجود. استخدم تصدير التعديل لتحديثه أو غيّر الكود." }, 409);
+      }
+      usedCodes.add(reader.accessCode);
     }
     if (existing) {
       stmts.push(DB.prepare(`
