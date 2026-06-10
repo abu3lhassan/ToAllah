@@ -721,31 +721,44 @@ async function listReaderGroups(request, DB) {
   if (!check.ok) return check.response;
   let rows;
   if (check.user.role === "owner") {
-    rows = (await DB.prepare("SELECT * FROM managed_reader_groups WHERE status != 'deleted' ORDER BY created_at DESC").all()).results || [];
+    rows = (await DB.prepare(`
+      SELECT g.*, COUNT(p.id) AS readers_count
+      FROM managed_reader_groups g
+      LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
+      WHERE g.status != 'deleted'
+      GROUP BY g.id
+      ORDER BY g.created_at DESC
+    `).all()).results || [];
   } else {
     await ensureCreatorGroupSchema(DB);
     const visibleIds = await getCreatorGroupMemberIds(DB, check.user.id);
     const userGroupIds2 = await getUserGroupIds(DB, check.user.id);
     let rgQuery, rgParams;
     if (userGroupIds2.length) {
-      const sharedRgClause = `OR (shared_creator_group_id IS NOT NULL AND shared_creator_group_id IN (${userGroupIds2.map(()=>"?").join(",")}))`;
-      rgQuery = `SELECT * FROM managed_reader_groups WHERE status != 'deleted' AND (created_by_user_id IN (${visibleIds.map(()=>"?").join(",")}) ${sharedRgClause}) ORDER BY created_at DESC`;
+      const sharedRgClause = `OR (g.shared_creator_group_id IS NOT NULL AND g.shared_creator_group_id IN (${userGroupIds2.map(()=>"?").join(",")}))`;
+      rgQuery = `
+        SELECT g.*, COUNT(p.id) AS readers_count
+        FROM managed_reader_groups g
+        LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
+        WHERE g.status != 'deleted' AND (g.created_by_user_id IN (${visibleIds.map(()=>"?").join(",")}) ${sharedRgClause})
+        GROUP BY g.id
+        ORDER BY g.created_at DESC
+      `;
       rgParams = [...visibleIds, ...userGroupIds2];
     } else {
-      rgQuery = `SELECT * FROM managed_reader_groups WHERE status != 'deleted' AND created_by_user_id IN (${visibleIds.map(()=>"?").join(",")}) ORDER BY created_at DESC`;
+      rgQuery = `
+        SELECT g.*, COUNT(p.id) AS readers_count
+        FROM managed_reader_groups g
+        LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
+        WHERE g.status != 'deleted' AND g.created_by_user_id IN (${visibleIds.map(()=>"?").join(",")})
+        GROUP BY g.id
+        ORDER BY g.created_at DESC
+      `;
       rgParams = visibleIds;
     }
     rows = (await DB.prepare(rgQuery).bind(...rgParams).all()).results || [];
   }
-  const groupIds = rows.map(r => r.id);
-  let countMap = {};
-  if (groupIds.length) {
-    const counts = (await DB.prepare(
-      `SELECT group_id, COUNT(*) AS cnt FROM managed_reader_profiles WHERE status != 'deleted' AND group_id IN (${groupIds.map(() => "?").join(",")}) GROUP BY group_id`
-    ).bind(...groupIds).all()).results || [];
-    countMap = Object.fromEntries(counts.map(c => [c.group_id, c.cnt]));
-  }
-  return json({ ok: true, groups: rows.map(r => ({ ...r, readerCount: countMap[r.id] || 0, rotationDurationYears: r.rotation_duration_years || 5 })) });
+  return json({ ok: true, groups: rows.map(r => ({ ...r, readerCount: Number(r.readers_count) || 0, rotationDurationYears: r.rotation_duration_years || 5 })) });
 }
 
 async function createReaderGroup(request, DB) {
