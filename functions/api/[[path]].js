@@ -130,6 +130,16 @@ function normalizePhone(value = "") {
   else if (digits.startsWith("5") && digits.length === 9) digits = "0" + digits;
   return digits;
 }
+// Returns a set of candidate phone strings to match against in DB (exact IN query).
+// Covers: local format, international with/without +, core digits without leading zero.
+function phoneSearchVariants(raw) {
+  const original = String(raw || "").trim();
+  const digits   = original.replace(/[^0-9]/g, "");
+  const local    = normalizePhone(original);
+  const core     = local.startsWith("0") ? local.slice(1) : local;
+  const s = new Set([original, digits, "+" + digits, local, "+" + local, core, "+" + core]);
+  return [...s].filter(v => v.replace(/[^0-9]/g, "").length >= 7);
+}
 
 const KHATMA_TYPES = new Set(["weekly", "monthly", "yearly", "special", "separate", "sub", "specific"]);
 function normalizeKhatmaType(value = "") {
@@ -2230,8 +2240,47 @@ async function readerPortal(request, DB) {
   if (!participants.length && accessCode && isValidAccessCode(accessCode)) {
     participants = (await DB.prepare(base + " WHERE mcp.access_code = ?").bind(accessCode).all()).results || [];
   }
-  if (!participants.length && phone && phone.length >= 9) {
-    participants = (await DB.prepare(base + " WHERE mcp.phone = ?").bind(phone).all()).results || [];
+  if (!participants.length) {
+    const pVars  = phoneSearchVariants(identityRaw);
+    const pLocal = normalizePhone(identityRaw);
+    const pCore  = pLocal.startsWith("0") ? pLocal.slice(1) : pLocal;
+    // Phase 1: exact variants match on participant phone
+    if (pVars.length) {
+      const inSql = pVars.map(()=>"?").join(",");
+      participants = (await DB.prepare(base + ` WHERE mcp.phone IN (${inSql})`).bind(...pVars).all()).results || [];
+    }
+    // Phase 2: suffix match on participant phone (cross-format)
+    if (!participants.length && pCore.length >= 8) {
+      const cands = (await DB.prepare(
+        base + " WHERE SUBSTR(REPLACE(mcp.phone,'+',''),-?) = ?"
+      ).bind(pCore.length, pCore).all()).results || [];
+      if (cands.length) {
+        const ids = new Set(cands.map(r => r.reader_profile_id || (r.participant_name + "|" + r.phone)));
+        if (ids.size > 1) return json({ ok: false, error: "يتطابق الرقم مع أكثر من قارئ، يرجى استخدام كود الدخول أو رقم السيريال" }, 409);
+        participants = cands;
+      }
+    }
+    // Phase 3: phone in managed_reader_profiles → participants via reader_profile_id
+    // Mirrors serial-code path; handles cases where mcp.phone is empty/unset
+    if (!participants.length) {
+      let profileByPhone = null;
+      if (pVars.length) {
+        const inSql = pVars.map(()=>"?").join(",");
+        profileByPhone = await DB.prepare(
+          `SELECT id FROM managed_reader_profiles WHERE phone IN (${inSql}) AND status != 'deleted' LIMIT 1`
+        ).bind(...pVars).first();
+      }
+      if (!profileByPhone && pCore.length >= 8) {
+        const cands = (await DB.prepare(
+          "SELECT id FROM managed_reader_profiles WHERE SUBSTR(REPLACE(phone,'+',''),-?) = ? AND status != 'deleted'"
+        ).bind(pCore.length, pCore).all()).results || [];
+        if (cands.length > 1) return json({ ok: false, error: "يتطابق الرقم مع أكثر من قارئ، يرجى استخدام كود الدخول أو رقم السيريال" }, 409);
+        if (cands.length === 1) profileByPhone = cands[0];
+      }
+      if (profileByPhone) {
+        participants = (await DB.prepare(base + " WHERE mcp.reader_profile_id = ?").bind(profileByPhone.id).all()).results || [];
+      }
+    }
   }
   if (!participants.length && identityRaw.length >= 2) {
     participants = (await DB.prepare(base + " WHERE mcp.participant_name = ?").bind(identityRaw).all()).results || [];
@@ -2247,15 +2296,70 @@ async function readerPortal(request, DB) {
   let readerProfile = null;
   if (profileId) {
     const profileRow = await DB.prepare(
-      "SELECT serial_code, country, reader_name FROM managed_reader_profiles WHERE id = ? LIMIT 1"
+      "SELECT id, serial_code, country, reader_name, phone FROM managed_reader_profiles WHERE id = ? LIMIT 1"
     ).bind(profileId).first();
     if (profileRow) readerProfile = {
+      id:         profileRow.id || "",
       serialCode: profileRow.serial_code || "",
       country:    profileRow.country || "",
-      name:       profileRow.reader_name || ""
+      name:       profileRow.reader_name || "",
+      phone:      profileRow.phone || ""
     };
   }
   return json({ ok: true, identity: identityRaw, khatmas, readerProfile });
+}
+
+async function updateReaderProfile(request, DB) {
+  const body = await readJson(request);
+  const identityRaw = String(body.identity || "").trim();
+  const phone       = String(body.phone   || "").trim();
+  const country     = String(body.country || "").trim();
+  if (!identityRaw) return json({ ok: false, error: "الهوية مطلوبة" }, 400);
+  if (!country)     return json({ ok: false, error: "الدولة مطلوبة" }, 400);
+  if (!phone)       return json({ ok: false, error: "رقم الجوال مطلوب" }, 400);
+  if (!/^\+\d{8,15}$/.test(phone))
+    return json({ ok: false, error: "رقم الجوال يجب أن يبدأ بـ + ويحتوي أرقاماً فقط (8-15 رقم)" }, 400);
+  let profileRow = null;
+  if (/^R-\d{1,6}$/i.test(identityRaw)) {
+    profileRow = await DB.prepare(
+      "SELECT id FROM managed_reader_profiles WHERE serial_code = ? AND status != 'deleted' LIMIT 1"
+    ).bind(identityRaw.toUpperCase()).first();
+  }
+  if (!profileRow) {
+    const ac = normalizeAccessCode(identityRaw);
+    if (ac && isValidAccessCode(ac))
+      profileRow = await DB.prepare(
+        "SELECT id FROM managed_reader_profiles WHERE access_code = ? AND status != 'deleted' LIMIT 1"
+      ).bind(ac).first();
+  }
+  if (!profileRow) {
+    const pVars  = phoneSearchVariants(identityRaw);
+    const pLocal = normalizePhone(identityRaw);
+    const pCore  = pLocal.startsWith("0") ? pLocal.slice(1) : pLocal;
+    if (pVars.length) {
+      const inSql = pVars.map(()=>"?").join(",");
+      profileRow = await DB.prepare(
+        `SELECT id FROM managed_reader_profiles WHERE phone IN (${inSql}) AND status != 'deleted' LIMIT 1`
+      ).bind(...pVars).first();
+    }
+    if (!profileRow && pCore.length >= 8) {
+      const cands = (await DB.prepare(
+        "SELECT id FROM managed_reader_profiles WHERE SUBSTR(REPLACE(phone,'+',''),-?) = ? AND status != 'deleted'"
+      ).bind(pCore.length, pCore).all()).results || [];
+      if (cands.length > 1) return json({ ok: false, error: "يتطابق الرقم مع أكثر من قارئ، يرجى استخدام كود الدخول أو رقم السيريال" }, 409);
+      if (cands.length === 1) profileRow = cands[0];
+    }
+  }
+  if (!profileRow && identityRaw.length >= 2) {
+    profileRow = await DB.prepare(
+      "SELECT id FROM managed_reader_profiles WHERE reader_name = ? AND status != 'deleted' LIMIT 1"
+    ).bind(identityRaw).first();
+  }
+  if (!profileRow) return json({ ok: false, error: "لم يتم العثور على بيانات القارئ" }, 404);
+  await DB.prepare(
+    "UPDATE managed_reader_profiles SET phone = ?, country = ?, updated_at = datetime('now') WHERE id = ?"
+  ).bind(phone, country, profileRow.id).run();
+  return json({ ok: true });
 }
 
 async function systemBackup(request, DB) {
@@ -2656,8 +2760,24 @@ async function readerLookup(request, DB) {
   if (accessCode && isValidAccessCode(accessCode)) {
     rows = (await DB.prepare(base + " WHERE mcp.access_code = ?").bind(accessCode).all()).results || [];
   }
-  if (!rows.length && phone && phone.length >= 9) {
-    rows = (await DB.prepare(base + " WHERE mcp.phone = ?").bind(phone).all()).results || [];
+  if (!rows.length) {
+    const pVars  = phoneSearchVariants(identityRaw);
+    const pLocal = normalizePhone(identityRaw);
+    const pCore  = pLocal.startsWith("0") ? pLocal.slice(1) : pLocal;
+    if (pVars.length) {
+      const inSql = pVars.map(()=>"?").join(",");
+      rows = (await DB.prepare(base + ` WHERE mcp.phone IN (${inSql})`).bind(...pVars).all()).results || [];
+    }
+    if (!rows.length && pCore.length >= 8) {
+      const cands = (await DB.prepare(
+        base + " WHERE SUBSTR(REPLACE(mcp.phone,'+',''),-?) = ?"
+      ).bind(pCore.length, pCore).all()).results || [];
+      if (cands.length) {
+        const ids = new Set(cands.map(r => r.reader_profile_id || (r.participant_name + "|" + r.phone)));
+        if (ids.size > 1) return json({ ok: false, error: "يتطابق الرقم مع أكثر من قارئ، يرجى استخدام كود الدخول أو رقم السيريال" }, 409);
+        rows = cands;
+      }
+    }
   }
   if (!rows.length && identityRaw.length >= 2) {
     rows = (await DB.prepare(base + " WHERE mcp.participant_name = ?").bind(identityRaw).all()).results || [];
@@ -2713,6 +2833,7 @@ export async function onRequest(context) {
     if (parts.length === 3 && parts[0] === "managed-reader-groups" && parts[2] === "share" && method === "POST") return shareManagedReaderGroup(request, env.DB, parts[1]);
     if (parts.length === 1 && parts[0] === "reader-lookup" && method === "POST") return readerLookup(request, env.DB);
     if (parts.length === 1 && parts[0] === "reader-portal" && method === "POST") return readerPortal(request, env.DB);
+    if (parts.length === 3 && parts[0] === "reader" && parts[1] === "me" && parts[2] === "profile" && method === "PATCH") return updateReaderProfile(request, env.DB);
     if (parts.length === 1 && parts[0] === "system-backup" && method === "GET") return systemBackup(request, env.DB);
     if (parts.length === 1 && parts[0] === "system-restore" && method === "POST") return systemRestore(request, env.DB);
     if (parts.length === 1 && parts[0] === "dashboard-stats" && method === "GET") return dashboardStats(request, env.DB);

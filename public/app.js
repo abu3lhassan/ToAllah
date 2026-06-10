@@ -2,6 +2,17 @@
 const APP_CONFIG = window.APP_CONFIG || {};
 const APP_NAME = APP_CONFIG.APP_NAME || 'إلى الله';
 const API_BASE = '/api';
+const COUNTRY_CODES = [
+  { name: 'السعودية', code: '+966' },
+  { name: 'البحرين',  code: '+973' },
+  { name: 'الكويت',   code: '+965' },
+  { name: 'العراق',   code: '+964' },
+  { name: 'إيران',    code: '+98'  },
+  { name: 'عمان',     code: '+968' },
+  { name: 'قطر',      code: '+974' },
+  { name: 'الإمارات', code: '+971' },
+  { name: 'أخرى',     code: ''     },
+];
 const state = { khatmas: [], managedKhatmas: [], managedReaders: [], activeUnitKey: '', activeManagedUnitKey: '', activeAdminKhatmaId: '', activeResetUserId: '', activeDeleteUserId: '', activeDeleteKhatmaId: '', activeUpdateKhatmaId: '', activeDeleteManagedKhatmaId: '', activeUpdateManagedKhatmaId: '', activeDuplicateManagedKhatmaId: '', activeUnitFilter: 'all', activeUnitSearch: '', activeManagedUnitFilter: 'all', activeManagedUnitSearch: '', loading: true, user: null, token: localStorage.getItem('auth_token') || '', currentManageMode: false, currentManagedManageMode: false, ownerCreateUserOpen: false, activeReadersGroupId: '', editGroupId: '', currentReaderGroup: null, currentGroupReaders: [] };
 
 const app = document.getElementById('app');
@@ -1864,13 +1875,88 @@ async function setupReaderLogin(){
         return;
       }
 
+      // Profile and reader name — used by completion gate and normal portal flow
+      const profile = res.readerProfile || null;
+      const readerName = profile?.name || khatmas[0]?.participants?.find(p=>p.name)?.name || '';
+
+      // Completion gate: block portal if phone or country are missing
+      if (profile && (!profile.phone || !profile.country)) {
+        result.innerHTML = `
+          <section class="form-card glass" style="max-width:560px;margin-inline:auto">
+            <div class="sheet-head"><h3>إكمال بيانات القارئ</h3></div>
+            <p style="margin:0 0 16px;color:var(--muted)">مرحبًا <strong>${escapeHtml(readerName)}</strong>،<br>يرجى تأكيد بياناتك لاستكمال دخولك.</p>
+            <form id="profileCompletionForm">
+              <label style="display:block">الدولة
+                <select id="pcCountry" required style="margin-top:4px;width:100%">
+                  <option value="">— اختر دولتك —</option>
+                  ${COUNTRY_CODES.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}
+                </select>
+              </label>
+              <div id="pcOtherCodeWrap" hidden style="margin-top:12px">
+                <label style="display:block">مفتاح الدولة (مثال: +1)
+                  <input id="pcOtherCode" type="tel" placeholder="+1" style="margin-top:4px" />
+                </label>
+              </div>
+              <label style="display:block;margin-top:12px">رقم الجوال (بدون الصفر الأول)
+                <input id="pcPhone" type="tel" inputmode="numeric" placeholder="501234567" style="margin-top:4px" />
+              </label>
+              <p id="pcError" style="color:var(--danger,#c0392b);margin:10px 0 0;font-size:13px;display:none"></p>
+              <button class="btn primary" type="submit" style="margin-top:16px;width:100%">حفظ وتأكيد</button>
+            </form>
+          </section>`;
+
+        const pcCountry  = document.getElementById('pcCountry');
+        const pcOtherWrap = document.getElementById('pcOtherCodeWrap');
+        const pcOtherCode = document.getElementById('pcOtherCode');
+        const pcPhone    = document.getElementById('pcPhone');
+        const pcError    = document.getElementById('pcError');
+        const pcForm     = document.getElementById('profileCompletionForm');
+        function showPcError(msg){ pcError.textContent = msg; pcError.style.display = ''; }
+
+        pcCountry.addEventListener('change', () => {
+          pcOtherWrap.hidden = pcCountry.value !== 'أخرى';
+        });
+
+        pcForm.addEventListener('submit', async e => {
+          e.preventDefault();
+          pcError.style.display = 'none';
+          const selectedCountryName = pcCountry.value;
+          if (!selectedCountryName){ showPcError('يرجى اختيار الدولة'); return; }
+          let countryDialCode = '';
+          if (selectedCountryName === 'أخرى') {
+            const raw = (pcOtherCode.value || '').trim();
+            if (!raw){ showPcError('يرجى إدخال مفتاح الدولة'); return; }
+            if (!/^\+\d+$/.test(raw)){ showPcError('مفتاح الدولة يجب أن يبدأ بـ + ويحتوي أرقاماً فقط'); return; }
+            countryDialCode = raw;
+          } else {
+            const found = COUNTRY_CODES.find(c => c.name === selectedCountryName);
+            countryDialCode = found ? found.code : '';
+          }
+          if (!countryDialCode){ showPcError('تعذر تحديد مفتاح الدولة'); return; }
+          const localRaw = (pcPhone.value || '').replace(/[^0-9]/g, '');
+          if (!localRaw || localRaw.length < 7){ showPcError('رقم الجوال لا يقل عن 7 أرقام'); return; }
+          const localFinal = localRaw.startsWith('0') ? localRaw.slice(1) : localRaw;
+          const finalPhone = countryDialCode + localFinal;
+          if (!/^\+\d{8,15}$/.test(finalPhone)){ showPcError('صيغة الرقم غير صحيحة، يجب أن يكون بين 8-15 رقم بعد +'); return; }
+          const submitBtn = pcForm.querySelector('button[type=submit]');
+          if (submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'جاري الحفظ...'; }
+          try {
+            await api('/reader/me/profile', { method: 'PATCH', body: { identity, phone: finalPhone, country: selectedCountryName } });
+            toast('تم حفظ بياناتك بنجاح');
+            await doLookup(identity);
+          } catch(err) {
+            showPcError(err.message || 'تعذر حفظ البيانات، حاول مجدداً');
+            if (submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'حفظ وتأكيد'; }
+          }
+        });
+        return;
+      }
+
       // Cumulative statistics (across all khatmas)
       const allUnits = khatmas.flatMap(k => k.units || []);
       const totalDone = allUnits.filter(u=>u.status==='completed').length;
       const totalAssigned = allUnits.filter(u=>u.status!=='available').length;
       const totalPct = totalAssigned ? Math.round(totalDone/totalAssigned*100) : 0;
-      const profile = res.readerProfile || null;
-      const readerName = profile?.name || khatmas[0]?.participants?.find(p=>p.name)?.name || '';
 
       // ── Welcome header ─────────────────────────────────────────────
       const welcomeHtml = readerName ? `
