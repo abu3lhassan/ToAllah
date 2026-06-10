@@ -283,6 +283,20 @@ async function refreshManagedReaders(groupId, opts){
     }
   }catch(err){ console.error(err); state.managedReaders = []; toast(err.message || 'تعذر تحميل القراء'); }
 }
+async function refreshManagedGroups(opts){
+  if(!canUseManagedKhatmas()){ state.managedGroupsDisplay = []; return; }
+  try{
+    const pg = (opts && opts.page) || 1;
+    const lim = (opts && opts.limit) || 50;
+    const q = (opts && opts.q) || '';
+    const path = '/managed-reader-groups?page=' + pg + '&limit=' + lim + (q ? '&q=' + encodeURIComponent(q) : '');
+    const res = await api(path);
+    state.managedGroupsDisplay = res.groups || [];
+    state.managedGroupsTotal = res.total || 0;
+    state.managedGroupsPage = res.page || 1;
+    state.managedGroupsPages = res.pages || 1;
+  }catch(err){ console.error(err); state.managedGroupsDisplay = []; toast(err.message || 'تعذر تحميل المجموعات'); }
+}
 async function refreshOne(id){
   try{
     const res = await api('/khatmas/' + encodeURIComponent(id));
@@ -1514,43 +1528,19 @@ async function setupManagedReaders(){
     if(eyebrow && eyebrow.textContent.includes('مُدارة')) eyebrow.textContent = 'القراء';
   }
 
-  let groups = [];
-  try{ const res = await api('/managed-reader-groups'); groups = res.groups || []; }catch(err){ toast(err.message || 'تعذر تحميل المجموعات'); }
-  state.managedReaderGroups = groups;
-  await refreshManagedReaders(null, {ungrouped: true, page: 1, limit: 50});
+  // Load all groups (backward compat) for form dropdown + share-dialog state
+  let allGroupsList = [];
+  try{ const res = await api('/managed-reader-groups'); allGroupsList = res.groups || []; }catch(err){ toast(err.message || 'تعذر تحميل المجموعات'); }
+  state.managedReaderGroups = allGroupsList;
 
-  const groupById = Object.fromEntries(groups.map(g => [g.id, g]));
+  // Load paginated groups for display + readers in parallel
+  await Promise.all([
+    refreshManagedGroups({page: 1, limit: 50}),
+    refreshManagedReaders(null, {ungrouped: true, page: 1, limit: 50})
+  ]);
 
   const rotationLabel = t => t === 'weekly' ? 'أسبوعي' : t === 'monthly' ? 'شهري' : t === 'yearly' ? 'سنوي' : 'بلا تدوير';
-  const groupOptionsHtml = groups.map(g => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.name)}</option>`).join('');
-
-  const groupsHtml = groups.map(g => {
-    const shareBtn = state.user?.role === 'owner'
-      ? `<button class="mini-icon-btn v32" onclick="window.openShareReaderGroup('${escapeJs(g.id)}')" title="مشاركة"><span aria-hidden="true">⇌</span><strong>مشاركة</strong></button>`
-      : '';
-    const sharedBadge = g.shared_creator_group_id ? `<span class="mini-pill v32" style="background:rgba(15,95,69,.13);color:var(--primary)">مشارك</span>` : '';
-    return `<article class="khatma-list-row v32 glass">
-      <div class="khatma-list-main v32">
-        <div class="khatma-list-content v32">
-          <div class="khatma-list-badges v32">
-            <span class="mini-pill v32">${escapeHtml(rotationLabel(g.rotation_type))}</span>
-            ${sharedBadge}
-          </div>
-          <div class="khatma-list-titleline v32">
-            <h3>${escapeHtml(g.name)}</h3>
-            <p>${g.readerCount || 0} قارئ${g.rotation_start_date ? ' · بدأ ' + escapeHtml(g.rotation_start_date.slice(0,10)) : ''}</p>
-          </div>
-        </div>
-        <div class="khatma-list-side v32">
-          <div class="khatma-list-actions v32">
-            <a class="mini-icon-btn primary v32" href="#/reader-group/${escapeHtml(g.id)}" title="عرض"><span aria-hidden="true">↗</span><strong>عرض</strong></a>
-            <a class="mini-icon-btn v32" href="#/reader-group/${escapeHtml(g.id)}/manage" title="إدارة"><span aria-hidden="true">⚙</span><strong>إدارة</strong></a>
-            ${shareBtn}
-          </div>
-        </div>
-      </div>
-    </article>`;
-  }).join('');
+  const groupOptionsHtml = allGroupsList.map(g => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.name)}</option>`).join('');
 
   root.innerHTML = `
     ${state.user?.role === 'owner' ? '<input id="readersCsvFile" type="file" accept=".csv,text/csv" hidden />' : ''}
@@ -1572,7 +1562,9 @@ async function setupManagedReaders(){
       </form>
     </div>
 
-    ${groups.length ? groupsHtml : '<article class="feature-card empty-state"><h3>لا توجد مجموعات بعد</h3><p>أنشئ مجموعة لتنظيم قرائك وربطهم بالختمات المُدارة.</p></article>'}
+    <div style="margin-bottom:10px"><input id="groupsSearchInput" type="search" style="width:100%;padding:8px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:14px;direction:rtl" placeholder="بحث في المجموعات باسمها أو رقمها..." /></div>
+    <div id="groupsListContainer"></div>
+    <div id="groupsListPager" style="display:none;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:8px;margin-bottom:16px"></div>
 
     <article class="inline-panel action-sheet" style="margin-top:16px">
       <div class="sheet-head"><h3 id="readersListTitle">قراء بلا مجموعة</h3><span id="readersListTotal"></span></div>
@@ -1711,8 +1703,83 @@ async function setupManagedReaders(){
   });
   _renderReadersTable();
 
-  // Bind edit group form submits
-  groups.forEach(g => {
+  // Groups search + pagination helpers
+  let _groupsQ = '';
+  function _renderGroupsSection() {
+    const groups = state.managedGroupsDisplay || [];
+    const total = state.managedGroupsTotal || 0;
+    const pages = state.managedGroupsPages || 1;
+    const page = state.managedGroupsPage || 1;
+    const containerEl = document.getElementById('groupsListContainer');
+    const pagerEl = document.getElementById('groupsListPager');
+    if(!containerEl) return;
+    if(!groups.length){
+      containerEl.innerHTML = `<article class="feature-card empty-state"><h3>${_groupsQ ? 'لا توجد نتائج' : 'لا توجد مجموعات بعد'}</h3>${_groupsQ ? '' : '<p>أنشئ مجموعة لتنظيم قرائك وربطهم بالختمات المُدارة.</p>'}</article>`;
+    } else {
+      containerEl.innerHTML = groups.map(g => {
+        const shareBtn = state.user?.role === 'owner'
+          ? `<button class="mini-icon-btn v32" onclick="window.openShareReaderGroup('${escapeJs(g.id)}')" title="مشاركة"><span aria-hidden="true">⇌</span><strong>مشاركة</strong></button>`
+          : '';
+        const sharedBadge = g.shared_creator_group_id ? `<span class="mini-pill v32" style="background:rgba(15,95,69,.13);color:var(--primary)">مشارك</span>` : '';
+        return `<article class="khatma-list-row v32 glass">
+          <div class="khatma-list-main v32">
+            <div class="khatma-list-content v32">
+              <div class="khatma-list-badges v32">
+                <span class="mini-pill v32">${escapeHtml(rotationLabel(g.rotation_type))}</span>
+                ${sharedBadge}
+              </div>
+              <div class="khatma-list-titleline v32">
+                <h3>${escapeHtml(g.name)}</h3>
+                <p>${g.readerCount || 0} قارئ${g.rotation_start_date ? ' · بدأ ' + escapeHtml(g.rotation_start_date.slice(0,10)) : ''}</p>
+              </div>
+            </div>
+            <div class="khatma-list-side v32">
+              <div class="khatma-list-actions v32">
+                <a class="mini-icon-btn primary v32" href="#/reader-group/${escapeHtml(g.id)}" title="عرض"><span aria-hidden="true">↗</span><strong>عرض</strong></a>
+                <a class="mini-icon-btn v32" href="#/reader-group/${escapeHtml(g.id)}/manage" title="إدارة"><span aria-hidden="true">⚙</span><strong>إدارة</strong></a>
+                ${shareBtn}
+              </div>
+            </div>
+          </div>
+        </article>`;
+      }).join('');
+    }
+    if(!pagerEl) return;
+    if(pages <= 1){ pagerEl.style.display = 'none'; return; }
+    pagerEl.style.display = 'flex';
+    pagerEl.innerHTML = `
+      <button class="btn ghost compact-btn" id="gPgFirst">«</button>
+      <button class="btn ghost compact-btn" id="gPgPrev">‹</button>
+      <span style="line-height:32px;font-size:13px;opacity:0.7">صفحة ${page} من ${pages} · ${total} مجموعة</span>
+      <button class="btn ghost compact-btn" id="gPgNext">›</button>
+      <button class="btn ghost compact-btn" id="gPgLast">»</button>
+    `;
+    document.getElementById('gPgFirst').disabled = page <= 1;
+    document.getElementById('gPgPrev').disabled = page <= 1;
+    document.getElementById('gPgNext').disabled = page >= pages;
+    document.getElementById('gPgLast').disabled = page >= pages;
+    document.getElementById('gPgFirst').onclick = () => _groupsFetchPage(1);
+    document.getElementById('gPgPrev').onclick = () => _groupsFetchPage(page - 1);
+    document.getElementById('gPgNext').onclick = () => _groupsFetchPage(page + 1);
+    document.getElementById('gPgLast').onclick = () => _groupsFetchPage(pages);
+  }
+  async function _groupsFetchPage(pg) {
+    await refreshManagedGroups({page: pg, limit: 50, q: _groupsQ});
+    _renderGroupsSection();
+  }
+  let _groupsSearchTimer;
+  document.getElementById('groupsSearchInput')?.addEventListener('input', e => {
+    clearTimeout(_groupsSearchTimer);
+    _groupsSearchTimer = setTimeout(async () => {
+      _groupsQ = e.target.value.trim();
+      await refreshManagedGroups({page: 1, limit: 50, q: _groupsQ});
+      _renderGroupsSection();
+    }, 400);
+  });
+  _renderGroupsSection();
+
+  // Bind edit group form submits (forms rendered by setupReaderGroup manage mode)
+  allGroupsList.forEach(g => {
     document.getElementById(`editGroupForm_${g.id}`)?.addEventListener('submit', async e => {
       e.preventDefault();
       const name = document.getElementById(`gName_${g.id}`)?.value.trim() || '';

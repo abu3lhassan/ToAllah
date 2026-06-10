@@ -729,46 +729,79 @@ async function listReaderGroups(request, DB) {
   await ensureGroupSchema(DB);
   const check = await requireManagedCreator(request, DB);
   if (!check.ok) return check.response;
-  let rows;
+  const url = new URL(request.url);
+  const pageParam = url.searchParams.get("page");
+  const limitParam = url.searchParams.get("limit");
+  const q = (url.searchParams.get("q") || "").trim();
+
+  // Pagination/search activate only when at least one param is present — backward compat
+  const paginate = !!(pageParam || limitParam || q);
+  const page = paginate ? Math.max(1, parseInt(pageParam || "1", 10)) : 1;
+  const limit = paginate ? Math.min(200, Math.max(1, parseInt(limitParam || "50", 10))) : 9999;
+  const offset = paginate ? (page - 1) * limit : 0;
+
+  const qFilter = q ? " AND g.name LIKE ?" : "";
+  const qParam = q ? [`%${q}%`] : [];
+
+  let rows, total;
+
   if (check.user.role === "owner") {
-    rows = (await DB.prepare(`
+    if (paginate) {
+      const countRow = await DB.prepare(
+        `SELECT COUNT(*) AS total FROM managed_reader_groups g WHERE g.status != 'deleted'${qFilter}`
+      ).bind(...qParam).first();
+      total = countRow?.total || 0;
+    }
+    const mainSql = `
       SELECT g.*, COUNT(p.id) AS readers_count
       FROM managed_reader_groups g
       LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
-      WHERE g.status != 'deleted'
+      WHERE g.status != 'deleted'${qFilter}
       GROUP BY g.id
-      ORDER BY g.created_at DESC
-    `).all()).results || [];
+      ORDER BY g.created_at DESC${paginate ? " LIMIT ? OFFSET ?" : ""}`;
+    const mainParams = paginate ? [...qParam, limit, offset] : qParam;
+    rows = (await DB.prepare(mainSql).bind(...mainParams).all()).results || [];
   } else {
     await ensureCreatorGroupSchema(DB);
     const visibleIds = await getCreatorGroupMemberIds(DB, check.user.id);
     const userGroupIds2 = await getUserGroupIds(DB, check.user.id);
-    let rgQuery, rgParams;
+    let roleWhere, roleParams;
     if (userGroupIds2.length) {
-      const sharedRgClause = `OR (g.shared_creator_group_id IS NOT NULL AND g.shared_creator_group_id IN (${userGroupIds2.map(()=>"?").join(",")}))`;
-      rgQuery = `
-        SELECT g.*, COUNT(p.id) AS readers_count
-        FROM managed_reader_groups g
-        LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
-        WHERE g.status != 'deleted' AND (g.created_by_user_id IN (${visibleIds.map(()=>"?").join(",")}) ${sharedRgClause})
-        GROUP BY g.id
-        ORDER BY g.created_at DESC
-      `;
-      rgParams = [...visibleIds, ...userGroupIds2];
+      const sharedRgClause = `OR (g.shared_creator_group_id IS NOT NULL AND g.shared_creator_group_id IN (${userGroupIds2.map(() => "?").join(",")}))`;
+      roleWhere = `WHERE g.status != 'deleted' AND (g.created_by_user_id IN (${visibleIds.map(() => "?").join(",")}) ${sharedRgClause})${qFilter}`;
+      roleParams = [...visibleIds, ...userGroupIds2, ...qParam];
     } else {
-      rgQuery = `
-        SELECT g.*, COUNT(p.id) AS readers_count
-        FROM managed_reader_groups g
-        LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
-        WHERE g.status != 'deleted' AND g.created_by_user_id IN (${visibleIds.map(()=>"?").join(",")})
-        GROUP BY g.id
-        ORDER BY g.created_at DESC
-      `;
-      rgParams = visibleIds;
+      roleWhere = `WHERE g.status != 'deleted' AND g.created_by_user_id IN (${visibleIds.map(() => "?").join(",")})${qFilter}`;
+      roleParams = [...visibleIds, ...qParam];
     }
-    rows = (await DB.prepare(rgQuery).bind(...rgParams).all()).results || [];
+    if (paginate) {
+      const countRow = await DB.prepare(
+        `SELECT COUNT(*) AS total FROM managed_reader_groups g ${roleWhere}`
+      ).bind(...roleParams).first();
+      total = countRow?.total || 0;
+    }
+    const mainSql = `
+      SELECT g.*, COUNT(p.id) AS readers_count
+      FROM managed_reader_groups g
+      LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
+      ${roleWhere}
+      GROUP BY g.id
+      ORDER BY g.created_at DESC${paginate ? " LIMIT ? OFFSET ?" : ""}`;
+    const mainParams = paginate ? [...roleParams, limit, offset] : roleParams;
+    rows = (await DB.prepare(mainSql).bind(...mainParams).all()).results || [];
   }
-  return json({ ok: true, groups: rows.map(r => ({ ...r, readerCount: Number(r.readers_count) || 0, rotationDurationYears: r.rotation_duration_years || 5 })) });
+
+  const result = {
+    ok: true,
+    groups: rows.map(r => ({ ...r, readerCount: Number(r.readers_count) || 0, rotationDurationYears: r.rotation_duration_years || 5 }))
+  };
+  if (paginate) {
+    result.total = total;
+    result.page = page;
+    result.limit = limit;
+    result.pages = Math.ceil(total / limit) || 1;
+  }
+  return json(result);
 }
 
 async function createReaderGroup(request, DB) {
