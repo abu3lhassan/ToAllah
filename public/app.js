@@ -209,6 +209,8 @@ function renderAuthLinks(){
   const khatmasNavGroup = document.getElementById('khatmasNavGroup');
   if(khatmasNavGroup) khatmasNavGroup.hidden = !isOwner;
   if(ownerNav) ownerNav.hidden = !isOwner;
+  const ownerControlNav = document.getElementById('ownerControlNav');
+  if(ownerControlNav) ownerControlNav.hidden = !isOwner;
   if(managedNavGroup) managedNavGroup.hidden = !canUseManagedKhatmas();
   if(userMenuOwner) userMenuOwner.hidden = !isOwner;
   const khatmasDropdownLink = document.getElementById('khatmasDropdownLink');
@@ -360,6 +362,7 @@ async function router(){
   const hash = location.hash || '#/home';
   if(hash.startsWith('#/logout')) return logout();
   if(hash.startsWith('#/login')) return renderTemplate('loginTemplate', setupLogin);
+  if(hash.startsWith('#/owner-control')) return renderTemplate('ownerControlTemplate', setupOwnerControl);
   if(hash.startsWith('#/owner')) return renderTemplate('ownerTemplate', setupOwner);
   if(hash.startsWith('#/reports')) return renderTemplate('reportsTemplate', setupReports);
   if(hash.startsWith('#/dashboard')) return renderTemplate('dashboardTemplate', setupDashboard);
@@ -735,6 +738,565 @@ window.toggleManagedUserPermission = async function(id, enabled){
   }catch(err){ toast(err.message || 'تعذر تحديث صلاحية الختمات المُدارة'); }
 }
 
+// ── Owner Control Center ────────────────────────────────────
+
+async function setupOwnerControl(){
+  const root = document.getElementById('ownerControlView');
+  if(!root) return;
+  if(!state.user){ root.innerHTML = `<article class="feature-card"><h3>تسجيل الدخول مطلوب</h3><a class="btn primary" href="#/login">تسجيل الدخول</a></article>`; return; }
+  if(state.user.role !== 'owner'){ root.innerHTML = `<article class="feature-card"><h3>غير مصرح</h3><p>لوحة تحكم المالك للمالك فقط.</p></article>`; return; }
+
+  const TABS = [
+    {id:'overview', label:'نظرة عامة'},
+    {id:'readers',  label:'القراء'},
+    {id:'groups',   label:'المجموعات'},
+    {id:'khatmas',  label:'الختمات'},
+    {id:'users',    label:'المستخدمون'},
+    {id:'reports',  label:'التقارير'},
+    {id:'search',   label:'بحث شامل'}
+  ];
+  if(!state._occTab) state._occTab = 'overview';
+
+  function renderTabs(){
+    const nav = root.querySelector('#occTabNav');
+    if(!nav) return;
+    nav.innerHTML = TABS.map(t =>
+      `<button class="btn ${t.id===state._occTab?'primary':'ghost'} compact-btn" onclick="window._occSetTab('${t.id}')">${t.label}</button>`
+    ).join('');
+  }
+
+  root.innerHTML = `
+    <div id="occTabNav" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:20px;padding-bottom:12px;border-bottom:2px solid var(--border-color,#e5e7eb)"></div>
+    <div id="occContent"></div>
+  `;
+  renderTabs();
+
+  window._occSetTab = function(tab){
+    state._occTab = tab;
+    renderTabs();
+    _occRenderTab(tab);
+  };
+
+  _occRenderTab(state._occTab);
+}
+
+function _occRenderTab(tab){
+  const el = document.getElementById('occContent');
+  if(!el) return;
+  switch(tab){
+    case 'overview': _occTabOverview(el); break;
+    case 'readers':  _occTabReaders(el);  break;
+    case 'groups':   _occTabGroups(el);   break;
+    case 'khatmas':  _occTabKhatmas(el);  break;
+    case 'users':    _occTabUsers(el);    break;
+    case 'reports':  _occTabReports(el);  break;
+    case 'search':   _occTabSearch(el);   break;
+    default: el.innerHTML = '<p style="opacity:.5;text-align:center;padding:30px">قريباً</p>';
+  }
+}
+
+// ── Tab: Overview ──────────────────────────────────────────
+
+async function _occTabOverview(el){
+  el.innerHTML = '<p style="opacity:.5;text-align:center;padding:30px">جاري التحميل...</p>';
+  try{
+    const res = await api('/owner/overview');
+    const s = res.stats;
+    const cards = [
+      ['المستخدمون',       s.users,          '#/owner'],
+      ['منشئو الختمات',    s.creators,        '#/owner'],
+      ['المجموعات',        s.groups,          '#/owner-control?t=groups'],
+      ['القراء',           s.readers,         '#/owner-control?t=readers'],
+      ['شواغر الختمات',   s.vacancies,       '#/owner-control?t=khatmas'],
+      ['القراء بلا هاتف',  s.missingPhone,    '#/owner-control?t=readers&m=phone'],
+      ['القراء بلا دولة',  s.missingCountry,  '#/owner-control?t=readers&m=country'],
+      ['الختمات الكلي',    s.khatmas,         '#/owner-control?t=khatmas'],
+      ['الختمات النشطة',   s.activeKhatmas,   '#/owner-control?t=khatmas&s=active']
+    ];
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px">
+        ${cards.map(([label,val,href])=>`
+          <a href="${href}" style="text-decoration:none">
+            <div class="khatma-card glass" style="padding:16px;text-align:center;cursor:pointer">
+              <div style="font-size:32px;font-weight:800;color:var(--primary,#2563eb)">${Number(val)||0}</div>
+              <div style="font-size:12px;opacity:.7;margin-top:4px">${label}</div>
+            </div>
+          </a>
+        `).join('')}
+      </div>
+    `;
+  }catch(err){
+    el.innerHTML = `<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+// ── Tab: Readers ──────────────────────────────────────────
+
+function _occTabReaders(el){
+  if(!state._occRQ) state._occRQ = '';
+  if(!state._occRPage) state._occRPage = 1;
+  if(!state._occRMissing) state._occRMissing = '';
+
+  el.innerHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <input id="occRSearch" type="search" style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:14px;direction:rtl" placeholder="بحث باسم أو هاتف أو كود أو رقم تسلسلي..." value="${escapeHtml(state._occRQ)}" />
+      <select id="occRMissing" style="padding:8px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:14px">
+        <option value="">الكل</option>
+        <option value="phone"   ${state._occRMissing==='phone'  ?'selected':''}>بدون هاتف</option>
+        <option value="country" ${state._occRMissing==='country'?'selected':''}>بدون دولة</option>
+        <option value="any"     ${state._occRMissing==='any'    ?'selected':''}>بدون هاتف أو دولة</option>
+      </select>
+      <button class="btn primary compact-btn" onclick="window._occSearchReaders()">بحث</button>
+    </div>
+    <div id="occRContent"></div>
+  `;
+
+  let _occRTimer;
+  document.getElementById('occRSearch')?.addEventListener('input', ()=>{
+    clearTimeout(_occRTimer);
+    _occRTimer = setTimeout(()=>window._occSearchReaders(), 400);
+  });
+  document.getElementById('occRMissing')?.addEventListener('change', ()=>window._occSearchReaders());
+
+  window._occSearchReaders = function(){
+    state._occRQ = document.getElementById('occRSearch')?.value.trim() || '';
+    state._occRMissing = document.getElementById('occRMissing')?.value || '';
+    state._occRPage = 1;
+    _occLoadReaders();
+  };
+  window._occReaderPage = function(pg){ state._occRPage = pg; _occLoadReaders(); };
+
+  _occLoadReaders();
+}
+
+async function _occLoadReaders(){
+  const el = document.getElementById('occRContent');
+  if(!el) return;
+  el.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">جاري التحميل...</p>';
+  try{
+    const p = new URLSearchParams({
+      page: state._occRPage || 1, limit: 50,
+      q: state._occRQ || '', missingContact: state._occRMissing || ''
+    });
+    const res = await api('/owner/readers?' + p);
+    state._occRList = res.readers || [];
+    const { total=0, pages=1, page=1 } = res;
+    const pager = pages > 1 ? `
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:12px">
+        <button class="btn ghost compact-btn" onclick="window._occReaderPage(1)" ${page<=1?'disabled':''}>«</button>
+        <button class="btn ghost compact-btn" onclick="window._occReaderPage(${page-1})" ${page<=1?'disabled':''}>‹</button>
+        <span style="line-height:32px;font-size:13px;opacity:.7">صفحة ${page} من ${pages}</span>
+        <button class="btn ghost compact-btn" onclick="window._occReaderPage(${page+1})" ${page>=pages?'disabled':''}>›</button>
+        <button class="btn ghost compact-btn" onclick="window._occReaderPage(${pages})" ${page>=pages?'disabled':''}>»</button>
+      </div>` : '';
+    el.innerHTML = `
+      <p style="opacity:.6;font-size:13px;margin-bottom:8px">${total} قارئ</p>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="background:var(--surface-alt,#f9fafb);text-align:right">
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">الرقم</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">الاسم</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">الهاتف</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">الدولة</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">المجموعة</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">المنشئ</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)"></th>
+          </tr></thead>
+          <tbody>
+            ${state._occRList.map(r=>`
+              <tr style="border-bottom:1px solid var(--border-color,#e5e7eb)">
+                <td style="padding:5px 6px;font-size:11px;opacity:.6" dir="ltr">${escapeHtml(r.serialCode)}</td>
+                <td style="padding:5px 6px">${escapeHtml(r.name)}</td>
+                <td style="padding:5px 6px;font-size:12px;direction:ltr" dir="ltr">${r.phone?escapeHtml(r.phone):'<span style="color:var(--danger)">—</span>'}</td>
+                <td style="padding:5px 6px;font-size:12px">${r.country?escapeHtml(r.country):'<span style="color:var(--danger)">—</span>'}</td>
+                <td style="padding:5px 6px;font-size:12px;opacity:.8">${escapeHtml(r.groupName||'—')}</td>
+                <td style="padding:5px 6px;font-size:11px;opacity:.6">${escapeHtml(r.ownerName||'—')}</td>
+                <td style="padding:5px 6px"><button class="btn ghost compact-btn" style="font-size:11px" onclick="window._occOpenEditReader('${escapeJs(r.id)}')">تعديل</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${pager}
+    `;
+  }catch(err){
+    el.innerHTML = `<p style="color:var(--danger);padding:8px">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+window._occOpenEditReader = async function(id){
+  const reader = (state._occRList||[]).find(r=>r.id===id);
+  if(!reader) return;
+
+  let groups = state.managedReaderGroups||[];
+  if(!groups.length){
+    try{ const gr = await api('/managed-reader-groups'); groups = gr.groups||[]; }catch(e){}
+  }
+
+  document.getElementById('occEditModal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'occEditModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto';
+  modal.innerHTML = `
+    <div class="form-card glass" style="max-width:500px;width:100%;margin-top:20px">
+      <div class="sheet-head">
+        <h3>تعديل قارئ — ${escapeHtml(reader.serialCode)}</h3>
+        <button type="button" class="btn ghost compact-btn" onclick="document.getElementById('occEditModal')?.remove()">✕ إغلاق</button>
+      </div>
+      <form id="occEditReaderForm">
+        <div class="form-grid">
+          <label>الاسم<input name="reader_name" value="${escapeHtml(reader.name)}" required /></label>
+          <label>الهاتف (دولي)<input name="phone" dir="ltr" value="${escapeHtml(reader.phone)}" placeholder="+966XXXXXXXXX" /></label>
+          <label>الدولة<input name="country" value="${escapeHtml(reader.country)}" /></label>
+          <label>الكود (4-10 أرقام)<input name="access_code" inputmode="numeric" value="${escapeHtml(reader.accessCode)}" required /></label>
+          <label>الرقم التسلسلي<input name="serial_code" value="${escapeHtml(reader.serialCode)}" /></label>
+          <label>المجموعة<select name="group_id">
+            <option value="">— بلا مجموعة —</option>
+            ${groups.map(g=>`<option value="${escapeHtml(g.id)}" ${g.id===reader.groupId?'selected':''}>${escapeHtml(g.name)}</option>`).join('')}
+          </select></label>
+          <label>الحالة<select name="status">
+            <option value="active"   ${reader.status==='active'  ?'selected':''}>نشط</option>
+            <option value="inactive" ${reader.status==='inactive'?'selected':''}>غير نشط</option>
+          </select></label>
+          <label class="full">ملاحظات<input name="notes" value="${escapeHtml(reader.notes)}" /></label>
+        </div>
+        <p style="font-size:11px;opacity:.45;margin-top:8px">ممنوع تعديل: id · created_by_user_id · start_juz · parts_count · created_at</p>
+        <div class="compact-actions" style="margin-top:10px">
+          <button class="btn primary compact-btn" type="submit" id="occEditSaveBtn">حفظ التغييرات</button>
+          <button class="btn ghost compact-btn" type="button" onclick="document.getElementById('occEditModal')?.remove()">إلغاء</button>
+        </div>
+      </form>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  document.getElementById('occEditReaderForm')?.addEventListener('submit', async e=>{
+    e.preventDefault();
+    const btn = document.getElementById('occEditSaveBtn');
+    if(btn) btn.disabled = true;
+    const body = {};
+    for(const [k,v] of new FormData(e.currentTarget).entries()){ body[k] = String(v).trim(); }
+    try{
+      await api('/owner/readers/'+encodeURIComponent(id), {method:'PATCH', body});
+      toast('تم تحديث القارئ');
+      document.getElementById('occEditModal')?.remove();
+      _occLoadReaders();
+    }catch(err){
+      toast(err.message||'تعذر التحديث');
+      if(btn) btn.disabled = false;
+    }
+  });
+};
+
+// ── Tab: Groups ───────────────────────────────────────────
+
+function _occTabGroups(el){
+  if(!state._occGQ) state._occGQ = '';
+  if(!state._occGPage) state._occGPage = 1;
+
+  el.innerHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <input id="occGSearch" type="search" style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:14px;direction:rtl" placeholder="بحث باسم المجموعة..." value="${escapeHtml(state._occGQ)}" />
+      <button class="btn primary compact-btn" onclick="window._occSearchGroups()">بحث</button>
+    </div>
+    <div id="occGContent"></div>
+  `;
+
+  let _t;
+  document.getElementById('occGSearch')?.addEventListener('input', ()=>{ clearTimeout(_t); _t = setTimeout(()=>window._occSearchGroups(), 400); });
+  window._occSearchGroups = function(){ state._occGQ = document.getElementById('occGSearch')?.value.trim()||''; state._occGPage=1; _occLoadGroups(); };
+  window._occGroupPage = function(pg){ state._occGPage=pg; _occLoadGroups(); };
+  _occLoadGroups();
+}
+
+async function _occLoadGroups(){
+  const el = document.getElementById('occGContent');
+  if(!el) return;
+  el.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">جاري التحميل...</p>';
+  try{
+    const p = new URLSearchParams({ page: state._occGPage||1, limit:50, q: state._occGQ||'' });
+    const res = await api('/owner/groups?'+p);
+    const { total=0, pages=1, page=1 } = res;
+    const pager = pages>1?`<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:12px"><button class="btn ghost compact-btn" onclick="window._occGroupPage(1)" ${page<=1?'disabled':''}>«</button><button class="btn ghost compact-btn" onclick="window._occGroupPage(${page-1})" ${page<=1?'disabled':''}>‹</button><span style="line-height:32px;font-size:13px;opacity:.7">صفحة ${page} من ${pages}</span><button class="btn ghost compact-btn" onclick="window._occGroupPage(${page+1})" ${page>=pages?'disabled':''}>›</button><button class="btn ghost compact-btn" onclick="window._occGroupPage(${pages})" ${page>=pages?'disabled':''}>»</button></div>`:'';
+    el.innerHTML = `
+      <p style="opacity:.6;font-size:13px;margin-bottom:8px">${total} مجموعة</p>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="background:var(--surface-alt,#f9fafb);text-align:right">
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">المجموعة</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">القراء</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">التدوير</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">المنشئ</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)"></th>
+          </tr></thead>
+          <tbody>
+            ${(res.groups||[]).map(g=>`
+              <tr style="border-bottom:1px solid var(--border-color,#e5e7eb)">
+                <td style="padding:5px 6px">${escapeHtml(g.name)}</td>
+                <td style="padding:5px 6px;text-align:center">${g.readerCount||0}</td>
+                <td style="padding:5px 6px;font-size:12px;opacity:.7">${escapeHtml(g.rotationType||'—')}</td>
+                <td style="padding:5px 6px;font-size:11px;opacity:.6">${escapeHtml(g.ownerName||'—')}</td>
+                <td style="padding:5px 6px"><a class="btn ghost compact-btn" style="font-size:11px" href="#/reader-group/${escapeHtml(g.id)}">فتح</a></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${pager}
+    `;
+  }catch(err){
+    el.innerHTML = `<p style="color:var(--danger);padding:8px">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+// ── Tab: Khatmas ──────────────────────────────────────────
+
+function _occTabKhatmas(el){
+  if(!state._occKQ) state._occKQ = '';
+  if(!state._occKPage) state._occKPage = 1;
+  if(!state._occKStatus) state._occKStatus = '';
+
+  el.innerHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <input id="occKSearch" type="search" style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:14px;direction:rtl" placeholder="بحث باسم الختمة..." value="${escapeHtml(state._occKQ)}" />
+      <select id="occKStatus" style="padding:8px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:14px">
+        <option value="" ${!state._occKStatus?'selected':''}>الكل</option>
+        <option value="active"   ${state._occKStatus==='active'  ?'selected':''}>نشطة</option>
+        <option value="archived" ${state._occKStatus==='archived'?'selected':''}>مؤرشفة</option>
+      </select>
+      <button class="btn primary compact-btn" onclick="window._occSearchKhatmas()">بحث</button>
+    </div>
+    <div id="occKContent"></div>
+  `;
+
+  let _t;
+  document.getElementById('occKSearch')?.addEventListener('input', ()=>{ clearTimeout(_t); _t=setTimeout(()=>window._occSearchKhatmas(),400); });
+  document.getElementById('occKStatus')?.addEventListener('change', ()=>window._occSearchKhatmas());
+  window._occSearchKhatmas = function(){ state._occKQ=document.getElementById('occKSearch')?.value.trim()||''; state._occKStatus=document.getElementById('occKStatus')?.value||''; state._occKPage=1; _occLoadKhatmas(); };
+  window._occKhatmaPage = function(pg){ state._occKPage=pg; _occLoadKhatmas(); };
+  _occLoadKhatmas();
+}
+
+async function _occLoadKhatmas(){
+  const el = document.getElementById('occKContent');
+  if(!el) return;
+  el.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">جاري التحميل...</p>';
+  try{
+    const p = new URLSearchParams({ page:state._occKPage||1, limit:25, q:state._occKQ||'', status:state._occKStatus||'' });
+    const res = await api('/owner/khatmas?'+p);
+    const { total=0, pages=1, page=1 } = res;
+    const pager = pages>1?`<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:12px"><button class="btn ghost compact-btn" onclick="window._occKhatmaPage(1)" ${page<=1?'disabled':''}>«</button><button class="btn ghost compact-btn" onclick="window._occKhatmaPage(${page-1})" ${page<=1?'disabled':''}>‹</button><span style="line-height:32px;font-size:13px;opacity:.7">صفحة ${page} من ${pages}</span><button class="btn ghost compact-btn" onclick="window._occKhatmaPage(${page+1})" ${page>=pages?'disabled':''}>›</button><button class="btn ghost compact-btn" onclick="window._occKhatmaPage(${pages})" ${page>=pages?'disabled':''}>»</button></div>`:'';
+    el.innerHTML = `
+      <p style="opacity:.6;font-size:13px;margin-bottom:8px">${total} ختمة</p>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="background:var(--surface-alt,#f9fafb);text-align:right">
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">الختمة</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">النوع</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">الحالة</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">مشاركون</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">المنشئ</th>
+          </tr></thead>
+          <tbody>
+            ${(res.khatmas||[]).map(k=>`
+              <tr style="border-bottom:1px solid var(--border-color,#e5e7eb)">
+                <td style="padding:5px 6px"><a href="#/managed-khatma/${escapeHtml(k.id)}" style="color:var(--primary,#2563eb)">${escapeHtml(k.title||k.id)}</a></td>
+                <td style="padding:5px 6px;font-size:12px;opacity:.7">${escapeHtml(k.khatmaType||'—')}</td>
+                <td style="padding:5px 6px"><span style="font-size:11px;padding:2px 6px;border-radius:4px;background:${k.status==='archived'?'rgba(100,100,100,.15)':'rgba(34,197,94,.15)'}">${k.status==='archived'?'مؤرشفة':'نشطة'}</span></td>
+                <td style="padding:5px 6px;text-align:center">${k.participantsCount}</td>
+                <td style="padding:5px 6px;font-size:11px;opacity:.6">${escapeHtml(k.ownerName||'—')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${pager}
+    `;
+  }catch(err){
+    el.innerHTML = `<p style="color:var(--danger);padding:8px">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+// ── Tab: Users ────────────────────────────────────────────
+
+function _occTabUsers(el){
+  if(!state._occUQ) state._occUQ = '';
+  if(!state._occUPage) state._occUPage = 1;
+
+  el.innerHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <input id="occUSearch" type="search" style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:14px;direction:rtl" placeholder="بحث باسم مستخدم..." value="${escapeHtml(state._occUQ)}" />
+      <button class="btn primary compact-btn" onclick="window._occSearchUsers()">بحث</button>
+    </div>
+    <div id="occUContent"></div>
+  `;
+
+  let _t;
+  document.getElementById('occUSearch')?.addEventListener('input', ()=>{ clearTimeout(_t); _t=setTimeout(()=>window._occSearchUsers(),400); });
+  window._occSearchUsers = function(){ state._occUQ=document.getElementById('occUSearch')?.value.trim()||''; state._occUPage=1; _occLoadUsers(); };
+  window._occUsersPage = function(pg){ state._occUPage=pg; _occLoadUsers(); };
+  _occLoadUsers();
+}
+
+async function _occLoadUsers(){
+  const el = document.getElementById('occUContent');
+  if(!el) return;
+  el.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">جاري التحميل...</p>';
+  try{
+    const p = new URLSearchParams({ page:state._occUPage||1, limit:25, q:state._occUQ||'' });
+    const res = await api('/owner/users?'+p);
+    const { total=0, pages=1, page=1 } = res;
+    const pager = pages>1?`<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:12px"><button class="btn ghost compact-btn" onclick="window._occUsersPage(1)" ${page<=1?'disabled':''}>«</button><button class="btn ghost compact-btn" onclick="window._occUsersPage(${page-1})" ${page<=1?'disabled':''}>‹</button><span style="line-height:32px;font-size:13px;opacity:.7">صفحة ${page} من ${pages}</span><button class="btn ghost compact-btn" onclick="window._occUsersPage(${page+1})" ${page>=pages?'disabled':''}>›</button><button class="btn ghost compact-btn" onclick="window._occUsersPage(${pages})" ${page>=pages?'disabled':''}>»</button></div>`:'';
+    el.innerHTML = `
+      <p style="opacity:.6;font-size:13px;margin-bottom:8px">${total} مستخدم</p>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="background:var(--surface-alt,#f9fafb);text-align:right">
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">المستخدم</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">الدور</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">مجموعات</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">قراء</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">ختمات</th>
+            <th style="padding:7px 6px;border-bottom:2px solid var(--border-color,#e5e7eb)">الحالة</th>
+          </tr></thead>
+          <tbody>
+            ${(res.users||[]).map(u=>`
+              <tr style="border-bottom:1px solid var(--border-color,#e5e7eb)">
+                <td style="padding:5px 6px"><strong>${escapeHtml(u.displayName||u.username)}</strong><br><span style="font-size:11px;opacity:.55">${escapeHtml(u.username)}</span></td>
+                <td style="padding:5px 6px;font-size:12px">${escapeHtml(u.role)}</td>
+                <td style="padding:5px 6px;text-align:center">${u.groupsCount}</td>
+                <td style="padding:5px 6px;text-align:center">${u.readersCount}</td>
+                <td style="padding:5px 6px;text-align:center">${u.khatmasCount}</td>
+                <td style="padding:5px 6px"><span style="font-size:11px;padding:2px 6px;border-radius:4px;background:${u.status!=='active'?'rgba(239,68,68,.15)':'rgba(34,197,94,.15)'};color:${u.status!=='active'?'var(--danger)':'inherit'}">${escapeHtml(u.status)}</span></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${pager}
+    `;
+  }catch(err){
+    el.innerHTML = `<p style="color:var(--danger);padding:8px">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+// ── Tab: Reports ──────────────────────────────────────────
+
+function _occTabReports(el){
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:20px">
+      <div class="khatma-card glass" style="padding:16px">
+        <h3 style="font-size:15px;margin-bottom:6px">قراء بدون بيانات تواصل</h3>
+        <p style="font-size:12px;opacity:.6;margin-bottom:12px">قراء بدون هاتف أو دولة — أول 100</p>
+        <button class="btn primary compact-btn" onclick="window._occReportMissingContact()">عرض وطباعة</button>
+      </div>
+      <div class="khatma-card glass" style="padding:16px">
+        <h3 style="font-size:15px;margin-bottom:6px">تقرير المجموعات</h3>
+        <p style="font-size:12px;opacity:.6;margin-bottom:12px">ملخص عدد القراء لكل مجموعة</p>
+        <button class="btn primary compact-btn" onclick="window._occReportGroups()">عرض وطباعة</button>
+      </div>
+    </div>
+    <div id="occReportContent"></div>
+  `;
+
+  window._occReportMissingContact = async function(){
+    const rc = document.getElementById('occReportContent');
+    rc.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">جاري التحميل...</p>';
+    try{
+      const res = await api('/owner/readers?limit=100&missingContact=any');
+      const rows = (res.readers||[]);
+      rc.innerHTML = `
+        <div id="printArea" style="background:var(--surface,#fff);padding:20px;border:1px solid var(--border-color,#eee);border-radius:8px">
+          <h2 style="margin-bottom:12px">قراء بدون بيانات تواصل (${res.total||rows.length})</h2>
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead><tr style="background:var(--surface-alt,#f9fafb)">
+              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">الرقم</th>
+              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">الاسم</th>
+              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">الهاتف</th>
+              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">الدولة</th>
+              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">المجموعة</th>
+            </tr></thead>
+            <tbody>
+              ${rows.map(r=>`<tr><td style="padding:5px;border:1px solid var(--border-color,#ddd)" dir="ltr">${escapeHtml(r.serialCode)}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd)">${escapeHtml(r.name)}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd);color:${r.phone?'inherit':'var(--danger)'}" dir="ltr">${escapeHtml(r.phone||'مفقود')}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd);color:${r.country?'inherit':'var(--danger)'}">${escapeHtml(r.country||'مفقود')}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd)">${escapeHtml(r.groupName||'—')}</td></tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div style="text-align:center;margin-top:12px"><button class="btn primary compact-btn" onclick="window.print()">⎙ طباعة / PDF</button></div>
+      `;
+    }catch(err){ rc.innerHTML=`<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`; }
+  };
+
+  window._occReportGroups = async function(){
+    const rc = document.getElementById('occReportContent');
+    rc.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">جاري التحميل...</p>';
+    try{
+      const res = await api('/owner/groups?limit=100');
+      const rows = (res.groups||[]);
+      rc.innerHTML = `
+        <div id="printArea" style="background:var(--surface,#fff);padding:20px;border:1px solid var(--border-color,#eee);border-radius:8px">
+          <h2 style="margin-bottom:12px">تقرير المجموعات (${res.total||rows.length})</h2>
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead><tr style="background:var(--surface-alt,#f9fafb)">
+              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">المجموعة</th>
+              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">القراء</th>
+              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">التدوير</th>
+              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">المنشئ</th>
+            </tr></thead>
+            <tbody>
+              ${rows.map(g=>`<tr><td style="padding:5px;border:1px solid var(--border-color,#ddd)">${escapeHtml(g.name)}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd);text-align:center">${g.readerCount||0}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd);font-size:12px">${escapeHtml(g.rotationType||'—')}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd);font-size:11px">${escapeHtml(g.ownerName||'—')}</td></tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div style="text-align:center;margin-top:12px"><button class="btn primary compact-btn" onclick="window.print()">⎙ طباعة / PDF</button></div>
+      `;
+    }catch(err){ rc.innerHTML=`<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`; }
+  };
+}
+
+// ── Tab: Global Search ────────────────────────────────────
+
+function _occTabSearch(el){
+  el.innerHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+      <input id="occSInput" type="search" style="flex:1;min-width:250px;padding:10px 14px;border:1px solid var(--border-color,#ccc);border-radius:8px;font-size:15px;direction:rtl" placeholder="ابحث في كل النظام: قراء، مجموعات، ختمات، مستخدمين..." />
+      <select id="occSType" style="padding:8px;border:1px solid var(--border-color,#ccc);border-radius:8px;font-size:14px">
+        <option value="all">الكل</option>
+        <option value="readers">قراء</option>
+        <option value="groups">مجموعات</option>
+        <option value="khatmas">ختمات</option>
+        <option value="users">مستخدمون</option>
+      </select>
+      <button class="btn primary compact-btn" onclick="window._occDoSearch()">بحث</button>
+    </div>
+    <div id="occSContent"><p style="opacity:.5;text-align:center;padding:30px">اكتب للبحث في كل النظام...</p></div>
+  `;
+
+  let _t;
+  document.getElementById('occSInput')?.addEventListener('input', ()=>{ clearTimeout(_t); _t=setTimeout(()=>window._occDoSearch(),500); });
+
+  window._occDoSearch = async function(){
+    const q = document.getElementById('occSInput')?.value.trim()||'';
+    const type = document.getElementById('occSType')?.value||'all';
+    const el2 = document.getElementById('occSContent');
+    if(!el2) return;
+    if(!q){ el2.innerHTML='<p style="opacity:.5;text-align:center;padding:30px">اكتب للبحث في كل النظام...</p>'; return; }
+    el2.innerHTML='<p style="opacity:.5;text-align:center;padding:20px">جاري البحث...</p>';
+    try{
+      const res = await api('/owner/search?q='+encodeURIComponent(q)+'&type='+type+'&limit=15');
+      const r = res.results;
+      const sections = [];
+      if(r.readers?.length) sections.push(`<div><h4 style="margin:0 0 8px;color:var(--primary,#2563eb)">القراء (${r.readers.length})</h4><table style="width:100%;border-collapse:collapse;font-size:12px"><tbody>${r.readers.map(x=>`<tr style="border-bottom:1px solid var(--border-color,#e5e7eb)"><td style="padding:5px" dir="ltr">${escapeHtml(x.serial_code||'')}</td><td style="padding:5px">${escapeHtml(x.reader_name||'')}</td><td style="padding:5px;direction:ltr" dir="ltr">${escapeHtml(x.phone||'—')}</td><td style="padding:5px">${escapeHtml(x.country||'—')}</td></tr>`).join('')}</tbody></table></div>`);
+      if(r.groups?.length) sections.push(`<div><h4 style="margin:0 0 8px;color:var(--primary,#2563eb)">المجموعات (${r.groups.length})</h4><ul style="list-style:none;padding:0;margin:0">${r.groups.map(x=>`<li style="padding:5px;border-bottom:1px solid var(--border-color,#e5e7eb)"><a href="#/reader-group/${escapeHtml(x.id)}" style="color:var(--primary,#2563eb)">${escapeHtml(x.name)}</a></li>`).join('')}</ul></div>`);
+      if(r.khatmas?.length) sections.push(`<div><h4 style="margin:0 0 8px;color:var(--primary,#2563eb)">الختمات (${r.khatmas.length})</h4><ul style="list-style:none;padding:0;margin:0">${r.khatmas.map(x=>`<li style="padding:5px;border-bottom:1px solid var(--border-color,#e5e7eb)"><a href="#/managed-khatma/${escapeHtml(x.id)}" style="color:var(--primary,#2563eb)">${escapeHtml(x.title||x.id)}</a></li>`).join('')}</ul></div>`);
+      if(r.users?.length) sections.push(`<div><h4 style="margin:0 0 8px;color:var(--primary,#2563eb)">المستخدمون (${r.users.length})</h4><ul style="list-style:none;padding:0;margin:0">${r.users.map(x=>`<li style="padding:5px;border-bottom:1px solid var(--border-color,#e5e7eb)">${escapeHtml(x.display_name||x.username)} <span style="font-size:11px;opacity:.55">(${escapeHtml(x.role)})</span></li>`).join('')}</ul></div>`);
+      el2.innerHTML = sections.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">${sections.join('')}</div>` : '<p style="opacity:.5;text-align:center;padding:30px">لا توجد نتائج</p>';
+    }catch(err){
+      el2.innerHTML=`<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`;
+    }
+  };
+}
+
+// ─────────────────────────────────────────────────────────
 
 function setupHome(){
   const hero = document.querySelector('.hero.grid-2');

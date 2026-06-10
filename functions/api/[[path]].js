@@ -2882,6 +2882,263 @@ async function readerLookup(request, DB) {
   })) });
 }
 
+// ── Owner Control Center ──────────────────────────────────────
+
+async function ownerOverview(request, DB) {
+  const [usersR, creatorsR, groupsR, readersR, vacanciesR, missingPhoneR, missingCountryR, khatmasR, activeKhatmasR] = await DB.batch([
+    DB.prepare("SELECT COUNT(*) AS c FROM users WHERE status != 'deleted'"),
+    DB.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'managed_creator' AND status != 'deleted'"),
+    DB.prepare("SELECT COUNT(*) AS c FROM managed_reader_groups WHERE status != 'deleted'"),
+    DB.prepare("SELECT COUNT(*) AS c FROM managed_reader_profiles WHERE status != 'deleted'"),
+    DB.prepare(`SELECT COUNT(*) AS c FROM managed_khatma_units u
+      JOIN managed_khatmas mk ON mk.id = u.khatma_id
+      WHERE u.participant_id IS NULL AND mk.deleted_at IS NULL AND mk.archived_at IS NULL`),
+    DB.prepare("SELECT COUNT(*) AS c FROM managed_reader_profiles WHERE status != 'deleted' AND (phone IS NULL OR TRIM(phone) = '')"),
+    DB.prepare("SELECT COUNT(*) AS c FROM managed_reader_profiles WHERE status != 'deleted' AND (country IS NULL OR TRIM(country) = '')"),
+    DB.prepare("SELECT COUNT(*) AS c FROM managed_khatmas WHERE deleted_at IS NULL"),
+    DB.prepare("SELECT COUNT(*) AS c FROM managed_khatmas WHERE deleted_at IS NULL AND archived_at IS NULL")
+  ]);
+  return json({ ok: true, stats: {
+    users: usersR.results?.[0]?.c || 0,
+    creators: creatorsR.results?.[0]?.c || 0,
+    groups: groupsR.results?.[0]?.c || 0,
+    readers: readersR.results?.[0]?.c || 0,
+    vacancies: vacanciesR.results?.[0]?.c || 0,
+    missingPhone: missingPhoneR.results?.[0]?.c || 0,
+    missingCountry: missingCountryR.results?.[0]?.c || 0,
+    khatmas: khatmasR.results?.[0]?.c || 0,
+    activeKhatmas: activeKhatmasR.results?.[0]?.c || 0
+  }});
+}
+
+async function ownerListReaders(request, DB) {
+  const url = new URL(request.url);
+  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10)));
+  const offset = (page - 1) * limit;
+  const q = (url.searchParams.get("q") || "").trim();
+  const groupId = url.searchParams.get("groupId") || "";
+  const ownerId = url.searchParams.get("ownerId") || "";
+  const statusFilter = url.searchParams.get("status") || "";
+  const country = url.searchParams.get("country") || "";
+  const missingContact = url.searchParams.get("missingContact") || "";
+
+  let where = "WHERE 1=1";
+  const params = [];
+  if (groupId) { where += " AND mrp.group_id = ?"; params.push(groupId); }
+  if (ownerId) { where += " AND mrp.created_by_user_id = ?"; params.push(ownerId); }
+  if (statusFilter) { where += " AND mrp.status = ?"; params.push(statusFilter); }
+  else { where += " AND mrp.status != 'deleted'"; }
+  if (country) { where += " AND mrp.country = ?"; params.push(country); }
+  if (missingContact === "phone") { where += " AND (mrp.phone IS NULL OR TRIM(mrp.phone) = '')"; }
+  else if (missingContact === "country") { where += " AND (mrp.country IS NULL OR TRIM(mrp.country) = '')"; }
+  else if (missingContact === "any") { where += " AND (mrp.phone IS NULL OR TRIM(mrp.phone) = '' OR mrp.country IS NULL OR TRIM(mrp.country) = '')"; }
+  if (q) {
+    const like = `%${q}%`;
+    where += " AND (mrp.reader_name LIKE ? OR mrp.phone LIKE ? OR mrp.access_code LIKE ? OR mrp.serial_code LIKE ? OR mrp.country LIKE ? OR g.name LIKE ? OR u.username LIKE ?)";
+    params.push(like, like, like, like, like, like, like);
+  }
+
+  const joinClause = `FROM managed_reader_profiles mrp
+    LEFT JOIN managed_reader_groups g ON g.id = mrp.group_id
+    LEFT JOIN users u ON u.id = mrp.created_by_user_id`;
+
+  const countRow = await DB.prepare(`SELECT COUNT(*) AS total ${joinClause} ${where}`).bind(...params).first();
+  const total = countRow?.total || 0;
+
+  const rows = (await DB.prepare(
+    `SELECT mrp.*, g.name AS group_name, u.username AS owner_username, u.display_name AS owner_display_name
+     ${joinClause} ${where} ORDER BY mrp.created_at DESC LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all()).results || [];
+
+  return json({
+    ok: true,
+    readers: rows.map(r => ({ ...mapManagedReader(r), groupName: r.group_name || "", ownerUsername: r.owner_username || "", ownerName: r.owner_display_name || r.owner_username || "" })),
+    total, page, limit, pages: Math.ceil(total / limit) || 1
+  });
+}
+
+async function ownerEditReader(request, DB, id) {
+  const data = await readJson(request);
+  const allowedCols = { reader_name: true, phone: true, country: true, access_code: true, serial_code: true, status: true, group_id: true, notes: true };
+  const updates = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (allowedCols[k]) updates[k] = v == null ? "" : String(v).trim();
+  }
+  if (!Object.keys(updates).length) return json({ ok: false, error: "لا توجد حقول للتعديل" }, 400);
+  if ("phone" in updates && updates.phone && !/^\+\d{7,15}$/.test(updates.phone)) {
+    return json({ ok: false, error: "رقم الجوال يجب أن يكون بصيغة دولية +XXXXXXXXX" }, 400);
+  }
+  if ("access_code" in updates && !/^\d{4,10}$/.test(updates.access_code || "")) {
+    return json({ ok: false, error: "الكود يجب أن يكون أرقاماً من 4 إلى 10 خانات" }, 400);
+  }
+  if ("group_id" in updates && updates.group_id) {
+    const grp = await DB.prepare("SELECT id FROM managed_reader_groups WHERE id = ? AND status != 'deleted' LIMIT 1").bind(updates.group_id).first();
+    if (!grp) return json({ ok: false, error: "المجموعة غير موجودة" }, 400);
+  }
+  const existing = await DB.prepare("SELECT id FROM managed_reader_profiles WHERE id = ? LIMIT 1").bind(id).first();
+  if (!existing) return json({ ok: false, error: "القارئ غير موجود" }, 404);
+  const sets = Object.keys(updates).map(k => `${k} = ?`).join(", ");
+  await DB.prepare(`UPDATE managed_reader_profiles SET ${sets}, updated_at = datetime('now') WHERE id = ?`)
+    .bind(...Object.values(updates), id).run();
+  return json({ ok: true });
+}
+
+async function ownerListGroups(request, DB) {
+  const url = new URL(request.url);
+  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10)));
+  const offset = (page - 1) * limit;
+  const q = (url.searchParams.get("q") || "").trim();
+  const ownerId = url.searchParams.get("ownerId") || "";
+  const statusFilter = url.searchParams.get("status") || "";
+
+  let where = "WHERE 1=1";
+  const params = [];
+  if (ownerId) { where += " AND g.created_by_user_id = ?"; params.push(ownerId); }
+  if (statusFilter) { where += " AND g.status = ?"; params.push(statusFilter); }
+  else { where += " AND g.status != 'deleted'"; }
+  if (q) {
+    const like = `%${q}%`;
+    where += " AND (g.name LIKE ? OR u.username LIKE ? OR u.display_name LIKE ?)";
+    params.push(like, like, like);
+  }
+
+  const countRow = await DB.prepare(
+    `SELECT COUNT(*) AS total FROM managed_reader_groups g LEFT JOIN users u ON u.id = g.created_by_user_id ${where}`
+  ).bind(...params).first();
+  const total = countRow?.total || 0;
+
+  const rows = (await DB.prepare(
+    `SELECT g.*, COUNT(p.id) AS readers_count, u.username AS owner_username, u.display_name AS owner_display_name
+     FROM managed_reader_groups g
+     LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
+     LEFT JOIN users u ON u.id = g.created_by_user_id
+     ${where} GROUP BY g.id ORDER BY g.created_at DESC LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all()).results || [];
+
+  return json({
+    ok: true,
+    groups: rows.map(r => ({ id: r.id, name: r.name || "", notes: r.notes || "", rotationType: r.rotation_type || "", rotationStartDate: r.rotation_start_date || "", status: r.status || "", createdAt: r.created_at || "", readerCount: Number(r.readers_count) || 0, ownerUsername: r.owner_username || "", ownerName: r.owner_display_name || r.owner_username || "" })),
+    total, page, limit, pages: Math.ceil(total / limit) || 1
+  });
+}
+
+async function ownerListKhatmas(request, DB) {
+  const url = new URL(request.url);
+  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "25", 10)));
+  const offset = (page - 1) * limit;
+  const q = (url.searchParams.get("q") || "").trim();
+  const ownerId = url.searchParams.get("ownerId") || "";
+  const statusFilter = url.searchParams.get("status") || "";
+
+  let where = "WHERE mk.deleted_at IS NULL";
+  const params = [];
+  if (ownerId) { where += " AND mk.created_by_user_id = ?"; params.push(ownerId); }
+  if (statusFilter === "archived") { where += " AND mk.archived_at IS NOT NULL"; }
+  else if (statusFilter === "active") { where += " AND mk.archived_at IS NULL"; }
+  if (q) {
+    const like = `%${q}%`;
+    where += " AND (mk.title LIKE ? OR u.username LIKE ? OR u.display_name LIKE ?)";
+    params.push(like, like, like);
+  }
+
+  const countRow = await DB.prepare(
+    `SELECT COUNT(*) AS total FROM managed_khatmas mk LEFT JOIN users u ON u.id = mk.created_by_user_id ${where}`
+  ).bind(...params).first();
+  const total = countRow?.total || 0;
+
+  const rows = (await DB.prepare(
+    `SELECT mk.id, mk.title, mk.khatma_type, mk.archived_at, mk.created_at, mk.updated_at,
+       u.username AS owner_username, u.display_name AS owner_display_name,
+       (SELECT COUNT(*) FROM managed_khatma_participants WHERE khatma_id = mk.id) AS participants_count,
+       (SELECT COUNT(*) FROM managed_khatma_units WHERE khatma_id = mk.id) AS units_count
+     FROM managed_khatmas mk LEFT JOIN users u ON u.id = mk.created_by_user_id
+     ${where} ORDER BY mk.created_at DESC LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all()).results || [];
+
+  return json({
+    ok: true,
+    khatmas: rows.map(r => ({
+      id: r.id, title: r.title || "", khatmaType: r.khatma_type || "",
+      status: r.archived_at ? "archived" : "active",
+      participantsCount: Number(r.participants_count) || 0,
+      unitsCount: Number(r.units_count) || 0,
+      ownerUsername: r.owner_username || "", ownerName: r.owner_display_name || r.owner_username || "",
+      createdAt: r.created_at || "", updatedAt: r.updated_at || ""
+    })),
+    total, page, limit, pages: Math.ceil(total / limit) || 1
+  });
+}
+
+async function ownerListUsers(request, DB) {
+  const url = new URL(request.url);
+  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "25", 10)));
+  const offset = (page - 1) * limit;
+  const q = (url.searchParams.get("q") || "").trim();
+  const roleFilter = url.searchParams.get("role") || "";
+  const statusFilter = url.searchParams.get("status") || "";
+
+  let where = "WHERE 1=1";
+  const params = [];
+  if (roleFilter) { where += " AND u.role = ?"; params.push(roleFilter); }
+  if (statusFilter) { where += " AND u.status = ?"; params.push(statusFilter); }
+  else { where += " AND u.status != 'deleted'"; }
+  if (q) {
+    const like = `%${q}%`;
+    where += " AND (u.username LIKE ? OR u.display_name LIKE ?)";
+    params.push(like, like);
+  }
+
+  const countRow = await DB.prepare(`SELECT COUNT(*) AS total FROM users u ${where}`).bind(...params).first();
+  const total = countRow?.total || 0;
+
+  const rows = (await DB.prepare(
+    `SELECT u.id, u.username, u.display_name, u.role, u.status, u.created_at,
+       (SELECT COUNT(*) FROM managed_reader_groups WHERE created_by_user_id = u.id AND status != 'deleted') AS groups_count,
+       (SELECT COUNT(*) FROM managed_reader_profiles WHERE created_by_user_id = u.id AND status != 'deleted') AS readers_count,
+       (SELECT COUNT(*) FROM managed_khatmas WHERE created_by_user_id = u.id AND deleted_at IS NULL) AS khatmas_count
+     FROM users u ${where} ORDER BY u.created_at DESC LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all()).results || [];
+
+  return json({
+    ok: true,
+    users: rows.map(r => ({
+      id: r.id, username: r.username || "", displayName: r.display_name || "",
+      role: r.role || "", status: r.status || "",
+      groupsCount: Number(r.groups_count) || 0,
+      readersCount: Number(r.readers_count) || 0,
+      khatmasCount: Number(r.khatmas_count) || 0,
+      createdAt: r.created_at || ""
+    })),
+    total, page, limit, pages: Math.ceil(total / limit) || 1
+  });
+}
+
+async function ownerSearch(request, DB) {
+  const url = new URL(request.url);
+  const q = (url.searchParams.get("q") || "").trim();
+  const type = url.searchParams.get("type") || "all";
+  const limit = Math.min(20, Math.max(1, parseInt(url.searchParams.get("limit") || "10", 10)));
+  if (!q) return json({ ok: true, results: { readers: [], groups: [], khatmas: [], users: [] } });
+  const like = `%${q}%`;
+  const [readersR, groupsR, khatmasR, usersR] = await DB.batch([
+    DB.prepare(`SELECT id, reader_name, serial_code, access_code, phone, country FROM managed_reader_profiles WHERE status != 'deleted' AND (reader_name LIKE ? OR serial_code LIKE ? OR access_code LIKE ? OR phone LIKE ?) LIMIT ?`).bind(like, like, like, like, limit),
+    DB.prepare(`SELECT id, name FROM managed_reader_groups WHERE status != 'deleted' AND name LIKE ? LIMIT ?`).bind(like, limit),
+    DB.prepare(`SELECT id, title FROM managed_khatmas WHERE deleted_at IS NULL AND title LIKE ? LIMIT ?`).bind(like, limit),
+    DB.prepare(`SELECT id, username, display_name, role FROM users WHERE status != 'deleted' AND (username LIKE ? OR display_name LIKE ?) LIMIT ?`).bind(like, like, limit)
+  ]);
+  const r = {
+    readers: (type === "all" || type === "readers") ? (readersR.results || []) : [],
+    groups:  (type === "all" || type === "groups")  ? (groupsR.results  || []) : [],
+    khatmas: (type === "all" || type === "khatmas") ? (khatmasR.results || []) : [],
+    users:   (type === "all" || type === "users")   ? (usersR.results   || []) : []
+  };
+  return json({ ok: true, results: r });
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   const method = request.method.toUpperCase();
@@ -2983,6 +3240,17 @@ export async function onRequest(context) {
       const chk = await requireOwner(request, env.DB); if (!chk.ok) return chk.response;
       if (method !== "POST" && method !== "PATCH") return json({ ok: false, error: "Method not allowed" }, 405);
       return unitAction(request, env.DB, parts[1], parts[3], parts[4]);
+    }
+    // Owner Control Center
+    if (parts.length >= 2 && parts[0] === "owner") {
+      const chk = await requireOwner(request, env.DB); if (!chk.ok) return chk.response;
+      if (parts[1] === "overview" && parts.length === 2 && method === "GET") return ownerOverview(request, env.DB);
+      if (parts[1] === "readers" && parts.length === 2 && method === "GET") return ownerListReaders(request, env.DB);
+      if (parts[1] === "readers" && parts.length === 3 && method === "PATCH") return ownerEditReader(request, env.DB, parts[2]);
+      if (parts[1] === "groups"  && parts.length === 2 && method === "GET") return ownerListGroups(request, env.DB);
+      if (parts[1] === "khatmas" && parts.length === 2 && method === "GET") return ownerListKhatmas(request, env.DB);
+      if (parts[1] === "users"   && parts.length === 2 && method === "GET") return ownerListUsers(request, env.DB);
+      if (parts[1] === "search"  && parts.length === 2 && method === "GET") return ownerSearch(request, env.DB);
     }
     return json({ ok: false, error: "Not found", path: parts }, 404);
   } catch (error) {

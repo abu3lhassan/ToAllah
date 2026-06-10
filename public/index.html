@@ -777,6 +777,7 @@ body.nav-open .topbar .menu-toggle span:nth-child(1){transform:none!important;wi
         </div>
         <a href="#/reader-login">بوابة القراء</a>
         <a id="ownerNav" href="#/owner" hidden>الإدارة</a>
+        <a id="ownerControlNav" href="#/owner-control" hidden>مركز التحكم</a>
         <a id="mobileUserNav" class="mobile-user-nav" href="#/owner" hidden></a>
         <a id="mobileLogoutNav" class="mobile-logout-nav" href="#/logout" hidden>خروج</a>
         <a id="loginNav" href="#/login">دخول</a>
@@ -1030,6 +1031,15 @@ body.nav-open .topbar .menu-toggle span:nth-child(1){transform:none!important;wi
 <div id="usersList" class="cards-grid" style="margin-top:22px"></div>
 <div id="creatorGroupsSection" style="margin-top:22px"></div>
 </section>
+</template>
+
+<template id="ownerControlTemplate">
+  <section class="page-head">
+    <span class="eyebrow">Owner Control Center</span>
+    <h1>لوحة تحكم المالك</h1>
+    <p>إدارة شاملة لجميع بيانات النظام.</p>
+  </section>
+  <section id="ownerControlView"></section>
 </template>
 
 <script src="./config.js"></script>
