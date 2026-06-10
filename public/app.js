@@ -1553,7 +1553,7 @@ async function setupManagedReaders(){
   }).join('');
 
   root.innerHTML = `
-    <input id="readersCsvFile" type="file" accept=".csv,text/csv" hidden />
+    ${state.user?.role === 'owner' ? '<input id="readersCsvFile" type="file" accept=".csv,text/csv" hidden />' : ''}
 
     <div class="admin-panel premium-admin-panel" style="margin-bottom:20px">
       <div class="sheet-head"><h3>إنشاء مجموعة جديدة</h3><span>منظّم القراء</span></div>
@@ -2367,6 +2367,7 @@ async function setupReaderGroup(id){
   const periodIndex = computeCurrentPeriodIndex(group.rotation_start_date || '', group.rotation_type || 'monthly');
   const typeLabel = group.rotation_type === 'weekly' ? 'أسبوع' : group.rotation_type === 'monthly' ? 'شهر' : 'سنة';
 
+  const isOwner = state.user?.role === 'owner';
   if(manageMode){
     view.innerHTML = `
       <section class="page-head">
@@ -2397,11 +2398,11 @@ async function setupReaderGroup(id){
         <div class="sheet-head" style="margin-top:20px"><h3>قراء المجموعة (${readers.length})</h3>
           <div class="compact-actions">
             <button class="btn ghost compact-btn" id="addReaderBtn">+ إضافة قارئ</button>
-            <button class="btn ghost compact-btn" id="importGroupCsvBtn">رفع CSV</button>
+            ${isOwner ? '<button class="btn ghost compact-btn" id="importGroupCsvBtn">رفع CSV</button>' : ''}
             <button class="btn ghost compact-btn" id="exportGroupCsvBtn2">تصدير للتعديل</button>
           </div>
         </div>
-        <input id="groupCsvFileInput" type="file" accept=".csv,text/csv" hidden />
+        ${isOwner ? '<input id="groupCsvFileInput" type="file" accept=".csv,text/csv" hidden />' : ''}
         <div id="addReaderInline" hidden class="inline-panel action-sheet" style="margin-bottom:12px">
           <form id="addReaderGroupForm">
             <div class="form-grid">
