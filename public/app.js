@@ -2140,6 +2140,13 @@ async function setupReaderKhatma(khatmaId){
     const res = await api('/reader-portal', {method:'POST', body:{identity}});
     const khatmas = res.khatmas || [];
     const profile = res.readerProfile || null;
+    // Guard: if profile exists but phone or country are missing/null/whitespace, redirect to login
+    // so the completion gate in doLookup runs and shows the profile-completion form.
+    const _pv = v => { const s = String(v ?? '').trim().toLowerCase(); return s && s !== 'null' && s !== 'undefined'; };
+    if (profile && (!_pv(profile.phone) || !_pv(profile.country))) {
+      location.hash = '#/reader-login';
+      return;
+    }
     const khatma = khatmas.find(k => k.id === khatmaId);
     if(!khatma){
       view.innerHTML = `
