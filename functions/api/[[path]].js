@@ -1138,47 +1138,96 @@ async function listManagedReaders(request, DB) {
   if (!check.ok) return check.response;
   const url = new URL(request.url);
   const groupId = url.searchParams.get("groupId") || "";
-  let rows;
+
+  // Pagination and search only apply to the "all readers" query (no groupId filter)
+  const paginate = !groupId;
+  const page = paginate ? Math.max(1, parseInt(url.searchParams.get("page") || "1", 10)) : 1;
+  const limit = paginate ? Math.min(200, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10))) : 9999;
+  const offset = paginate ? (page - 1) * limit : 0;
+  const q = (url.searchParams.get("q") || "").trim();
+  const ungroupedOnly = paginate && url.searchParams.get("ungrouped") === "1";
+
+  let rows, total;
+
   if (check.user.role === "owner") {
-    const q = groupId
-      ? `SELECT mrp.*, u.display_name AS owner_display_name, u.username AS owner_username, g.name AS group_name
-         FROM managed_reader_profiles mrp
-         LEFT JOIN users u ON u.id = mrp.created_by_user_id
-         LEFT JOIN managed_reader_groups g ON g.id = mrp.group_id
-         WHERE mrp.status != 'deleted' AND mrp.group_id = ?
-         ORDER BY mrp.created_at DESC`
-      : `SELECT mrp.*, u.display_name AS owner_display_name, u.username AS owner_username, g.name AS group_name
-         FROM managed_reader_profiles mrp
-         LEFT JOIN users u ON u.id = mrp.created_by_user_id
-         LEFT JOIN managed_reader_groups g ON g.id = mrp.group_id
-         WHERE mrp.status != 'deleted'
-         ORDER BY mrp.created_at DESC`;
-    rows = (groupId
-      ? await DB.prepare(q).bind(groupId).all()
-      : await DB.prepare(q).all()).results || [];
+    let baseWhere, baseParams;
+    if (groupId) {
+      baseWhere = "WHERE mrp.status != 'deleted' AND mrp.group_id = ?";
+      baseParams = [groupId];
+    } else if (ungroupedOnly) {
+      baseWhere = "WHERE mrp.status != 'deleted' AND mrp.group_id IS NULL";
+      baseParams = [];
+    } else {
+      baseWhere = "WHERE mrp.status != 'deleted'";
+      baseParams = [];
+    }
+    if (q) {
+      const like = `%${q}%`;
+      baseWhere += " AND (mrp.reader_name LIKE ? OR mrp.phone LIKE ? OR mrp.access_code LIKE ? OR mrp.serial_code LIKE ?)";
+      baseParams.push(like, like, like, like);
+    }
+    if (paginate) {
+      const countRow = await DB.prepare(`SELECT COUNT(*) AS total FROM managed_reader_profiles mrp ${baseWhere}`)
+        .bind(...baseParams).first();
+      total = countRow?.total || 0;
+    }
+    const mainSql = `SELECT mrp.*, u.display_name AS owner_display_name, u.username AS owner_username, g.name AS group_name
+      FROM managed_reader_profiles mrp
+      LEFT JOIN users u ON u.id = mrp.created_by_user_id
+      LEFT JOIN managed_reader_groups g ON g.id = mrp.group_id
+      ${baseWhere}
+      ORDER BY mrp.created_at DESC${paginate ? " LIMIT ? OFFSET ?" : ""}`;
+    const mainParams = paginate ? [...baseParams, limit, offset] : baseParams;
+    rows = (await DB.prepare(mainSql).bind(...mainParams).all()).results || [];
   } else {
     await ensureCreatorGroupSchema(DB);
     const visibleIds = await getCreatorGroupMemberIds(DB, check.user.id);
     const inClause = visibleIds.map(() => "?").join(",");
     const userGroupIds = await getUserGroupIds(DB, check.user.id);
-    const sharedReaderClause = userGroupIds.length ? `OR (mrp.shared_creator_group_id IS NOT NULL AND mrp.shared_creator_group_id IN (${userGroupIds.map(()=>"?").join(",")}))` : "";
+    const sharedReaderClause = userGroupIds.length
+      ? `OR (mrp.shared_creator_group_id IS NOT NULL AND mrp.shared_creator_group_id IN (${userGroupIds.map(() => "?").join(",")}))`
+      : "";
     const baseReaderParams = [...visibleIds, ...userGroupIds];
-    const q = groupId
-      ? `SELECT mrp.*, g.name AS group_name
-         FROM managed_reader_profiles mrp
-         LEFT JOIN managed_reader_groups g ON g.id = mrp.group_id
-         WHERE mrp.status != 'deleted' AND (mrp.created_by_user_id IN (${inClause}) ${sharedReaderClause}) AND mrp.group_id = ?
-         ORDER BY mrp.created_at DESC`
-      : `SELECT mrp.*, g.name AS group_name
-         FROM managed_reader_profiles mrp
-         LEFT JOIN managed_reader_groups g ON g.id = mrp.group_id
-         WHERE mrp.status != 'deleted' AND (mrp.created_by_user_id IN (${inClause}) ${sharedReaderClause})
-         ORDER BY mrp.created_at DESC`;
-    rows = (groupId
-      ? await DB.prepare(q).bind(...baseReaderParams, groupId).all()
-      : await DB.prepare(q).bind(...baseReaderParams).all()).results || [];
+
+    let roleWhere, roleParams;
+    if (groupId) {
+      roleWhere = `WHERE mrp.status != 'deleted' AND (mrp.created_by_user_id IN (${inClause}) ${sharedReaderClause}) AND mrp.group_id = ?`;
+      roleParams = [...baseReaderParams, groupId];
+    } else {
+      roleWhere = `WHERE mrp.status != 'deleted' AND (mrp.created_by_user_id IN (${inClause}) ${sharedReaderClause})`;
+      roleParams = [...baseReaderParams];
+      if (ungroupedOnly) roleWhere += " AND mrp.group_id IS NULL";
+    }
+    if (q) {
+      const like = `%${q}%`;
+      roleWhere += " AND (mrp.reader_name LIKE ? OR mrp.phone LIKE ? OR mrp.access_code LIKE ? OR mrp.serial_code LIKE ?)";
+      roleParams.push(like, like, like, like);
+    }
+    if (paginate) {
+      const countRow = await DB.prepare(`SELECT COUNT(*) AS total FROM managed_reader_profiles mrp ${roleWhere}`)
+        .bind(...roleParams).first();
+      total = countRow?.total || 0;
+    }
+    const mainSql = `SELECT mrp.*, g.name AS group_name
+      FROM managed_reader_profiles mrp
+      LEFT JOIN managed_reader_groups g ON g.id = mrp.group_id
+      ${roleWhere}
+      ORDER BY mrp.created_at DESC${paginate ? " LIMIT ? OFFSET ?" : ""}`;
+    const mainParams = paginate ? [...roleParams, limit, offset] : roleParams;
+    rows = (await DB.prepare(mainSql).bind(...mainParams).all()).results || [];
   }
-  return json({ ok: true, readers: rows.map(r => ({ ...mapManagedReader(r), groupName: r.group_name || "", ownerName: r.owner_display_name || r.owner_username || "" })) });
+
+  const result = {
+    ok: true,
+    readers: rows.map(r => ({ ...mapManagedReader(r), groupName: r.group_name || "", ownerName: r.owner_display_name || r.owner_username || "" }))
+  };
+  if (paginate) {
+    result.total = total;
+    result.page = page;
+    result.limit = limit;
+    result.pages = Math.ceil(total / limit) || 1;
+  }
+  return json(result);
 }
 
 // Generates the next available serial code in R-XXXXXX format.
@@ -1647,13 +1696,20 @@ async function listManagedKhatmas(request, DB) {
   }
   if (!rows.length) return json({ ok: true, khatmas: [] });
   const ids = rows.map(r => r.id);
-  const units = (await DB.prepare(`
-    SELECT u.*, p.participant_name, p.phone AS participant_phone
-    FROM managed_khatma_units u
-    LEFT JOIN managed_khatma_participants p ON p.id = u.participant_id
-    WHERE u.khatma_id IN (${ids.map(() => "?").join(",")})
-    ORDER BY u.khatma_id, u.unit_number ASC, u.id ASC
-  `).bind(...ids).all()).results || [];
+  // D1 SQL variable limit is ~100; chunk to avoid D1_ERROR on large lists
+  const CHUNK = 99;
+  let units = [];
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const batch = (await DB.prepare(`
+      SELECT u.*, p.participant_name, p.phone AS participant_phone
+      FROM managed_khatma_units u
+      LEFT JOIN managed_khatma_participants p ON p.id = u.participant_id
+      WHERE u.khatma_id IN (${chunk.map(() => "?").join(",")})
+      ORDER BY u.khatma_id, u.unit_number ASC, u.id ASC
+    `).bind(...chunk).all()).results || [];
+    units = units.concat(batch);
+  }
   const byKhatma = new Map();
   for (const unit of units) {
     const list = byKhatma.get(unit.khatma_id) || [];

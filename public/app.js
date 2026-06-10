@@ -260,12 +260,27 @@ async function refreshManagedKhatmas(){
     toast(err.message || 'تعذر تحميل الختمات المُدارة');
   }
 }
-async function refreshManagedReaders(groupId){
+async function refreshManagedReaders(groupId, opts){
   if(!canUseManagedKhatmas()){ state.managedReaders = []; return; }
   try{
-    const path = groupId ? '/managed-readers?groupId=' + encodeURIComponent(groupId) : '/managed-readers';
+    let path;
+    if(groupId){
+      path = '/managed-readers?groupId=' + encodeURIComponent(groupId);
+    } else {
+      const pg = (opts && opts.page) || 1;
+      const lim = (opts && opts.limit) || 50;
+      const q = (opts && opts.q) || '';
+      const ug = (opts && opts.ungrouped) ? '&ungrouped=1' : '';
+      path = '/managed-readers?page=' + pg + '&limit=' + lim + (q ? '&q=' + encodeURIComponent(q) : '') + ug;
+    }
     const res = await api(path);
     state.managedReaders = res.readers || [];
+    if(!groupId){
+      state.managedReadersTotal = res.total || 0;
+      state.managedReadersPage = res.page || 1;
+      state.managedReadersPages = res.pages || 1;
+      state.managedReadersLimit = res.limit || 50;
+    }
   }catch(err){ console.error(err); state.managedReaders = []; toast(err.message || 'تعذر تحميل القراء'); }
 }
 async function refreshOne(id){
@@ -1502,15 +1517,9 @@ async function setupManagedReaders(){
   let groups = [];
   try{ const res = await api('/managed-reader-groups'); groups = res.groups || []; }catch(err){ toast(err.message || 'تعذر تحميل المجموعات'); }
   state.managedReaderGroups = groups;
-  await refreshManagedReaders();
+  await refreshManagedReaders(null, {ungrouped: true, page: 1, limit: 50});
 
   const groupById = Object.fromEntries(groups.map(g => [g.id, g]));
-  const readersByGroup = {};
-  const ungrouped = [];
-  state.managedReaders.forEach(r => {
-    if(r.groupId){ (readersByGroup[r.groupId] = readersByGroup[r.groupId] || []).push(r); }
-    else ungrouped.push(r);
-  });
 
   const rotationLabel = t => t === 'weekly' ? 'أسبوعي' : t === 'monthly' ? 'شهري' : t === 'yearly' ? 'سنوي' : 'بلا تدوير';
   const groupOptionsHtml = groups.map(g => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.name)}</option>`).join('');
@@ -1565,10 +1574,12 @@ async function setupManagedReaders(){
 
     ${groups.length ? groupsHtml : '<article class="feature-card empty-state"><h3>لا توجد مجموعات بعد</h3><p>أنشئ مجموعة لتنظيم قرائك وربطهم بالختمات المُدارة.</p></article>'}
 
-    ${ungrouped.length ? `<article class="inline-panel action-sheet" style="margin-top:16px">
-      <div class="sheet-head"><h3>قراء بلا مجموعة</h3><span>${ungrouped.length} قارئ</span></div>
-      <div class="managed-table">${ungrouped.map(r => readerRowHtml(r)).join('')}</div>
-    </article>` : ''}
+    <article class="inline-panel action-sheet" style="margin-top:16px">
+      <div class="sheet-head"><h3 id="readersListTitle">قراء بلا مجموعة</h3><span id="readersListTotal"></span></div>
+      <div style="margin-bottom:12px"><input id="readersSearchInput" type="search" style="width:100%;padding:8px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:14px;direction:rtl" placeholder="بحث في جميع القراء: اسم أو جوال أو كود..." /></div>
+      <div id="readersListTable" class="managed-table"></div>
+      <div id="readersListPager" style="display:none;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:12px"></div>
+    </article>
 
     <div id="addReaderPanel" class="admin-panel premium-admin-panel" style="margin-top:20px;display:none">
       <div class="sheet-head"><h3 id="addReaderPanelTitle">إضافة / تعديل قارئ</h3></div>
@@ -1646,6 +1657,59 @@ async function setupManagedReaders(){
     catch(err){ console.error('[import readers]', err.message, err); toast(err.message || 'تعذر استيراد القراء'); }
     e.target.value = '';
   });
+
+  // Readers search + pagination helpers (closure over local state)
+  let _readersQ = '';
+  function _renderReadersTable() {
+    const readers = state.managedReaders || [];
+    const total = state.managedReadersTotal || 0;
+    const pages = state.managedReadersPages || 1;
+    const page = state.managedReadersPage || 1;
+    const titleEl = document.getElementById('readersListTitle');
+    const totalEl = document.getElementById('readersListTotal');
+    const tableEl = document.getElementById('readersListTable');
+    const pagerEl = document.getElementById('readersListPager');
+    if(!tableEl) return;
+    if(titleEl) titleEl.textContent = _readersQ ? 'نتائج البحث' : 'قراء بلا مجموعة';
+    if(totalEl) totalEl.textContent = total + (_readersQ ? ' نتيجة' : ' قارئ');
+    tableEl.innerHTML = readers.length
+      ? readers.map(r => readerRowHtml(r)).join('')
+      : `<p style="opacity:0.5;text-align:center;padding:20px">${_readersQ ? 'لا توجد نتائج' : 'لا يوجد قراء بلا مجموعة'}</p>`;
+    if(!pagerEl) return;
+    if(pages <= 1){ pagerEl.style.display = 'none'; return; }
+    pagerEl.style.display = 'flex';
+    pagerEl.innerHTML = `
+      <button class="btn ghost compact-btn" id="rPgFirst">«</button>
+      <button class="btn ghost compact-btn" id="rPgPrev">‹</button>
+      <span style="line-height:32px;font-size:13px;opacity:0.7">صفحة ${page} من ${pages}</span>
+      <button class="btn ghost compact-btn" id="rPgNext">›</button>
+      <button class="btn ghost compact-btn" id="rPgLast">»</button>
+    `;
+    const rPgFirst = document.getElementById('rPgFirst');
+    const rPgPrev = document.getElementById('rPgPrev');
+    const rPgNext = document.getElementById('rPgNext');
+    const rPgLast = document.getElementById('rPgLast');
+    rPgFirst.disabled = page <= 1; rPgPrev.disabled = page <= 1;
+    rPgNext.disabled = page >= pages; rPgLast.disabled = page >= pages;
+    rPgFirst.onclick = () => _readersFetchPage(1);
+    rPgPrev.onclick = () => _readersFetchPage(page - 1);
+    rPgNext.onclick = () => _readersFetchPage(page + 1);
+    rPgLast.onclick = () => _readersFetchPage(pages);
+  }
+  async function _readersFetchPage(pg) {
+    await refreshManagedReaders(null, {page: pg, limit: 50, q: _readersQ, ungrouped: !_readersQ});
+    _renderReadersTable();
+  }
+  let _readersSearchTimer;
+  document.getElementById('readersSearchInput')?.addEventListener('input', e => {
+    clearTimeout(_readersSearchTimer);
+    _readersSearchTimer = setTimeout(async () => {
+      _readersQ = e.target.value.trim();
+      await refreshManagedReaders(null, {page: 1, limit: 50, q: _readersQ, ungrouped: !_readersQ});
+      _renderReadersTable();
+    }, 400);
+  });
+  _renderReadersTable();
 
   // Bind edit group form submits
   groups.forEach(g => {
