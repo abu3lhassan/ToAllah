@@ -1453,7 +1453,8 @@ function csvRowsToManagedData(rows){
     const startJuz = Number(row.start_juz || row.startJuz || row['بداية الجزء'] || 0) || null;
     const partsCount = Number(row.parts_count || row.partsCount || row['عدد الأجزاء'] || 0) || null;
     if(!name && !phone && !accessCode) return;
-    const reader = {name, phone, accessCode, notes, country, startJuz, partsCount};
+    const readerId = String(row.id || '').trim();
+    const reader = {readerId, name, phone, accessCode, notes, country, startJuz, partsCount};
     participants.push(reader);
     const explicitUnits = unitNumberList(row.unitNumbers || row.units || row['الأجزاء'] || '');
     const generatedUnits = explicitUnits.length ? explicitUnits : juzSequence(startJuz, partsCount);
@@ -1620,9 +1621,10 @@ async function setupManagedReaders(){
     const gId = e.target.dataset.groupId || '';
     const {participants} = csvRowsToManagedData(parseCsvRows(await file.text()));
     if(!participants.length){ toast('ملف CSV لا يحتوي قراء'); e.target.value=''; return; }
-    const body = {readers: participants}; if(gId) body.groupId = gId;
+    const readers = participants.map(p => p.readerId ? {...p, id: p.readerId} : p);
+    const body = {readers}; if(gId) body.groupId = gId;
     try{ await api('/managed-readers', {method:'POST', body}); toast('تم استيراد القراء'); setupManagedReaders(); }
-    catch(err){ toast(err.message || 'تعذر استيراد القراء'); }
+    catch(err){ console.error('[import readers]', err.message, err); toast(err.message || 'تعذر استيراد القراء'); }
     e.target.value = '';
   });
 
@@ -1738,7 +1740,7 @@ window.uploadGroupCsv = function(groupId){
 window.exportGroupCsv = function(groupId){
   const readers = state.managedReaders.filter(r => r.groupId === groupId);
   if(!readers.length){ toast('لا يوجد قراء في هذه المجموعة'); return; }
-  const rows = readers.map(r => ({name:r.name, phone:normalizeLocalPhone(r.phone||''), accessCode:r.accessCode, start_juz:r.startJuz||'', parts_count:r.partsCount||'', notes:r.notes||''}));
+  const rows = readers.map(r => ({id:r.id||'', name:r.name, phone:normalizeLocalPhone(r.phone||''), accessCode:r.accessCode, country:r.country||'', start_juz:r.startJuz||'', parts_count:r.partsCount||'', notes:r.notes||''}));
   downloadTextFile('readers-group.csv', rowsToCsv(rows), 'text/csv;charset=utf-8');
 };
 window.deleteReaderGroup = async function(id){
@@ -2263,15 +2265,16 @@ async function setupReaderGroup(id){
     });
     document.getElementById('exportGroupCsvBtn2')?.addEventListener('click', () => {
       if(!readers.length){ toast('لا يوجد قراء'); return; }
-      downloadTextFile('readers-group.csv', rowsToCsv(readers.map(r => ({name:r.name, phone:normalizeLocalPhone(r.phone||''), accessCode:r.accessCode, start_juz:r.startJuz||'', parts_count:r.partsCount||'', notes:r.notes||''}))), 'text/csv;charset=utf-8');
+      downloadTextFile('readers-group.csv', rowsToCsv(readers.map(r => ({id:r.id||'', name:r.name, phone:normalizeLocalPhone(r.phone||''), accessCode:r.accessCode, country:r.country||'', start_juz:r.startJuz||'', parts_count:r.partsCount||'', notes:r.notes||''}))), 'text/csv;charset=utf-8');
     });
     document.getElementById('importGroupCsvBtn')?.addEventListener('click', () => document.getElementById('groupCsvFileInput').click());
     document.getElementById('groupCsvFileInput')?.addEventListener('change', async e => {
       const file = e.target.files?.[0]; if(!file) return;
       const {participants} = csvRowsToManagedData(parseCsvRows(await file.text()));
       if(!participants.length){ toast('ملف CSV لا يحتوي قراء'); e.target.value=''; return; }
-      try{ await api('/managed-readers', {method:'POST', body:{readers:participants, groupId:id}}); toast('تم استيراد القراء'); setupReaderGroup(id); }
-      catch(err){ toast(err.message || 'تعذر الاستيراد'); }
+      const readers = participants.map(p => p.readerId ? {...p, id: p.readerId} : p);
+      try{ await api('/managed-readers', {method:'POST', body:{readers, groupId:id}}); toast('تم استيراد القراء'); setupReaderGroup(id); }
+      catch(err){ console.error('[import readers group]', err.message, err); toast(err.message || 'تعذر الاستيراد'); }
       e.target.value = '';
     });
     return;
