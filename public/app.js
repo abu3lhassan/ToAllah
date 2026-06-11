@@ -1279,74 +1279,219 @@ async function _occLoadUsers(){
 // ── Tab: Reports ──────────────────────────────────────────
 
 function _occTabReports(el){
+  window._occMCPage = 1;
+  window._occGRPage = 1;
+
   el.innerHTML = `
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:20px">
-      <div class="khatma-card glass" style="padding:16px">
-        <h3 style="font-size:15px;margin-bottom:6px">قراء بدون بيانات تواصل</h3>
-        <p style="font-size:12px;opacity:.6;margin-bottom:12px">قراء بدون هاتف أو دولة — أول 100</p>
-        <button class="btn primary compact-btn" onclick="window._occReportMissingContact()">عرض وطباعة</button>
+    <div class="khatma-card glass" style="padding:16px;margin-bottom:16px">
+      <h3 style="font-size:15px;margin-bottom:10px">قراء بدون بيانات تواصل</h3>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <input id="mcSearch" type="search" placeholder="ابحث بالاسم أو الرقم التسلسلي..." style="flex:1;min-width:180px;padding:7px 10px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:14px;direction:rtl" onkeydown="if(event.key==='Enter')window._occMCSearch()">
+        <select id="mcMissing" style="padding:7px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:13px">
+          <option value="any">أي بيانات ناقصة</option>
+          <option value="phone">هاتف مفقود</option>
+          <option value="country">دولة مفقودة</option>
+        </select>
+        <button class="btn primary compact-btn" onclick="window._occMCSearch()">بحث</button>
+        <button class="btn ghost compact-btn" onclick="window._occMCLoad()">عرض الكل</button>
       </div>
-      <div class="khatma-card glass" style="padding:16px">
-        <h3 style="font-size:15px;margin-bottom:6px">تقرير المجموعات</h3>
-        <p style="font-size:12px;opacity:.6;margin-bottom:12px">ملخص عدد القراء لكل مجموعة</p>
-        <button class="btn primary compact-btn" onclick="window._occReportGroups()">عرض وطباعة</button>
+      <div id="mcResult" style="min-height:32px"></div>
+      <div id="mcPager" style="display:none;flex-wrap:wrap;align-items:center;justify-content:center;gap:12px;margin-top:10px;font-size:13px">
+        <button class="btn ghost compact-btn" id="mcPrev" onclick="window._occMCPrev()">→ السابق</button>
+        <span id="mcPageInfo" style="opacity:.7"></span>
+        <button class="btn ghost compact-btn" id="mcNext" onclick="window._occMCNext()">التالي ←</button>
+        <span id="mcTotalInfo" style="opacity:.5;font-size:12px"></span>
+      </div>
+      <div style="text-align:center;margin-top:10px">
+        <small style="display:block;opacity:.45;margin-bottom:4px;font-size:11px">طباعة الصفحة الحالية فقط</small>
+        <button class="btn ghost compact-btn" onclick="window.print()">⎙ طباعة / PDF</button>
       </div>
     </div>
-    <div id="occReportContent"></div>
+
+    <div class="khatma-card glass" style="padding:16px;margin-bottom:16px">
+      <h3 style="font-size:15px;margin-bottom:10px">تقرير المجموعات</h3>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <input id="grSearch" type="search" placeholder="ابحث باسم المجموعة أو المالك..." style="flex:1;min-width:180px;padding:7px 10px;border:1px solid var(--border-color,#ccc);border-radius:6px;font-size:14px;direction:rtl" onkeydown="if(event.key==='Enter')window._occGRSearch()">
+        <button class="btn primary compact-btn" onclick="window._occGRSearch()">بحث</button>
+        <button class="btn ghost compact-btn" onclick="window._occGRLoad()">عرض الكل</button>
+      </div>
+      <div id="grResult" style="min-height:32px"></div>
+      <div id="grPager" style="display:none;flex-wrap:wrap;align-items:center;justify-content:center;gap:12px;margin-top:10px;font-size:13px">
+        <button class="btn ghost compact-btn" id="grPrev" onclick="window._occGRPrev()">→ السابق</button>
+        <span id="grPageInfo" style="opacity:.7"></span>
+        <button class="btn ghost compact-btn" id="grNext" onclick="window._occGRNext()">التالي ←</button>
+        <span id="grTotalInfo" style="opacity:.5;font-size:12px"></span>
+      </div>
+      <div style="text-align:center;margin-top:10px">
+        <small style="display:block;opacity:.45;margin-bottom:4px;font-size:11px">طباعة الصفحة الحالية فقط</small>
+        <button class="btn ghost compact-btn" onclick="window.print()">⎙ طباعة / PDF</button>
+      </div>
+    </div>
+
+    <div class="khatma-card glass" style="padding:16px">
+      <h3 style="font-size:15px;margin-bottom:6px">تصدير قراء المجموعات Excel</h3>
+      <p style="font-size:12px;opacity:.6;margin-bottom:12px">360 ورقة — ورقة لكل مجموعة — بصيغة .xlsx</p>
+      <button class="btn primary compact-btn" id="occXlsxBtn" onclick="window._occExportXlsx()">تحميل ملف Excel</button>
+    </div>
   `;
 
-  window._occReportMissingContact = async function(){
-    const rc = document.getElementById('occReportContent');
-    rc.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">جاري التحميل...</p>';
+  // ── Excel Export (unchanged logic) ────────────────────
+  window._occExportXlsx = async function(){
+    const btn = document.getElementById('occXlsxBtn');
+    if(btn){ btn.disabled = true; btn.textContent = 'جاري التحميل...'; }
     try{
-      const res = await api('/owner/readers?limit=100&missingContact=any');
-      const rows = (res.readers||[]);
-      rc.innerHTML = `
-        <div id="printArea" style="background:var(--surface,#fff);padding:20px;border:1px solid var(--border-color,#eee);border-radius:8px">
-          <h2 style="margin-bottom:12px">قراء بدون بيانات تواصل (${res.total||rows.length})</h2>
-          <table style="width:100%;border-collapse:collapse;font-size:13px">
-            <thead><tr style="background:var(--surface-alt,#f9fafb)">
-              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">الرقم</th>
-              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">الاسم</th>
-              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">الهاتف</th>
-              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">الدولة</th>
-              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">المجموعة</th>
-            </tr></thead>
-            <tbody>
-              ${rows.map(r=>`<tr><td style="padding:5px;border:1px solid var(--border-color,#ddd)" dir="ltr">${escapeHtml(r.serialCode)}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd)">${escapeHtml(r.name)}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd);color:${r.phone?'inherit':'var(--danger)'}" dir="ltr">${escapeHtml(r.phone||'مفقود')}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd);color:${r.country?'inherit':'var(--danger)'}">${escapeHtml(r.country||'مفقود')}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd)">${escapeHtml(r.groupName||'—')}</td></tr>`).join('')}
-            </tbody>
-          </table>
-        </div>
-        <div style="text-align:center;margin-top:12px"><button class="btn primary compact-btn" onclick="window.print()">⎙ طباعة / PDF</button></div>
-      `;
-    }catch(err){ rc.innerHTML=`<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`; }
+      const token = state.token || localStorage.getItem('auth_token');
+      const resp = await fetch('/api/owner/export-muharram-groups-readers-xlsx', {
+        headers: token ? { 'Authorization': 'Bearer ' + token } : {}
+      });
+      if(!resp.ok){
+        const err = await resp.json().catch(()=>({}));
+        throw new Error(err.error || 'فشل تحميل الملف');
+      }
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url;
+      const today = new Date().toISOString().slice(0,10);
+      a.download = `toallah-groups-readers-${today}.xlsx`;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }catch(err){
+      alert(err.message);
+    }finally{
+      if(btn){ btn.disabled = false; btn.textContent = 'تحميل ملف Excel'; }
+    }
   };
 
-  window._occReportGroups = async function(){
-    const rc = document.getElementById('occReportContent');
-    rc.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">جاري التحميل...</p>';
-    try{
-      const res = await api('/owner/groups?limit=100');
-      const rows = (res.groups||[]);
-      rc.innerHTML = `
-        <div id="printArea" style="background:var(--surface,#fff);padding:20px;border:1px solid var(--border-color,#eee);border-radius:8px">
-          <h2 style="margin-bottom:12px">تقرير المجموعات (${res.total||rows.length})</h2>
-          <table style="width:100%;border-collapse:collapse;font-size:13px">
+  // ── Missing Contact Report ─────────────────────────────
+  function _mcRender(res){
+    const rc    = document.getElementById('mcResult');
+    const pager = document.getElementById('mcPager');
+    if(!rc) return;
+    window._occMCPage = res.page;
+    if(res.total > 0){
+      pager.style.display = 'flex';
+      document.getElementById('mcPageInfo').textContent  = `صفحة ${res.page} من ${res.pages}`;
+      document.getElementById('mcTotalInfo').textContent = `(${res.total} إجمالي)`;
+      document.getElementById('mcPrev').disabled = res.page <= 1;
+      document.getElementById('mcNext').disabled = res.page >= res.pages;
+    } else {
+      pager.style.display = 'none';
+    }
+    if(!res.rows.length){
+      rc.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">لا توجد نتائج</p>';
+      return;
+    }
+    rc.innerHTML = `
+      <div id="printArea">
+        <p style="font-size:12px;opacity:.6;margin-bottom:6px">إجمالي: ${res.total} | صفحة ${res.page} من ${res.pages}</p>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
             <thead><tr style="background:var(--surface-alt,#f9fafb)">
-              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">المجموعة</th>
-              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">القراء</th>
-              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">التدوير</th>
-              <th style="padding:6px;border:1px solid var(--border-color,#ddd)">المنشئ</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">الرقم</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">الاسم</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">الهاتف</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">الدولة</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">المجموعة</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">المالك</th>
             </tr></thead>
             <tbody>
-              ${rows.map(g=>`<tr><td style="padding:5px;border:1px solid var(--border-color,#ddd)">${escapeHtml(g.name)}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd);text-align:center">${g.readerCount||0}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd);font-size:12px">${escapeHtml(g.rotationType||'—')}</td><td style="padding:5px;border:1px solid var(--border-color,#ddd);font-size:11px">${escapeHtml(g.ownerName||'—')}</td></tr>`).join('')}
+              ${res.rows.map(r=>`<tr>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd)" dir="ltr">${escapeHtml(r.serial_code)}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd)">${escapeHtml(r.reader_name)}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd);color:${r.phone?'inherit':'var(--danger)'}" dir="ltr">${escapeHtml(r.phone||'مفقود')}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd);color:${r.country?'inherit':'var(--danger)'}">${escapeHtml(r.country||'مفقود')}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd)">${escapeHtml(r.group_name)}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd);font-size:11px">${escapeHtml(r.owner_name)}</td>
+              </tr>`).join('')}
             </tbody>
           </table>
         </div>
-        <div style="text-align:center;margin-top:12px"><button class="btn primary compact-btn" onclick="window.print()">⎙ طباعة / PDF</button></div>
-      `;
-    }catch(err){ rc.innerHTML=`<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`; }
+      </div>`;
+  }
+
+  window._occMCLoad = async function(pg){
+    const page    = pg || window._occMCPage || 1;
+    const q       = document.getElementById('mcSearch')?.value.trim()  || '';
+    const missing = document.getElementById('mcMissing')?.value         || 'any';
+    const rc = document.getElementById('mcResult');
+    if(rc) rc.innerHTML = '<p style="opacity:.5;text-align:center;padding:12px">جاري التحميل...</p>';
+    try{
+      const res = await api(`/owner/reports/missing-contact?page=${page}&limit=50&q=${encodeURIComponent(q)}&missing=${encodeURIComponent(missing)}`);
+      _mcRender(res);
+    }catch(err){
+      if(rc) rc.innerHTML = `<p style="color:var(--danger);padding:8px">${escapeHtml(err.message)}</p>`;
+    }
   };
+  window._occMCSearch = function(){ window._occMCPage=1; window._occMCLoad(1); };
+  window._occMCPrev  = function(){ if(window._occMCPage>1){ window._occMCPage--; window._occMCLoad(window._occMCPage); } };
+  window._occMCNext  = function(){ window._occMCPage++; window._occMCLoad(window._occMCPage); };
+
+  // ── Groups Report ──────────────────────────────────────
+  function _grRender(res){
+    const rc    = document.getElementById('grResult');
+    const pager = document.getElementById('grPager');
+    if(!rc) return;
+    window._occGRPage = res.page;
+    if(res.total > 0){
+      pager.style.display = 'flex';
+      document.getElementById('grPageInfo').textContent  = `صفحة ${res.page} من ${res.pages}`;
+      document.getElementById('grTotalInfo').textContent = `(${res.total} إجمالي)`;
+      document.getElementById('grPrev').disabled = res.page <= 1;
+      document.getElementById('grNext').disabled = res.page >= res.pages;
+    } else {
+      pager.style.display = 'none';
+    }
+    if(!res.rows.length){
+      rc.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">لا توجد نتائج</p>';
+      return;
+    }
+    rc.innerHTML = `
+      <div id="printArea2">
+        <p style="font-size:12px;opacity:.6;margin-bottom:6px">إجمالي: ${res.total} | صفحة ${res.page} من ${res.pages}</p>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="background:var(--surface-alt,#f9fafb)">
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">المجموعة</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">المالك</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">القراء</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">الشواغر</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">بلا هاتف</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">بلا دولة</th>
+              <th style="padding:5px 7px;border:1px solid var(--border-color,#ddd)">الحالة</th>
+            </tr></thead>
+            <tbody>
+              ${res.rows.map(g=>`<tr>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd)">${escapeHtml(g.group_name)}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd);font-size:11px">${escapeHtml(g.owner_name)}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd);text-align:center">${g.readerCount}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd);text-align:center;color:${g.vacanciesCount>0?'var(--warning,#b45309)':'inherit'}">${g.vacanciesCount}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd);text-align:center;color:${g.missingPhoneCount>0?'var(--danger)':'inherit'}">${g.missingPhoneCount}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd);text-align:center;color:${g.missingCountryCount>0?'var(--danger)':'inherit'}">${g.missingCountryCount}</td>
+                <td style="padding:4px 6px;border:1px solid var(--border-color,#ddd);font-size:11px">${escapeHtml(g.status)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  window._occGRLoad = async function(pg){
+    const page = pg || window._occGRPage || 1;
+    const q    = document.getElementById('grSearch')?.value.trim() || '';
+    const rc   = document.getElementById('grResult');
+    if(rc) rc.innerHTML = '<p style="opacity:.5;text-align:center;padding:12px">جاري التحميل...</p>';
+    try{
+      const res = await api(`/owner/reports/groups?page=${page}&limit=50&q=${encodeURIComponent(q)}`);
+      _grRender(res);
+    }catch(err){
+      if(rc) rc.innerHTML = `<p style="color:var(--danger);padding:8px">${escapeHtml(err.message)}</p>`;
+    }
+  };
+  window._occGRSearch = function(){ window._occGRPage=1; window._occGRLoad(1); };
+  window._occGRPrev  = function(){ if(window._occGRPage>1){ window._occGRPage--; window._occGRLoad(window._occGRPage); } };
+  window._occGRNext  = function(){ window._occGRPage++; window._occGRLoad(window._occGRPage); };
 }
 
 // ── Tab: Global Search ────────────────────────────────────

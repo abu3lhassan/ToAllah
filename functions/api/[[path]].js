@@ -3024,6 +3024,105 @@ async function ownerListGroups(request, DB) {
   });
 }
 
+async function ownerReportMissingContact(request, DB) {
+  const url = new URL(request.url);
+  const page  = Math.max(1, parseInt(url.searchParams.get("page")  || "1",  10));
+  const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10)));
+  const offset = (page - 1) * limit;
+  const q       = (url.searchParams.get("q")       || "").trim();
+  const missing = (url.searchParams.get("missing")  || "any");
+
+  let where = "WHERE mrp.status != 'deleted'";
+  const params = [];
+
+  if (missing === "phone")   { where += " AND (mrp.phone IS NULL OR TRIM(mrp.phone) = '')"; }
+  else if (missing === "country") { where += " AND (mrp.country IS NULL OR TRIM(mrp.country) = '')"; }
+  else { where += " AND (mrp.phone IS NULL OR TRIM(mrp.phone) = '' OR mrp.country IS NULL OR TRIM(mrp.country) = '')"; }
+
+  if (q) {
+    const like = `%${q}%`;
+    where += " AND (mrp.reader_name LIKE ? OR mrp.serial_code LIKE ? OR g.name LIKE ?)";
+    params.push(like, like, like);
+  }
+
+  const join = `FROM managed_reader_profiles mrp
+    LEFT JOIN managed_reader_groups g ON g.id = mrp.group_id
+    LEFT JOIN users u ON u.id = mrp.created_by_user_id`;
+
+  const countRow = await DB.prepare(`SELECT COUNT(*) AS total ${join} ${where}`)
+    .bind(...params).first();
+  const total = countRow?.total || 0;
+
+  const rows = (await DB.prepare(
+    `SELECT mrp.serial_code, mrp.reader_name, mrp.phone, mrp.country, mrp.status,
+       g.name AS group_name, u.display_name AS owner_name
+     ${join} ${where} ORDER BY g.id ASC, mrp.serial_code ASC LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all()).results || [];
+
+  return json({
+    ok: true,
+    rows: rows.map(r => ({
+      serial_code: r.serial_code || '',
+      reader_name: r.reader_name || '',
+      phone:       r.phone       || '',
+      country:     r.country     || '',
+      group_name:  r.group_name  || '',
+      owner_name:  r.owner_name  || '',
+      status:      r.status      || ''
+    })),
+    total, page, limit, pages: Math.ceil(total / limit) || 1
+  });
+}
+
+async function ownerReportGroups(request, DB) {
+  const url = new URL(request.url);
+  const page  = Math.max(1, parseInt(url.searchParams.get("page")  || "1",  10));
+  const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10)));
+  const offset = (page - 1) * limit;
+  const q = (url.searchParams.get("q") || "").trim();
+
+  let where = "WHERE g.status != 'deleted'";
+  const params = [];
+
+  if (q) {
+    const like = `%${q}%`;
+    where += " AND (g.name LIKE ? OR u.display_name LIKE ?)";
+    params.push(like, like);
+  }
+
+  const countRow = await DB.prepare(
+    `SELECT COUNT(*) AS total FROM managed_reader_groups g LEFT JOIN users u ON u.id = g.created_by_user_id ${where}`
+  ).bind(...params).first();
+  const total = countRow?.total || 0;
+
+  const rows = (await DB.prepare(
+    `SELECT g.name AS group_name, g.status,
+       u.display_name AS owner_name,
+       COUNT(p.id) AS reader_count,
+       COUNT(CASE WHEN p.reader_name = 'شاغر' THEN 1 END) AS vacancies_count,
+       COUNT(CASE WHEN p.phone IS NULL OR TRIM(p.phone) = '' THEN 1 END) AS missing_phone_count,
+       COUNT(CASE WHEN p.country IS NULL OR TRIM(p.country) = '' THEN 1 END) AS missing_country_count
+     FROM managed_reader_groups g
+     LEFT JOIN users u ON u.id = g.created_by_user_id
+     LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
+     ${where} GROUP BY g.id ORDER BY g.id ASC LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all()).results || [];
+
+  return json({
+    ok: true,
+    rows: rows.map(r => ({
+      group_name:          r.group_name          || '',
+      owner_name:          r.owner_name          || '',
+      readerCount:         Number(r.reader_count)         || 0,
+      vacanciesCount:      Number(r.vacancies_count)      || 0,
+      missingPhoneCount:   Number(r.missing_phone_count)  || 0,
+      missingCountryCount: Number(r.missing_country_count)|| 0,
+      status:              r.status              || ''
+    })),
+    total, page, limit, pages: Math.ceil(total / limit) || 1
+  });
+}
+
 async function ownerListKhatmas(request, DB) {
   const url = new URL(request.url);
   const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
@@ -3139,6 +3238,140 @@ async function ownerSearch(request, DB) {
   return json({ ok: true, results: r });
 }
 
+// ── Pure-JS ZIP + XLSX writer (STORED mode, no dependencies) ──────────────
+
+const _CRC32T = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c;
+  }
+  return t;
+})();
+function _crc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) c = (c >>> 8) ^ _CRC32T[(c ^ buf[i]) & 0xFF];
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function _concat(arrays) {
+  const total = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total); let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
+}
+const _ENC = new TextEncoder();
+
+function _zipLocal(nameBytes, data, crc) {
+  const v = new DataView(new ArrayBuffer(30));
+  v.setUint32(0, 0x504B0304, false);
+  v.setUint16(4, 20, true); v.setUint16(6, 0x0800, true); v.setUint16(8, 0, true);
+  v.setUint16(10, 0, true); v.setUint16(12, 0x4A76, true);
+  v.setUint32(14, crc, true); v.setUint32(18, data.length, true); v.setUint32(22, data.length, true);
+  v.setUint16(26, nameBytes.length, true); v.setUint16(28, 0, true);
+  return _concat([new Uint8Array(v.buffer), nameBytes, data]);
+}
+function _zipCentral(nameBytes, crc, size, offset) {
+  const v = new DataView(new ArrayBuffer(46));
+  v.setUint32(0, 0x504B0102, false);
+  v.setUint16(4, 20, true); v.setUint16(6, 20, true); v.setUint16(8, 0x0800, true); v.setUint16(10, 0, true);
+  v.setUint16(12, 0, true); v.setUint16(14, 0x4A76, true);
+  v.setUint32(16, crc, true); v.setUint32(20, size, true); v.setUint32(24, size, true);
+  v.setUint16(28, nameBytes.length, true); v.setUint16(30, 0, true); v.setUint16(32, 0, true);
+  v.setUint16(34, 0, true); v.setUint16(36, 0, true); v.setUint32(38, 0, true); v.setUint32(42, offset, true);
+  return _concat([new Uint8Array(v.buffer), nameBytes]);
+}
+function _buildZip(files) {
+  const locals = []; const centrals = []; let off = 0;
+  for (const f of files) {
+    const nb = _ENC.encode(f.name); const crc = _crc32(f.data); const size = f.data.length;
+    const loc = _zipLocal(nb, f.data, crc);
+    locals.push(loc); centrals.push(_zipCentral(nb, crc, size, off)); off += loc.length;
+  }
+  const cd = _concat(centrals);
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x504B0506, false);
+  eocd.setUint16(4, 0, true); eocd.setUint16(6, 0, true);
+  eocd.setUint16(8, files.length, true); eocd.setUint16(10, files.length, true);
+  eocd.setUint32(12, cd.length, true); eocd.setUint32(16, off, true); eocd.setUint16(20, 0, true);
+  return _concat([...locals, cd, new Uint8Array(eocd.buffer)]);
+}
+function _xe(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function _buildXlsx(sheets) {
+  // sheets: [{name: string, rows: [[cell,cell,...], ...]}]
+  const files = [];
+  let ct = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>`;
+  sheets.forEach((_, i) => { ct += `<Override PartName="/xl/worksheets/sheet${i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`; });
+  ct += `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>`;
+  files.push({ name: '[Content_Types].xml', data: _ENC.encode(ct) });
+  files.push({ name: '_rels/.rels', data: _ENC.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`) });
+  let wb = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>`;
+  sheets.forEach((s, i) => { wb += `<sheet name="${_xe(s.name)}" sheetId="${i+1}" r:id="rId${i+1}"/>`; });
+  wb += `</sheets></workbook>`;
+  files.push({ name: 'xl/workbook.xml', data: _ENC.encode(wb) });
+  let wbr = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`;
+  sheets.forEach((_, i) => { wbr += `<Relationship Id="rId${i+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i+1}.xml"/>`; });
+  wbr += `</Relationships>`;
+  files.push({ name: 'xl/_rels/workbook.xml.rels', data: _ENC.encode(wbr) });
+  const COLS = ['A','B','C','D','E','F','G','H','I','J'];
+  for (let i = 0; i < sheets.length; i++) {
+    const { rows } = sheets[i];
+    let ws = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`;
+    for (let r = 0; r < rows.length; r++) {
+      ws += `<row r="${r+1}">`;
+      for (let c = 0; c < rows[r].length && c < COLS.length; c++) {
+        ws += `<c r="${COLS[c]}${r+1}" t="inlineStr"><is><t>${_xe(rows[r][c])}</t></is></c>`;
+      }
+      ws += `</row>`;
+    }
+    ws += `</sheetData></worksheet>`;
+    files.push({ name: `xl/worksheets/sheet${i+1}.xml`, data: _ENC.encode(ws) });
+  }
+  return _buildZip(files);
+}
+
+// ── Owner: export groups readers as .xlsx ─────────────────────────────────
+
+async function ownerExportMuharramGroupsXlsx(request, DB) {
+  const OWNER_ID = 'user_245e3fc4cf0445a78e';
+  const PAT = 'mgroup_muh1448_%';
+
+  const [groupsRes, readersRes] = await DB.batch([
+    DB.prepare(`SELECT id, name FROM managed_reader_groups WHERE id LIKE ? AND created_by_user_id = ? AND status = 'active' ORDER BY id ASC`).bind(PAT, OWNER_ID),
+    DB.prepare(`SELECT group_id, serial_code, reader_name FROM managed_reader_profiles WHERE group_id LIKE ? AND status = 'active' ORDER BY group_id ASC, CASE WHEN serial_code IS NULL OR serial_code = '' THEN 1 ELSE 0 END, serial_code ASC`).bind(PAT)
+  ]);
+
+  const groups = groupsRes.results || [];
+  if (!groups.length) return json({ ok: false, error: 'لا توجد مجموعات' }, 404);
+
+  const byGroup = {};
+  for (const r of (readersRes.results || [])) {
+    if (!byGroup[r.group_id]) byGroup[r.group_id] = [];
+    byGroup[r.group_id].push(r);
+  }
+
+  const sheets = groups.map(g => ({
+    name: g.name,
+    rows: [
+      ['الرقم التسلسلي', 'اسم القارئ'],
+      ...(byGroup[g.id] || []).map(r => [r.serial_code ?? '', r.reader_name ?? ''])
+    ]
+  }));
+
+  const xlsx = _buildXlsx(sheets);
+  const today = new Date().toISOString().slice(0, 10);
+  return new Response(xlsx, {
+    status: 200,
+    headers: {
+      'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'content-disposition': `attachment; filename="toallah-groups-readers-${today}.xlsx"`,
+      'cache-control': 'no-store'
+    }
+  });
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   const method = request.method.toUpperCase();
@@ -3251,6 +3484,11 @@ export async function onRequest(context) {
       if (parts[1] === "khatmas" && parts.length === 2 && method === "GET") return ownerListKhatmas(request, env.DB);
       if (parts[1] === "users"   && parts.length === 2 && method === "GET") return ownerListUsers(request, env.DB);
       if (parts[1] === "search"  && parts.length === 2 && method === "GET") return ownerSearch(request, env.DB);
+      if (parts[1] === "export-muharram-groups-readers-xlsx" && parts.length === 2 && method === "GET") return ownerExportMuharramGroupsXlsx(request, env.DB);
+      if (parts[1] === "reports" && parts.length === 3 && method === "GET") {
+        if (parts[2] === "missing-contact") return ownerReportMissingContact(request, env.DB);
+        if (parts[2] === "groups")          return ownerReportGroups(request, env.DB);
+      }
     }
     return json({ ok: false, error: "Not found", path: parts }, 404);
   } catch (error) {
