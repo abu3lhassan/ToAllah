@@ -294,7 +294,7 @@ async function refreshManagedReaders(groupId, opts){
       path = '/managed-readers?groupId=' + encodeURIComponent(groupId);
     } else {
       const pg = (opts && opts.page) || 1;
-      const lim = (opts && opts.limit) || 50;
+      const lim = (opts && opts.limit) || 25;
       const q = (opts && opts.q) || '';
       const ug = (opts && opts.ungrouped) ? '&ungrouped=1' : '';
       path = '/managed-readers?page=' + pg + '&limit=' + lim + (q ? '&q=' + encodeURIComponent(q) : '') + ug;
@@ -305,7 +305,7 @@ async function refreshManagedReaders(groupId, opts){
       state.managedReadersTotal = res.total || 0;
       state.managedReadersPage = res.page || 1;
       state.managedReadersPages = res.pages || 1;
-      state.managedReadersLimit = res.limit || 50;
+      state.managedReadersLimit = res.limit || 25;
     }
   }catch(err){ console.error(err); state.managedReaders = []; toast(err.message || 'تعذر تحميل القراء'); }
 }
@@ -313,7 +313,7 @@ async function refreshManagedGroups(opts){
   if(!canUseManagedKhatmas()){ state.managedGroupsDisplay = []; return; }
   try{
     const pg = (opts && opts.page) || 1;
-    const lim = (opts && opts.limit) || 50;
+    const lim = (opts && opts.limit) || 25;
     const q = (opts && opts.q) || '';
     const path = '/managed-reader-groups?page=' + pg + '&limit=' + lim + (q ? '&q=' + encodeURIComponent(q) : '');
     const res = await api(path);
@@ -607,7 +607,7 @@ async function renderCreatorGroups(){
   if(!el) return;
   el.innerHTML = '<p style="color:var(--muted)">جاري التحميل...</p>';
   try{
-    const [groupsRes, usersRes] = await Promise.all([api('/managed-creator-groups'), api('/users')]);
+    const [groupsRes, usersRes] = await Promise.all([api('/managed-creator-groups'), api('/users?page=1&limit=25')]);
     const groups = groupsRes.groups || [];
     const users = (usersRes.users || []).filter(u => u.role !== 'owner' && u.status === 'active');
     const usersOpts = users.map(u => `<option value="${escapeHtml(u.id)}">${escapeHtml(u.display_name||u.username)}</option>`).join('');
@@ -666,14 +666,42 @@ window.deleteCreatorGroup = async function(id){
 
 
 
-async function renderUsers(){
+async function renderUsers(page){
   const list = document.getElementById('usersList');
   try{
-    const res = await api('/users');
+    const requestedPage = Math.max(1, Number(page || state.usersPage || 1) || 1);
+    const res = await api('/users?page=' + requestedPage + '&limit=25');
     const users = res.users || [];
+    state.usersPage = res.page || requestedPage;
+    state.usersPages = res.pages || 1;
+    state.usersTotal = res.total || 0;
     list.innerHTML = users.map(userCardHtml).join('') || `<article class="feature-card empty-state"><h3>لا يوجد مستخدمون</h3></article>`;
+    renderUsersPager();
   }catch(err){ list.innerHTML = `<article class="feature-card empty-state"><h3>تعذر تحميل المستخدمين</h3><p>${escapeHtml(err.message || '')}</p></article>`; }
 }
+function renderUsersPager(){
+  const list = document.getElementById('usersList');
+  if(!list) return;
+  let pager = document.getElementById('usersListPager');
+  if(!pager){
+    pager = document.createElement('div');
+    pager.id = 'usersListPager';
+    pager.style.cssText = 'display:none;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:12px';
+    list.after(pager);
+  }
+  const page = state.usersPage || 1;
+  const pages = state.usersPages || 1;
+  if(pages <= 1){ pager.style.display = 'none'; pager.innerHTML = ''; return; }
+  pager.style.display = 'flex';
+  pager.innerHTML = `
+    <button class="btn ghost compact-btn" onclick="window.ownerUsersPage(1)" ${page<=1?'disabled':''}>«</button>
+    <button class="btn ghost compact-btn" onclick="window.ownerUsersPage(${page-1})" ${page<=1?'disabled':''}>‹</button>
+    <span style="line-height:32px;font-size:13px;opacity:.7">صفحة ${page} من ${pages}</span>
+    <button class="btn ghost compact-btn" onclick="window.ownerUsersPage(${page+1})" ${page>=pages?'disabled':''}>›</button>
+    <button class="btn ghost compact-btn" onclick="window.ownerUsersPage(${pages})" ${page>=pages?'disabled':''}>»</button>
+  `;
+}
+window.ownerUsersPage = function(pg){ renderUsers(pg); };
 function userCardHtml(u){
   const isOwner = u.role === 'owner';
   const resetOpen = state.activeResetUserId === u.id;
@@ -705,7 +733,7 @@ async function createUserFromOwnerPanel(e){
     const res = await api('/users', {method:'POST', body:data});
     form.reset();
     toast('تم إنشاء المستخدم');
-    await renderUsers();
+    await renderUsers(1);
     if(res.user){ setTimeout(()=>document.querySelector(`[data-user-id="${CSS.escape(res.user.id)}"]`)?.scrollIntoView({behavior:'smooth', block:'center'}), 60); }
   }catch(err){
     toast(err.message || 'تعذر إنشاء المستخدم');
@@ -899,7 +927,7 @@ async function _occLoadReaders(){
   el.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">جاري التحميل...</p>';
   try{
     const p = new URLSearchParams({
-      page: state._occRPage || 1, limit: 50,
+      page: state._occRPage || 1, limit: 25,
       q: state._occRQ || '', missingContact: state._occRMissing || ''
     });
     const res = await api('/owner/readers?' + p);
@@ -954,7 +982,7 @@ window._occOpenEditReader = async function(id){
 
   let groups = state.managedReaderGroups||[];
   if(!groups.length){
-    try{ const gr = await api('/managed-reader-groups'); groups = gr.groups||[]; }catch(e){}
+    try{ const gr = await api('/managed-reader-groups?page=1&limit=25'); groups = gr.groups||[]; }catch(e){}
   }
 
   // Parse existing phone into prefix + local (longest-prefix-first to avoid +98 matching +964)
@@ -1120,7 +1148,7 @@ async function _occLoadGroups(){
   if(!el) return;
   el.innerHTML = '<p style="opacity:.5;text-align:center;padding:20px">جاري التحميل...</p>';
   try{
-    const p = new URLSearchParams({ page: state._occGPage||1, limit:50, q: state._occGQ||'' });
+    const p = new URLSearchParams({ page: state._occGPage||1, limit:25, q: state._occGQ||'' });
     const res = await api('/owner/groups?'+p);
     const { total=0, pages=1, page=1 } = res;
     const pager = pages>1?`<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:12px"><button class="btn ghost compact-btn" onclick="window._occGroupPage(1)" ${page<=1?'disabled':''}>«</button><button class="btn ghost compact-btn" onclick="window._occGroupPage(${page-1})" ${page<=1?'disabled':''}>‹</button><span style="line-height:32px;font-size:13px;opacity:.7">صفحة ${page} من ${pages}</span><button class="btn ghost compact-btn" onclick="window._occGroupPage(${page+1})" ${page>=pages?'disabled':''}>›</button><button class="btn ghost compact-btn" onclick="window._occGroupPage(${pages})" ${page>=pages?'disabled':''}>»</button></div>`:'';
@@ -1428,7 +1456,7 @@ function _occTabReports(el){
     const rc = document.getElementById('mcResult');
     if(rc) rc.innerHTML = '<p style="opacity:.5;text-align:center;padding:12px">جاري التحميل...</p>';
     try{
-      const res = await api(`/owner/reports/missing-contact?page=${page}&limit=50&q=${encodeURIComponent(q)}&missing=${encodeURIComponent(missing)}`);
+      const res = await api(`/owner/reports/missing-contact?page=${page}&limit=25&q=${encodeURIComponent(q)}&missing=${encodeURIComponent(missing)}`);
       _mcRender(res);
     }catch(err){
       if(rc) rc.innerHTML = `<p style="color:var(--danger);padding:8px">${escapeHtml(err.message)}</p>`;
@@ -1493,7 +1521,7 @@ function _occTabReports(el){
     const rc   = document.getElementById('grResult');
     if(rc) rc.innerHTML = '<p style="opacity:.5;text-align:center;padding:12px">جاري التحميل...</p>';
     try{
-      const res = await api(`/owner/reports/groups?page=${page}&limit=50&q=${encodeURIComponent(q)}`);
+      const res = await api(`/owner/reports/groups?page=${page}&limit=25&q=${encodeURIComponent(q)}`);
       _grRender(res);
     }catch(err){
       if(rc) rc.innerHTML = `<p style="color:var(--danger);padding:8px">${escapeHtml(err.message)}</p>`;
@@ -2347,13 +2375,13 @@ async function setupManagedReaders(){
 
   // Load all groups (backward compat) for form dropdown + share-dialog state
   let allGroupsList = [];
-  try{ const res = await api('/managed-reader-groups'); allGroupsList = res.groups || []; }catch(err){ toast(err.message || 'تعذر تحميل المجموعات'); }
+  try{ const res = await api('/managed-reader-groups?page=1&limit=25'); allGroupsList = res.groups || []; }catch(err){ toast(err.message || 'تعذر تحميل المجموعات'); }
   state.managedReaderGroups = allGroupsList;
 
   // Load paginated groups for display + readers in parallel
   await Promise.all([
-    refreshManagedGroups({page: 1, limit: 50}),
-    refreshManagedReaders(null, {ungrouped: true, page: 1, limit: 50})
+    refreshManagedGroups({page: 1, limit: 25}),
+    refreshManagedReaders(null, {ungrouped: true, page: 1, limit: 25})
   ]);
 
   const rotationLabel = t => t === 'weekly' ? 'أسبوعي' : t === 'monthly' ? 'شهري' : t === 'yearly' ? 'سنوي' : 'بلا تدوير';
@@ -2506,7 +2534,7 @@ async function setupManagedReaders(){
     rPgLast.onclick = () => _readersFetchPage(pages);
   }
   async function _readersFetchPage(pg) {
-    await refreshManagedReaders(null, {page: pg, limit: 50, q: _readersQ, ungrouped: !_readersQ});
+    await refreshManagedReaders(null, {page: pg, limit: 25, q: _readersQ, ungrouped: !_readersQ});
     _renderReadersTable();
   }
   let _readersSearchTimer;
@@ -2514,7 +2542,7 @@ async function setupManagedReaders(){
     clearTimeout(_readersSearchTimer);
     _readersSearchTimer = setTimeout(async () => {
       _readersQ = e.target.value.trim();
-      await refreshManagedReaders(null, {page: 1, limit: 50, q: _readersQ, ungrouped: !_readersQ});
+      await refreshManagedReaders(null, {page: 1, limit: 25, q: _readersQ, ungrouped: !_readersQ});
       _renderReadersTable();
     }, 400);
   });
@@ -2581,7 +2609,7 @@ async function setupManagedReaders(){
     document.getElementById('gPgLast').onclick = () => _groupsFetchPage(pages);
   }
   async function _groupsFetchPage(pg) {
-    await refreshManagedGroups({page: pg, limit: 50, q: _groupsQ});
+    await refreshManagedGroups({page: pg, limit: 25, q: _groupsQ});
     _renderGroupsSection();
   }
   let _groupsSearchTimer;
@@ -2589,7 +2617,7 @@ async function setupManagedReaders(){
     clearTimeout(_groupsSearchTimer);
     _groupsSearchTimer = setTimeout(async () => {
       _groupsQ = e.target.value.trim();
-      await refreshManagedGroups({page: 1, limit: 50, q: _groupsQ});
+      await refreshManagedGroups({page: 1, limit: 25, q: _groupsQ});
       _renderGroupsSection();
     }, 400);
   });
@@ -3236,7 +3264,7 @@ async function setupReaderGroup(id){
   let group = null, readers = [], groups = [];
   try{
     const [gRes, rRes] = await Promise.all([
-      api('/managed-reader-groups'),
+      api('/managed-reader-groups?page=1&limit=25'),
       api('/managed-readers?groupId=' + encodeURIComponent(id))
     ]);
     groups = gRes.groups || [];

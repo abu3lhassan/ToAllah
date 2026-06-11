@@ -293,6 +293,14 @@ async function listUsers(request, DB) {
   const check = await requireOwner(request, DB);
   if (!check.ok) return check.response;
   await ensureManagedSchema(DB);
+  const url = new URL(request.url);
+  const pageRaw = parseInt(url.searchParams.get("page") || "1", 10);
+  const limitRaw = parseInt(url.searchParams.get("limit") || "25", 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const limit = Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25));
+  const offset = (page - 1) * limit;
+  const countRow = await DB.prepare("SELECT COUNT(*) AS total FROM users WHERE status != 'deleted'").first();
+  const total = countRow?.total || 0;
   const rows = await DB.prepare(`
     SELECT
       users.id,
@@ -307,8 +315,9 @@ async function listUsers(request, DB) {
     LEFT JOIN managed_khatma_permissions ON managed_khatma_permissions.user_id = users.id
     WHERE users.status != 'deleted'
     ORDER BY users.created_at DESC
-  `).all();
-  return json({ ok: true, users: rows.results || [] });
+    LIMIT ? OFFSET ?
+  `).bind(limit, offset).all();
+  return json({ ok: true, users: rows.results || [], total, page, limit, pages: Math.ceil(total / limit) || 1 });
 }
 
 async function createUser(request, DB) {
@@ -730,15 +739,14 @@ async function listReaderGroups(request, DB) {
   const check = await requireManagedCreator(request, DB);
   if (!check.ok) return check.response;
   const url = new URL(request.url);
-  const pageParam = url.searchParams.get("page");
-  const limitParam = url.searchParams.get("limit");
   const q = (url.searchParams.get("q") || "").trim();
 
-  // Pagination/search activate only when at least one param is present — backward compat
-  const paginate = !!(pageParam || limitParam || q);
-  const page = paginate ? Math.max(1, parseInt(pageParam || "1", 10)) : 1;
-  const limit = paginate ? Math.min(200, Math.max(1, parseInt(limitParam || "50", 10))) : 9999;
-  const offset = paginate ? (page - 1) * limit : 0;
+  // Pagination is always enforced for this listing endpoint.
+  const pageRaw = parseInt(url.searchParams.get("page") || "1", 10);
+  const limitRaw = parseInt(url.searchParams.get("limit") || "25", 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const limit = Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25));
+  const offset = (page - 1) * limit;
 
   const qFilter = q ? " AND g.name LIKE ?" : "";
   const qParam = q ? [`%${q}%`] : [];
@@ -746,20 +754,18 @@ async function listReaderGroups(request, DB) {
   let rows, total;
 
   if (check.user.role === "owner") {
-    if (paginate) {
-      const countRow = await DB.prepare(
-        `SELECT COUNT(*) AS total FROM managed_reader_groups g WHERE g.status != 'deleted'${qFilter}`
-      ).bind(...qParam).first();
-      total = countRow?.total || 0;
-    }
+    const countRow = await DB.prepare(
+      `SELECT COUNT(*) AS total FROM managed_reader_groups g WHERE g.status != 'deleted'${qFilter}`
+    ).bind(...qParam).first();
+    total = countRow?.total || 0;
     const mainSql = `
       SELECT g.*, COUNT(p.id) AS readers_count
       FROM managed_reader_groups g
       LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
       WHERE g.status != 'deleted'${qFilter}
       GROUP BY g.id
-      ORDER BY g.created_at DESC${paginate ? " LIMIT ? OFFSET ?" : ""}`;
-    const mainParams = paginate ? [...qParam, limit, offset] : qParam;
+      ORDER BY g.created_at DESC LIMIT ? OFFSET ?`;
+    const mainParams = [...qParam, limit, offset];
     rows = (await DB.prepare(mainSql).bind(...mainParams).all()).results || [];
   } else {
     await ensureCreatorGroupSchema(DB);
@@ -774,33 +780,29 @@ async function listReaderGroups(request, DB) {
       roleWhere = `WHERE g.status != 'deleted' AND g.created_by_user_id IN (${visibleIds.map(() => "?").join(",")})${qFilter}`;
       roleParams = [...visibleIds, ...qParam];
     }
-    if (paginate) {
-      const countRow = await DB.prepare(
-        `SELECT COUNT(*) AS total FROM managed_reader_groups g ${roleWhere}`
-      ).bind(...roleParams).first();
-      total = countRow?.total || 0;
-    }
+    const countRow = await DB.prepare(
+      `SELECT COUNT(*) AS total FROM managed_reader_groups g ${roleWhere}`
+    ).bind(...roleParams).first();
+    total = countRow?.total || 0;
     const mainSql = `
       SELECT g.*, COUNT(p.id) AS readers_count
       FROM managed_reader_groups g
       LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
       ${roleWhere}
       GROUP BY g.id
-      ORDER BY g.created_at DESC${paginate ? " LIMIT ? OFFSET ?" : ""}`;
-    const mainParams = paginate ? [...roleParams, limit, offset] : roleParams;
+      ORDER BY g.created_at DESC LIMIT ? OFFSET ?`;
+    const mainParams = [...roleParams, limit, offset];
     rows = (await DB.prepare(mainSql).bind(...mainParams).all()).results || [];
   }
 
   const result = {
     ok: true,
-    groups: rows.map(r => ({ ...r, readerCount: Number(r.readers_count) || 0, rotationDurationYears: r.rotation_duration_years || 5 }))
+    groups: rows.map(r => ({ ...r, readerCount: Number(r.readers_count) || 0, rotationDurationYears: r.rotation_duration_years || 5 })),
+    total,
+    page,
+    limit,
+    pages: Math.ceil(total / limit) || 1
   };
-  if (paginate) {
-    result.total = total;
-    result.page = page;
-    result.limit = limit;
-    result.pages = Math.ceil(total / limit) || 1;
-  }
   return json(result);
 }
 
@@ -1174,8 +1176,10 @@ async function listManagedReaders(request, DB) {
 
   // Pagination and search only apply to the "all readers" query (no groupId filter)
   const paginate = !groupId;
-  const page = paginate ? Math.max(1, parseInt(url.searchParams.get("page") || "1", 10)) : 1;
-  const limit = paginate ? Math.min(200, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10))) : 9999;
+  const pageRaw = parseInt(url.searchParams.get("page") || "1", 10);
+  const limitRaw = parseInt(url.searchParams.get("limit") || "25", 10);
+  const page = paginate ? (Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1) : 1;
+  const limit = paginate ? Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25)) : 9999;
   const offset = paginate ? (page - 1) * limit : 0;
   const q = (url.searchParams.get("q") || "").trim();
   const ungroupedOnly = paginate && url.searchParams.get("ungrouped") === "1";
@@ -2969,8 +2973,10 @@ async function ownerOverview(request, DB) {
 
 async function ownerListReaders(request, DB) {
   const url = new URL(request.url);
-  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
-  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10)));
+  const pageRaw = parseInt(url.searchParams.get("page") || "1", 10);
+  const limitRaw = parseInt(url.searchParams.get("limit") || "25", 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const limit = Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25));
   const offset = (page - 1) * limit;
   const q = (url.searchParams.get("q") || "").trim();
   const groupId = url.searchParams.get("groupId") || "";
@@ -3042,8 +3048,10 @@ async function ownerEditReader(request, DB, id) {
 
 async function ownerListGroups(request, DB) {
   const url = new URL(request.url);
-  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
-  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10)));
+  const pageRaw = parseInt(url.searchParams.get("page") || "1", 10);
+  const limitRaw = parseInt(url.searchParams.get("limit") || "25", 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const limit = Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25));
   const offset = (page - 1) * limit;
   const q = (url.searchParams.get("q") || "").trim();
   const ownerId = url.searchParams.get("ownerId") || "";
@@ -3082,8 +3090,10 @@ async function ownerListGroups(request, DB) {
 
 async function ownerReportMissingContact(request, DB) {
   const url = new URL(request.url);
-  const page  = Math.max(1, parseInt(url.searchParams.get("page")  || "1",  10));
-  const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10)));
+  const pageRaw = parseInt(url.searchParams.get("page") || "1", 10);
+  const limitRaw = parseInt(url.searchParams.get("limit") || "25", 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const limit = Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25));
   const offset = (page - 1) * limit;
   const q       = (url.searchParams.get("q")       || "").trim();
   const missing = (url.searchParams.get("missing")  || "any");
@@ -3132,8 +3142,10 @@ async function ownerReportMissingContact(request, DB) {
 
 async function ownerReportGroups(request, DB) {
   const url = new URL(request.url);
-  const page  = Math.max(1, parseInt(url.searchParams.get("page")  || "1",  10));
-  const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10)));
+  const pageRaw = parseInt(url.searchParams.get("page") || "1", 10);
+  const limitRaw = parseInt(url.searchParams.get("limit") || "25", 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const limit = Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25));
   const offset = (page - 1) * limit;
   const q = (url.searchParams.get("q") || "").trim();
 
@@ -3229,8 +3241,10 @@ async function ownerListKhatmas(request, DB) {
 
 async function ownerListUsers(request, DB) {
   const url = new URL(request.url);
-  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
-  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "25", 10)));
+  const pageRaw = parseInt(url.searchParams.get("page") || "1", 10);
+  const limitRaw = parseInt(url.searchParams.get("limit") || "25", 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const limit = Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25));
   const offset = (page - 1) * limit;
   const q = (url.searchParams.get("q") || "").trim();
   const roleFilter = url.searchParams.get("role") || "";
