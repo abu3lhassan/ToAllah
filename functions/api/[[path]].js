@@ -2887,7 +2887,7 @@ async function readerLookup(request, DB) {
 async function ownerOverview(request, DB) {
   const [usersR, creatorsR, groupsR, readersR, vacanciesR, missingPhoneR, missingCountryR, khatmasR, activeKhatmasR] = await DB.batch([
     DB.prepare("SELECT COUNT(*) AS c FROM users WHERE status != 'deleted'"),
-    DB.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'managed_creator' AND status != 'deleted'"),
+    DB.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'creator' AND status != 'deleted'"),
     DB.prepare("SELECT COUNT(*) AS c FROM managed_reader_groups WHERE status != 'deleted'"),
     DB.prepare("SELECT COUNT(*) AS c FROM managed_reader_profiles WHERE status != 'deleted'"),
     DB.prepare(`SELECT COUNT(*) AS c FROM managed_khatma_units u
@@ -3050,7 +3050,7 @@ async function ownerListKhatmas(request, DB) {
   const total = countRow?.total || 0;
 
   const rows = (await DB.prepare(
-    `SELECT mk.id, mk.title, mk.khatma_type, mk.archived_at, mk.created_at, mk.updated_at,
+    `SELECT mk.id, mk.title, mk.khatma_type, mk.archived_at, mk.created_at,
        u.username AS owner_username, u.display_name AS owner_display_name,
        (SELECT COUNT(*) FROM managed_khatma_participants WHERE khatma_id = mk.id) AS participants_count,
        (SELECT COUNT(*) FROM managed_khatma_units WHERE khatma_id = mk.id) AS units_count
@@ -3066,7 +3066,7 @@ async function ownerListKhatmas(request, DB) {
       participantsCount: Number(r.participants_count) || 0,
       unitsCount: Number(r.units_count) || 0,
       ownerUsername: r.owner_username || "", ownerName: r.owner_display_name || r.owner_username || "",
-      createdAt: r.created_at || "", updatedAt: r.updated_at || ""
+      createdAt: r.created_at || ""
     })),
     total, page, limit, pages: Math.ceil(total / limit) || 1
   });

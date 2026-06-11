@@ -13,6 +13,20 @@ const COUNTRY_CODES = [
   { name: 'الإمارات', code: '+971' },
   { name: 'أخرى',     code: ''     },
 ];
+// Extended list for edit modal — matches add-reader form country values + phone codes
+const OCC_COUNTRIES = [
+  { name: 'السعودية', code: '+966' },
+  { name: 'البحرين',  code: '+973' },
+  { name: 'الكويت',   code: '+965' },
+  { name: 'عُمان',    code: '+968' },
+  { name: 'اليمن',    code: '+967' },
+  { name: 'العراق',   code: '+964' },
+  { name: 'إيران',    code: '+98'  },
+  { name: 'قطر',      code: '+974' },
+  { name: 'الإمارات', code: '+971' },
+  { name: 'الأردن',   code: '+962' },
+  { name: 'أخرى',     code: ''     },
+];
 const state = { khatmas: [], managedKhatmas: [], managedReaders: [], activeUnitKey: '', activeManagedUnitKey: '', activeAdminKhatmaId: '', activeResetUserId: '', activeDeleteUserId: '', activeDeleteKhatmaId: '', activeUpdateKhatmaId: '', activeDeleteManagedKhatmaId: '', activeUpdateManagedKhatmaId: '', activeDuplicateManagedKhatmaId: '', activeUnitFilter: 'all', activeUnitSearch: '', activeManagedUnitFilter: 'all', activeManagedUnitSearch: '', loading: true, user: null, token: localStorage.getItem('auth_token') || '', currentManageMode: false, currentManagedManageMode: false, ownerCreateUserOpen: false, activeReadersGroupId: '', editGroupId: '', currentReaderGroup: null, currentGroupReaders: [] };
 
 const app = document.getElementById('app');
@@ -933,6 +947,19 @@ window._occOpenEditReader = async function(id){
     try{ const gr = await api('/managed-reader-groups'); groups = gr.groups||[]; }catch(e){}
   }
 
+  // Parse existing phone into prefix + local (longest-prefix-first to avoid +98 matching +964)
+  function parseStoredPhone(phone){
+    if(!phone) return {prefix:'', local:''};
+    const sorted = [...OCC_COUNTRIES].filter(c=>c.code).sort((a,b)=>b.code.length-a.code.length);
+    for(const c of sorted){
+      if(phone.startsWith(c.code)) return {prefix:c.code, local:phone.slice(c.code.length)};
+    }
+    return {prefix:'', local: phone.startsWith('+')?phone:phone};
+  }
+  const {prefix: initPrefix, local: initLocal} = parseStoredPhone(reader.phone);
+  const initCountry = reader.country || '';
+  const initIsOther = !OCC_COUNTRIES.find(c=>c.name===initCountry && c.name!=='أخرى');
+
   document.getElementById('occEditModal')?.remove();
   const modal = document.createElement('div');
   modal.id = 'occEditModal';
@@ -946,8 +973,26 @@ window._occOpenEditReader = async function(id){
       <form id="occEditReaderForm">
         <div class="form-grid">
           <label>الاسم<input name="reader_name" value="${escapeHtml(reader.name)}" required /></label>
-          <label>الهاتف (دولي)<input name="phone" dir="ltr" value="${escapeHtml(reader.phone)}" placeholder="+966XXXXXXXXX" /></label>
-          <label>الدولة<input name="country" value="${escapeHtml(reader.country)}" /></label>
+
+          <label>الدولة
+            <select id="occEditCountry">
+              <option value="">— اختر الدولة —</option>
+              ${OCC_COUNTRIES.map(c=>`<option value="${escapeHtml(c.name)}" ${c.name===initCountry?'selected':''}>${escapeHtml(c.name)}</option>`).join('')}
+            </select>
+          </label>
+
+          <label>الجوال (بدون الصفر الأول)
+            <div style="display:flex;gap:6px;align-items:stretch">
+              <span id="occEditPhonePrefix" dir="ltr" style="display:flex;align-items:center;padding:0 10px;background:var(--surface-alt,#f9fafb);border:1px solid var(--border-color,#ccc);border-radius:6px;font-family:monospace;font-size:14px;white-space:nowrap;min-width:52px;justify-content:center">${escapeHtml(initPrefix||'—')}</span>
+              <input id="occEditPhoneLocal" type="tel" inputmode="numeric" placeholder="501234567" value="${escapeHtml(initLocal)}" style="flex:1" />
+            </div>
+          </label>
+          <div id="occEditOtherCodeWrap" ${(!initIsOther||initCountry!=='أخرى')?'hidden':''}>
+            <label>مفتاح الدولة (مثال: +1)
+              <input id="occEditOtherCode" type="tel" placeholder="+1" value="${initCountry==='أخرى'?escapeHtml(initPrefix):''}" />
+            </label>
+          </div>
+
           <label>الكود (4-10 أرقام)<input name="access_code" inputmode="numeric" value="${escapeHtml(reader.accessCode)}" required /></label>
           <label>الرقم التسلسلي<input name="serial_code" value="${escapeHtml(reader.serialCode)}" /></label>
           <label>المجموعة<select name="group_id">
@@ -960,6 +1005,7 @@ window._occOpenEditReader = async function(id){
           </select></label>
           <label class="full">ملاحظات<input name="notes" value="${escapeHtml(reader.notes)}" /></label>
         </div>
+        <p id="occEditPhoneError" style="color:var(--danger);font-size:12px;margin:6px 0 0;display:none"></p>
         <p style="font-size:11px;opacity:.45;margin-top:8px">ممنوع تعديل: id · created_by_user_id · start_juz · parts_count · created_at</p>
         <div class="compact-actions" style="margin-top:10px">
           <button class="btn primary compact-btn" type="submit" id="occEditSaveBtn">حفظ التغييرات</button>
@@ -970,12 +1016,62 @@ window._occOpenEditReader = async function(id){
   `;
   document.body.appendChild(modal);
 
+  const elCountry    = document.getElementById('occEditCountry');
+  const elPrefix     = document.getElementById('occEditPhonePrefix');
+  const elLocal      = document.getElementById('occEditPhoneLocal');
+  const elOtherWrap  = document.getElementById('occEditOtherCodeWrap');
+  const elOtherCode  = document.getElementById('occEditOtherCode');
+  const elPhoneErr   = document.getElementById('occEditPhoneError');
+
+  function updatePrefix(){
+    const name = elCountry?.value || '';
+    if(name === 'أخرى'){
+      elOtherWrap.hidden = false;
+      elPrefix.textContent = elOtherCode?.value.trim() || '—';
+    } else {
+      elOtherWrap.hidden = true;
+      const found = OCC_COUNTRIES.find(c=>c.name===name);
+      elPrefix.textContent = (found && found.code) || '—';
+    }
+  }
+  elCountry?.addEventListener('change', updatePrefix);
+  elOtherCode?.addEventListener('input', ()=>{ if(elCountry?.value==='أخرى') elPrefix.textContent = elOtherCode.value.trim()||'—'; });
+
   document.getElementById('occEditReaderForm')?.addEventListener('submit', async e=>{
     e.preventDefault();
+    elPhoneErr.style.display = 'none';
     const btn = document.getElementById('occEditSaveBtn');
-    if(btn) btn.disabled = true;
+
+    const selectedCountry = elCountry?.value || '';
+    const localRaw = (elLocal?.value || '').replace(/[^0-9]/g,'');
     const body = {};
+
+    // Build phone
+    if(localRaw){
+      let dialCode = '';
+      if(selectedCountry === 'أخرى'){
+        dialCode = (elOtherCode?.value || '').trim();
+        if(!dialCode){ elPhoneErr.textContent='يرجى إدخال مفتاح الدولة'; elPhoneErr.style.display=''; return; }
+        if(!/^\+\d+$/.test(dialCode)){ elPhoneErr.textContent='مفتاح الدولة يجب أن يبدأ بـ + ويحتوي أرقاماً فقط'; elPhoneErr.style.display=''; return; }
+      } else if(selectedCountry){
+        const found = OCC_COUNTRIES.find(c=>c.name===selectedCountry);
+        dialCode = found?.code || '';
+        if(!dialCode){ elPhoneErr.textContent='تعذر تحديد مفتاح الدولة، اختر "أخرى" وأدخله يدويًا'; elPhoneErr.style.display=''; return; }
+      } else {
+        elPhoneErr.textContent='يرجى اختيار الدولة أولاً لتحديد مفتاح الجوال'; elPhoneErr.style.display=''; return;
+      }
+      if(localRaw.length < 7){ elPhoneErr.textContent='رقم الجوال لا يقل عن 7 أرقام'; elPhoneErr.style.display=''; return; }
+      const localFinal = localRaw.startsWith('0') ? localRaw.slice(1) : localRaw;
+      const finalPhone = dialCode + localFinal;
+      if(!/^\+\d{8,15}$/.test(finalPhone)){ elPhoneErr.textContent='صيغة الرقم غير صحيحة (8-15 رقم بعد +)'; elPhoneErr.style.display=''; return; }
+      body.phone = finalPhone;
+    }
+
+    // Build other fields from FormData
     for(const [k,v] of new FormData(e.currentTarget).entries()){ body[k] = String(v).trim(); }
+    if(selectedCountry) body.country = selectedCountry;
+
+    if(btn) btn.disabled = true;
     try{
       await api('/owner/readers/'+encodeURIComponent(id), {method:'PATCH', body});
       toast('تم تحديث القارئ');
