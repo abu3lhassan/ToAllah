@@ -1707,49 +1707,105 @@ async function unitAction(request, DB, khatmaId, number, action) {
 async function listManagedKhatmas(request, DB) {
   const check = await requireManagedCreator(request, DB);
   if (!check.ok) return check.response;
-  const statusFilter = new URL(request.url).searchParams.get("status");
+  const url = new URL(request.url);
+  const page  = Math.max(1, parseInt(url.searchParams.get("page")  || "1",  10));
+  const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") || "25", 10)));
+  const offset = (page - 1) * limit;
+  const q = (url.searchParams.get("q") || "").trim();
+  const statusFilter = url.searchParams.get("status") || "";
   const archivedClause = statusFilter === "archived" ? "AND archived_at IS NOT NULL" : "AND archived_at IS NULL";
-  let rows;
-  if (check.user.role === "owner") {
-    rows = (await DB.prepare(`SELECT * FROM managed_khatmas WHERE deleted_at IS NULL ${archivedClause} ORDER BY created_at DESC LIMIT 200`).all()).results || [];
-  } else {
+
+  let baseWhere = `WHERE mk.deleted_at IS NULL ${archivedClause}`;
+  let params = [];
+
+  if (check.user.role !== "owner") {
     await ensureCreatorGroupSchema(DB);
     const visibleIds = await getCreatorGroupMemberIds(DB, check.user.id);
     const userGroupIds = await getUserGroupIds(DB, check.user.id);
-    let mkQuery, mkParams;
+    const idIn = visibleIds.map(() => "?").join(",");
     if (userGroupIds.length) {
-      const sharedClause = `OR (shared_creator_group_id IS NOT NULL AND shared_creator_group_id IN (${userGroupIds.map(()=>"?").join(",")}))`;
-      mkQuery = `SELECT * FROM managed_khatmas WHERE deleted_at IS NULL ${archivedClause} AND (created_by_user_id IN (${visibleIds.map(()=>"?").join(",")}) ${sharedClause}) ORDER BY created_at DESC LIMIT 200`;
-      mkParams = [...visibleIds, ...userGroupIds];
+      const sharedIn = userGroupIds.map(() => "?").join(",");
+      baseWhere += ` AND (mk.created_by_user_id IN (${idIn}) OR (mk.shared_creator_group_id IS NOT NULL AND mk.shared_creator_group_id IN (${sharedIn})))`;
+      params = [...visibleIds, ...userGroupIds];
     } else {
-      mkQuery = `SELECT * FROM managed_khatmas WHERE deleted_at IS NULL ${archivedClause} AND created_by_user_id IN (${visibleIds.map(()=>"?").join(",")}) ORDER BY created_at DESC LIMIT 200`;
-      mkParams = visibleIds;
+      baseWhere += ` AND mk.created_by_user_id IN (${idIn})`;
+      params = [...visibleIds];
     }
-    rows = (await DB.prepare(mkQuery).bind(...mkParams).all()).results || [];
   }
-  if (!rows.length) return json({ ok: true, khatmas: [] });
+
+  if (q) {
+    const like = `%${q}%`;
+    baseWhere += " AND (mk.title LIKE ? OR mk.week_number LIKE ?)";
+    params.push(like, like);
+  }
+
+  const countRow = await DB.prepare(`SELECT COUNT(*) AS total FROM managed_khatmas mk ${baseWhere}`).bind(...params).first();
+  const total = countRow?.total || 0;
+
+  const rows = (await DB.prepare(
+    `SELECT mk.id, mk.title, mk.week_number, mk.khatma_type, mk.khatma_date,
+            mk.hijri_date, mk.gregorian_date, mk.expires_at, mk.division, mk.selection_mode,
+            mk.owner_name, mk.created_by_user_id, mk.status, mk.created_at, mk.closed_at,
+            mk.archived_at, mk.shared_creator_group_id, mk.group_id, mk.rotation_start_date,
+            mk.rotation_duration_years
+     FROM managed_khatmas mk ${baseWhere} ORDER BY mk.created_at DESC LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all()).results || [];
+
+  const pages = Math.ceil(total / limit) || 1;
+  if (!rows.length) return json({ ok: true, khatmas: [], total, page, limit, pages });
+
+  // Fetch unit summary counts for this page only (max 50 khatmas at once)
   const ids = rows.map(r => r.id);
-  // D1 SQL variable limit is ~100; chunk to avoid D1_ERROR on large lists
-  const CHUNK = 99;
-  let units = [];
-  for (let i = 0; i < ids.length; i += CHUNK) {
-    const chunk = ids.slice(i, i + CHUNK);
-    const batch = (await DB.prepare(`
-      SELECT u.*, p.participant_name, p.phone AS participant_phone
-      FROM managed_khatma_units u
-      LEFT JOIN managed_khatma_participants p ON p.id = u.participant_id
-      WHERE u.khatma_id IN (${chunk.map(() => "?").join(",")})
-      ORDER BY u.khatma_id, u.unit_number ASC, u.id ASC
-    `).bind(...chunk).all()).results || [];
-    units = units.concat(batch);
-  }
-  const byKhatma = new Map();
-  for (const unit of units) {
-    const list = byKhatma.get(unit.khatma_id) || [];
-    list.push(unit);
-    byKhatma.set(unit.khatma_id, list);
-  }
-  return json({ ok: true, khatmas: rows.map(row => mapManagedKhatma(row, byKhatma.get(row.id) || [], [], false)) });
+  const unitRows = (await DB.prepare(
+    `SELECT khatma_id,
+            COUNT(*) AS total_units,
+            SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_units,
+            SUM(CASE WHEN status IN ('assigned','reading') THEN 1 ELSE 0 END) AS active_units
+     FROM managed_khatma_units WHERE khatma_id IN (${ids.map(() => "?").join(",")}) GROUP BY khatma_id`
+  ).bind(...ids).all()).results || [];
+  const unitMap = new Map(unitRows.map(u => [u.khatma_id, u]));
+
+  return json({
+    ok: true,
+    khatmas: rows.map(row => {
+      const khatmaType = row.khatma_type || "monthly";
+      const rotationStart = row.rotation_start_date || "";
+      let expiresAt = row.expires_at || "";
+      if (rotationStart && (khatmaType === 'monthly' || khatmaType === 'weekly' || khatmaType === 'yearly')) {
+        const periodEnd = computeRotationPeriodEnd(rotationStart, khatmaType);
+        if (periodEnd) expiresAt = periodEnd.toISOString();
+      }
+      const u = unitMap.get(row.id) || { total_units: 0, completed_units: 0, active_units: 0 };
+      return {
+        id: row.id,
+        title: row.title,
+        weekNumber: row.week_number || "",
+        khatmaType,
+        khatmaDate: row.khatma_date || "",
+        hijriDate: row.hijri_date || "",
+        gregorianDate: row.gregorian_date || "",
+        expiresAt,
+        division: row.division || "juz",
+        selectionMode: row.selection_mode || "all",
+        ownerName: row.owner_name || "",
+        createdByUserId: row.created_by_user_id || "",
+        status: row.status || "active",
+        createdAt: row.created_at || "",
+        closedAt: row.closed_at || "",
+        archivedAt: row.archived_at || "",
+        sharedCreatorGroupId: row.shared_creator_group_id || "",
+        groupId: row.group_id || "",
+        rotationStartDate: rotationStart,
+        rotationDurationYears: row.rotation_duration_years || 5,
+        unitSummary: {
+          total: Number(u.total_units) || 0,
+          completed: Number(u.completed_units) || 0,
+          active: Number(u.active_units) || 0
+        }
+      };
+    }),
+    total, page, limit, pages
+  });
 }
 
 async function createManagedKhatma(request, DB) {

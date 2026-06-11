@@ -27,7 +27,7 @@ const OCC_COUNTRIES = [
   { name: 'الأردن',   code: '+962' },
   { name: 'أخرى',     code: ''     },
 ];
-const state = { khatmas: [], managedKhatmas: [], managedReaders: [], activeUnitKey: '', activeManagedUnitKey: '', activeAdminKhatmaId: '', activeResetUserId: '', activeDeleteUserId: '', activeDeleteKhatmaId: '', activeUpdateKhatmaId: '', activeDeleteManagedKhatmaId: '', activeUpdateManagedKhatmaId: '', activeDuplicateManagedKhatmaId: '', activeUnitFilter: 'all', activeUnitSearch: '', activeManagedUnitFilter: 'all', activeManagedUnitSearch: '', loading: true, user: null, token: localStorage.getItem('auth_token') || '', currentManageMode: false, currentManagedManageMode: false, ownerCreateUserOpen: false, activeReadersGroupId: '', editGroupId: '', currentReaderGroup: null, currentGroupReaders: [] };
+const state = { khatmas: [], managedKhatmas: [], managedReaders: [], activeUnitKey: '', activeManagedUnitKey: '', activeAdminKhatmaId: '', activeResetUserId: '', activeDeleteUserId: '', activeDeleteKhatmaId: '', activeUpdateKhatmaId: '', activeDeleteManagedKhatmaId: '', activeUpdateManagedKhatmaId: '', activeDuplicateManagedKhatmaId: '', activeUnitFilter: 'all', activeUnitSearch: '', activeManagedUnitFilter: 'all', activeManagedUnitSearch: '', loading: true, user: null, token: localStorage.getItem('auth_token') || '', currentManageMode: false, currentManagedManageMode: false, ownerCreateUserOpen: false, activeReadersGroupId: '', editGroupId: '', currentReaderGroup: null, currentGroupReaders: [], managedKhatmasPage: 1, managedKhatmasPages: 1, managedKhatmasTotal: 0, managedKhatmasSearch: '' };
 
 const app = document.getElementById('app');
 const themeToggle = document.getElementById('themeToggle');
@@ -265,14 +265,24 @@ async function refreshKhatmas(){
     toast(err.message || 'تعذر الاتصال بقاعدة البيانات');
   }
 }
-async function refreshManagedKhatmas(){
-  if(!canUseManagedKhatmas()){ state.managedKhatmas = []; return; }
+async function refreshManagedKhatmas(opts){
+  if(!canUseManagedKhatmas()){ state.managedKhatmas = []; state.managedKhatmasTotal = 0; return; }
   try{
-    const res = await api('/managed-khatmas');
-    state.managedKhatmas = res.khatmas || [];
+    const pg  = (opts && opts.page)  || 1;
+    const q   = (opts && opts.q !== undefined) ? opts.q : state.managedKhatmasSearch;
+    const lim = 25;
+    let path = '/managed-khatmas?page=' + pg + '&limit=' + lim;
+    if(q) path += '&q=' + encodeURIComponent(q);
+    const res = await api(path);
+    state.managedKhatmas      = res.khatmas || [];
+    state.managedKhatmasTotal = res.total   || 0;
+    state.managedKhatmasPage  = res.page    || 1;
+    state.managedKhatmasPages = res.pages   || 1;
+    state.managedKhatmasSearch = q || '';
   }catch(err){
     console.error(err);
     state.managedKhatmas = [];
+    state.managedKhatmasTotal = 0;
     toast(err.message || 'تعذر تحميل الختمات المُدارة');
   }
 }
@@ -1568,10 +1578,10 @@ function setupHome(){
   if(!isOwner){
     // Non-owner managed creator: stats from managed khatmas
     const data = state.managedKhatmas;
-    const total = data.length;
+    const total = state.managedKhatmasTotal || data.length;
     const completed = data.filter(k => managedProgress(k).pct === 100).length;
     const open = data.filter(k => managedKhatmaStatus(k).key === 'active').length;
-    const avg = total ? Math.round(data.reduce((s,k)=>s+managedProgress(k).pct,0)/total) : 0;
+    const avg = data.length ? Math.round(data.reduce((s,k)=>s+managedProgress(k).pct,0)/data.length) : 0;
     document.getElementById('statKhatmas').textContent = total;
     document.getElementById('statDone').textContent = completed;
     document.getElementById('statOpen').textContent = open;
@@ -1837,6 +1847,10 @@ function managedUnitMeta(division){
   return {total:30,label:'الجزء'};
 }
 function managedProgress(k){
+  if(k.unitSummary && !k.units){
+    const {completed=0, active=0, total=0} = k.unitSummary;
+    return {completed, active, pct: total ? Math.round((completed/total)*100) : 0};
+  }
   const completed = (k.units || []).filter(u=>u.status==='completed').length;
   const active = (k.units || []).filter(u=>u.status==='assigned' || u.status==='reading').length;
   return {completed, active, pct: k.units?.length ? Math.round((completed / k.units.length) * 100) : 0};
@@ -3945,34 +3959,69 @@ function setupManagedKhatmas(){
     return;
   }
   const isOwner = state.user?.role === 'owner';
-  // Patch page-head eyebrow for non-owners
   if(!isOwner){
     const eyebrow = document.querySelector('.page-head .eyebrow');
     if(eyebrow && eyebrow.textContent.includes('مُدارة')) eyebrow.textContent = 'الختمات';
   }
-  refreshManagedKhatmas().then(() => {
-    if(!state.managedKhatmas.length){
-      list.classList.remove('khatma-rows-list', 'khatma-rows-list-v3', 'khatma-rows-list-v32');
-      const emptyTitle = isOwner ? 'لا توجد ختمات مُدارة بعد' : 'لا توجد ختمات بعد';
-      const emptyBody = isOwner ? 'ابدأ بإنشاء ختمة مُدارة وتعيين القراء على الأجزاء.' : 'ابدأ بإنشاء ختمة وتعيين القراء على الأجزاء.';
-      const emptyBtn = isOwner ? 'إنشاء ختمة مُدارة' : 'إنشاء ختمة';
-      list.innerHTML = `<article class="feature-card empty-state"><h3>${emptyTitle}</h3><p>${emptyBody}</p><a class="btn primary" href="#/managed-create">${emptyBtn}</a></article>`;
-      return;
-    }
-    list.classList.add('khatma-rows-list', 'khatma-rows-list-v3', 'khatma-rows-list-v32');
-    const listTitle = isOwner ? 'قائمة الختمات المُدارة' : 'قائمة الختمات';
-    const createTitle = isOwner ? 'إنشاء ختمة مُدارة' : 'إنشاء ختمة';
-    const toolbar = `<div class="khatma-list-toolbar v32 glass">
-      <div class="khatma-list-toolbar-title"><h3>${listTitle}</h3><p>${state.managedKhatmas.length} ختمة محفوظة</p></div>
-      <div class="icon-action-group v32">
-        <a class="icon-action v32" href="#/managed-create" title="${createTitle}"><span aria-hidden="true">+</span><strong>إنشاء</strong></a>
-        <button class="icon-action v32" type="button" onclick="exportManagedKhatmasCsv()" title="تصدير ملف CSV"><span aria-hidden="true">⇩</span><strong>CSV / Excel</strong></button>
-        <button class="icon-action v32" type="button" onclick="printManagedKhatmasList()" title="طباعة أو حفظ PDF"><span aria-hidden="true">⎙</span><strong>طباعة / PDF</strong></button>
-      </div>
-    </div>`;
-    list.innerHTML = toolbar + state.managedKhatmas.map(managedKhatmaListRowHtml).join('');
-  });
+  list.innerHTML = `<article class="feature-card empty-state"><h3>جاري التحميل...</h3></article>`;
+  refreshManagedKhatmas({ page: state.managedKhatmasPage || 1, q: state.managedKhatmasSearch }).then(_renderMKListPage);
 }
+function _renderMKListPage(){
+  const list = document.getElementById('managedKhatmaList');
+  if(!list) return;
+  const isOwner = state.user?.role === 'owner';
+  const khatmas = state.managedKhatmas;
+  const total   = state.managedKhatmasTotal;
+  const page    = state.managedKhatmasPage;
+  const pages   = state.managedKhatmasPages;
+  const q       = state.managedKhatmasSearch;
+  const listTitle   = isOwner ? 'قائمة الختمات المُدارة' : 'قائمة الختمات';
+  const createTitle = isOwner ? 'إنشاء ختمة مُدارة' : 'إنشاء ختمة';
+  const searchBar = `<div style="display:flex;gap:8px;align-items:center;margin:10px 0">
+    <input id="mkSearchInput" class="search-input" type="search" placeholder="بحث في الختمات..." value="${escapeHtml(q)}" style="flex:1;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px" />
+    <button class="btn ghost compact-btn" type="button" onclick="mkSearchGo()">بحث</button>
+  </div>`;
+  const prevDisabled = page <= 1 ? 'disabled' : '';
+  const nextDisabled = page >= pages ? 'disabled' : '';
+  const pagination = pages > 1 ? `<div style="display:flex;align-items:center;gap:10px;margin:12px 0;font-size:14px">
+    <button class="btn ghost compact-btn" ${prevDisabled} onclick="mkGoPage(${page-1})">السابق</button>
+    <span style="color:var(--muted)">صفحة ${page} من ${pages} · ${total} ختمة</span>
+    <button class="btn ghost compact-btn" ${nextDisabled} onclick="mkGoPage(${page+1})">التالي</button>
+  </div>` : '';
+  const toolbar = `<div class="khatma-list-toolbar v32 glass">
+    <div class="khatma-list-toolbar-title"><h3>${listTitle}</h3><p>${total} ختمة محفوظة</p></div>
+    <div class="icon-action-group v32">
+      <a class="icon-action v32" href="#/managed-create" title="${createTitle}"><span aria-hidden="true">+</span><strong>إنشاء</strong></a>
+      <button class="icon-action v32" type="button" onclick="exportManagedKhatmasCsv()" title="تصدير ملف CSV"><span aria-hidden="true">⇩</span><strong>CSV / Excel</strong></button>
+      <button class="icon-action v32" type="button" onclick="printManagedKhatmasList()" title="طباعة أو حفظ PDF"><span aria-hidden="true">⎙</span><strong>طباعة / PDF</strong></button>
+    </div>
+  </div>`;
+  if(!khatmas.length){
+    list.classList.remove('khatma-rows-list', 'khatma-rows-list-v3', 'khatma-rows-list-v32');
+    const emptyTitle = q ? 'لا توجد نتائج' : (isOwner ? 'لا توجد ختمات مُدارة بعد' : 'لا توجد ختمات بعد');
+    const emptyBody  = q ? 'جرّب مصطلح بحث مختلف.' : (isOwner ? 'ابدأ بإنشاء ختمة مُدارة وتعيين القراء على الأجزاء.' : 'ابدأ بإنشاء ختمة وتعيين القراء على الأجزاء.');
+    const emptyBtn   = isOwner ? 'إنشاء ختمة مُدارة' : 'إنشاء ختمة';
+    list.innerHTML = toolbar + searchBar + `<article class="feature-card empty-state"><h3>${emptyTitle}</h3><p>${emptyBody}</p>${!q ? `<a class="btn primary" href="#/managed-create">${emptyBtn}</a>` : ''}</article>`;
+  } else {
+    list.classList.add('khatma-rows-list', 'khatma-rows-list-v3', 'khatma-rows-list-v32');
+    list.innerHTML = toolbar + searchBar + pagination + khatmas.map(managedKhatmaListRowHtml).join('') + pagination;
+  }
+  const inp = document.getElementById('mkSearchInput');
+  if(inp) inp.addEventListener('keydown', e => { if(e.key==='Enter'){ e.preventDefault(); mkSearchGo(); } });
+}
+window.mkGoPage = function(pg){
+  if(pg < 1 || pg > state.managedKhatmasPages) return;
+  const list = document.getElementById('managedKhatmaList');
+  if(list) list.innerHTML = `<article class="feature-card empty-state"><h3>جاري التحميل...</h3></article>`;
+  refreshManagedKhatmas({ page: pg, q: state.managedKhatmasSearch }).then(_renderMKListPage);
+};
+window.mkSearchGo = function(){
+  const inp = document.getElementById('mkSearchInput');
+  const q = (inp ? inp.value : '').trim();
+  const list = document.getElementById('managedKhatmaList');
+  if(list) list.innerHTML = `<article class="feature-card empty-state"><h3>جاري التحميل...</h3></article>`;
+  refreshManagedKhatmas({ page: 1, q }).then(_renderMKListPage);
+};
 function managedKhatmaListRowHtml(k){
   const p = managedProgress(k); const status = managedKhatmaStatus(k);
   const meta = [k.hijriDate || '', k.gregorianDate || ''].filter(Boolean).join(' - ') || 'لا يوجد تاريخ محدد';
