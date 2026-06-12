@@ -748,8 +748,24 @@ async function listReaderGroups(request, DB) {
   const limit = Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25));
   const offset = (page - 1) * limit;
 
-  const qFilter = q ? " AND g.name LIKE ?" : "";
-  const qParam = q ? [`%${q}%`] : [];
+  // Smart numeric search: when q is a pure number, also match padded id suffix
+  // and rank exact matches (by id suffix or name trailing number) before partial matches.
+  const isNumericQ = q !== "" && /^\d+$/.test(q);
+  const pad3 = isNumericQ ? q.padStart(3, "0") : "";
+
+  // Filter: numeric q also searches id suffix (e.g. q=1 matches id ending _001)
+  const qFilter = q
+    ? (isNumericQ ? " AND (g.name LIKE ? OR g.id LIKE ?)" : " AND g.name LIKE ?")
+    : "";
+  const qParam = q
+    ? (isNumericQ ? [`%${q}%`, `%_${pad3}`] : [`%${q}%`])
+    : [];
+
+  // Order: numeric q → exact id/name match first, then by id ASC; otherwise newest first
+  const orderBy = isNumericQ
+    ? `ORDER BY CASE WHEN g.id LIKE ? THEN 0 ELSE 1 END ASC, CASE WHEN g.name LIKE ? THEN 0 ELSE 1 END ASC, g.id ASC`
+    : `ORDER BY g.created_at DESC`;
+  const orderParams = isNumericQ ? [`%_${pad3}`, `% ${q}`] : [];
 
   let rows, total;
 
@@ -764,8 +780,8 @@ async function listReaderGroups(request, DB) {
       LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
       WHERE g.status != 'deleted'${qFilter}
       GROUP BY g.id
-      ORDER BY g.created_at DESC LIMIT ? OFFSET ?`;
-    const mainParams = [...qParam, limit, offset];
+      ${orderBy} LIMIT ? OFFSET ?`;
+    const mainParams = [...qParam, ...orderParams, limit, offset];
     rows = (await DB.prepare(mainSql).bind(...mainParams).all()).results || [];
   } else {
     await ensureCreatorGroupSchema(DB);
@@ -790,8 +806,8 @@ async function listReaderGroups(request, DB) {
       LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
       ${roleWhere}
       GROUP BY g.id
-      ORDER BY g.created_at DESC LIMIT ? OFFSET ?`;
-    const mainParams = [...roleParams, limit, offset];
+      ${orderBy} LIMIT ? OFFSET ?`;
+    const mainParams = [...roleParams, ...orderParams, limit, offset];
     rows = (await DB.prepare(mainSql).bind(...mainParams).all()).results || [];
   }
 
@@ -3062,11 +3078,25 @@ async function ownerListGroups(request, DB) {
   if (ownerId) { where += " AND g.created_by_user_id = ?"; params.push(ownerId); }
   if (statusFilter) { where += " AND g.status = ?"; params.push(statusFilter); }
   else { where += " AND g.status != 'deleted'"; }
+  // Smart numeric search: pure number → match id suffix too, rank exact match first
+  const isNumericQ = q !== "" && /^\d+$/.test(q);
+  const pad3 = isNumericQ ? q.padStart(3, "0") : "";
+
   if (q) {
     const like = `%${q}%`;
-    where += " AND (g.name LIKE ? OR u.username LIKE ? OR u.display_name LIKE ?)";
-    params.push(like, like, like);
+    if (isNumericQ) {
+      where += " AND (g.name LIKE ? OR g.id LIKE ?)";
+      params.push(like, `%_${pad3}`);
+    } else {
+      where += " AND (g.name LIKE ? OR u.username LIKE ? OR u.display_name LIKE ?)";
+      params.push(like, like, like);
+    }
   }
+
+  const orderBy = isNumericQ
+    ? `ORDER BY CASE WHEN g.id LIKE ? THEN 0 ELSE 1 END ASC, CASE WHEN g.name LIKE ? THEN 0 ELSE 1 END ASC, g.id ASC`
+    : `ORDER BY g.created_at DESC`;
+  const orderParams = isNumericQ ? [`%_${pad3}`, `% ${q}`] : [];
 
   const countRow = await DB.prepare(
     `SELECT COUNT(*) AS total FROM managed_reader_groups g LEFT JOIN users u ON u.id = g.created_by_user_id ${where}`
@@ -3078,8 +3108,8 @@ async function ownerListGroups(request, DB) {
      FROM managed_reader_groups g
      LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
      LEFT JOIN users u ON u.id = g.created_by_user_id
-     ${where} GROUP BY g.id ORDER BY g.created_at DESC LIMIT ? OFFSET ?`
-  ).bind(...params, limit, offset).all()).results || [];
+     ${where} GROUP BY g.id ${orderBy} LIMIT ? OFFSET ?`
+  ).bind(...params, ...orderParams, limit, offset).all()).results || [];
 
   return json({
     ok: true,
