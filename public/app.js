@@ -3905,9 +3905,15 @@ async function setupDashboard(){
   view.innerHTML=`
     <!-- Global Search -->
     <section class="form-card glass dash-search-section">
-      <div class="sheet-head"><h3>البحث الشامل عن قارئ</h3><span>بالاسم أو الجوال أو الكود</span></div>
-      <div class="dash-search-box">
-        <input id="globalSearchInput" class="dash-search-input" placeholder="اكتب اسم القارئ أو رقم الجوال أو الكود التسلسلي..." autocomplete="off" inputmode="text" />
+      <div class="sheet-head"><h3>البحث الشامل</h3><span>قارئ · مجموعة · ختمة</span></div>
+      <div class="dash-search-box" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="globalSearchInput" class="dash-search-input" placeholder="اكتب الاسم أو الكود أو رقم الجوال أو الرقم التسلسلي..." autocomplete="off" inputmode="text" style="flex:1;min-width:180px" />
+        <div id="globalSearchTypeFilter" style="display:flex;gap:4px;flex-wrap:wrap">
+          <button class="btn ghost compact-btn search-type-btn active" data-type="">الكل</button>
+          <button class="btn ghost compact-btn search-type-btn" data-type="reader">قارئ</button>
+          <button class="btn ghost compact-btn search-type-btn" data-type="group">مجموعة</button>
+          <button class="btn ghost compact-btn search-type-btn" data-type="khatma">ختمة</button>
+        </div>
       </div>
       <div id="globalSearchResults" class="search-results-wrap"></div>
     </section>
@@ -3978,38 +3984,81 @@ async function setupDashboard(){
     </div>`;
 
   // Wire search
-  const input  = view.querySelector('#globalSearchInput');
-  const results= view.querySelector('#globalSearchResults');
-  let timer=null;
-  input?.addEventListener('input', ()=>{
+  const input   = view.querySelector('#globalSearchInput');
+  const results = view.querySelector('#globalSearchResults');
+  let timer = null;
+  let activeType = '';
+
+  function doSearch(){
     clearTimeout(timer);
-    const q=input.value.trim();
-    if(!q||q.length<2){ results.innerHTML=''; return; }
-    results.innerHTML='<div class="search-loading">جاري البحث...</div>';
-    timer=setTimeout(async()=>{
+    const q = input?.value.trim() || '';
+    if(!q || q.length < 2){ results.innerHTML = ''; return; }
+    results.innerHTML = '<div class="search-loading">جاري البحث...</div>';
+    timer = setTimeout(async () => {
       try{
-        const res=await api('/reader-global-search?q='+encodeURIComponent(q));
-        const all=[...res.readers||[], ...res.participants||[]];
-        if(!all.length){ results.innerHTML=`<div class="search-empty">لا نتائج لـ "${escapeHtml(q)}"</div>`; return; }
-        results.innerHTML=`<div class="search-results-header">${all.length} نتيجة</div>`+all.map(r=>`
-          <div class="search-result-item">
-            <span class="search-result-badge ${r.type==='reader'?'reader-badge':'participant-badge'}">${r.type==='reader'?'قارئ':'مشارك'}</span>
-            <div class="search-result-main">
-              <strong>${escapeHtml(r.name||'—')}</strong>
-              <span class="search-result-meta">
-                ${r.type==='reader'?`مجموعة: ${escapeHtml(r.groupName||'—')}`:
-                  `ختمة: ${escapeHtml(r.khatmaTitle||'—')} ${r.weekNumber?'('+r.weekNumber+')':''}`}
-                 · كود: ${escapeHtml(r.accessCode||'—')}
-                ${r.serialCode?' · '+escapeHtml(r.serialCode):''}
-                ${r.phone?' · '+escapeHtml(normalizeLocalPhone(r.phone)):''}
-                ${r.startJuz?' · ج'+escapeHtml(String(r.startJuz)):''}
-              </span>
-            </div>
-            ${r.type==='reader'&&r.groupId?`<a class="btn ghost compact-btn" href="#/reader-group/${escapeHtml(r.groupId)}">المجموعة</a>`:''}
-            ${r.type==='participant'&&r.khatmaId?`<a class="btn ghost compact-btn" href="#/managed-khatma/${escapeHtml(r.khatmaId)}/manage">الختمة</a>`:''}
-          </div>`).join('');
-      }catch(err){ results.innerHTML=`<div class="search-error">${escapeHtml(err.message||'خطأ')}</div>`; }
+        const url = '/reader-global-search?q=' + encodeURIComponent(q) + (activeType ? '&type=' + encodeURIComponent(activeType) : '');
+        const res = await api(url);
+        const readers  = res.readers  || [];
+        const groups   = res.groups   || [];
+        const khatmas  = res.khatmas  || [];
+        const total = readers.length + groups.length + khatmas.length;
+        if(!total){ results.innerHTML = `<div class="search-empty">لا نتائج لـ "${escapeHtml(q)}"</div>`; return; }
+        const statusLabel = { active:'نشطة', archived:'مؤرشفة', closed:'مغلقة', deleted:'محذوفة' };
+        const typeLabel   = { weekly:'أسبوعية', monthly:'شهرية', yearly:'سنوية', none:'بلا تدوير' };
+        results.innerHTML = `<div class="search-results-header">${total} نتيجة</div>` + [
+          ...readers.map(r => `
+            <div class="search-result-item">
+              <span class="search-result-badge reader-badge">قارئ</span>
+              <div class="search-result-main">
+                <strong>${escapeHtml(r.name||'—')}</strong>
+                <span class="search-result-meta">
+                  ${r.serialCode?escapeHtml(r.serialCode)+' · ':''}كود: ${escapeHtml(r.accessCode||'—')}
+                  ${r.phone?' · '+escapeHtml(normalizeLocalPhone(r.phone)):''}
+                  ${r.groupName?' · مجموعة: '+escapeHtml(r.groupName):''}
+                  ${r.startJuz?' · ج'+escapeHtml(String(r.startJuz)):''}
+                </span>
+              </div>
+              ${r.groupId?`<a class="btn ghost compact-btn" href="#/reader-group/${escapeHtml(r.groupId)}">المجموعة</a>`:''}
+            </div>`),
+          ...groups.map(g => `
+            <div class="search-result-item">
+              <span class="search-result-badge" style="background:var(--gold);color:#fff">مجموعة</span>
+              <div class="search-result-main">
+                <strong>${escapeHtml(g.name||'—')}</strong>
+                <span class="search-result-meta">
+                  ${g.serialNumber?escapeHtml(g.serialNumber)+' · ':''}${g.readersCount} قارئ
+                </span>
+              </div>
+              <a class="btn ghost compact-btn" href="#/reader-group/${escapeHtml(g.id)}">عرض</a>
+            </div>`),
+          ...khatmas.map(k => `
+            <div class="search-result-item">
+              <span class="search-result-badge participant-badge">ختمة</span>
+              <div class="search-result-main">
+                <strong>${escapeHtml(k.name||'—')}</strong>
+                <span class="search-result-meta">
+                  ${k.serialNumber?escapeHtml(k.serialNumber)+' · ':''}${statusLabel[k.status]||k.status}
+                  ${k.khatmaType?' · '+(typeLabel[k.khatmaType]||k.khatmaType):''}
+                  ${k.groupName?' · مجموعة: '+escapeHtml(k.groupName):''}
+                </span>
+              </div>
+              <a class="btn ghost compact-btn" href="#/managed-khatma/${escapeHtml(k.id)}/manage">الختمة</a>
+            </div>`),
+        ].join('');
+      }catch(err){ results.innerHTML = `<div class="search-error">${escapeHtml(err.message||'خطأ')}</div>`; }
     }, 350);
+  }
+
+  input?.addEventListener('input', doSearch);
+
+  // Type filter buttons
+  view.querySelectorAll('.search-type-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      view.querySelectorAll('.search-type-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeType = btn.dataset.type || '';
+      if(input?.value.trim().length >= 2) doSearch();
+    });
   });
 }
 

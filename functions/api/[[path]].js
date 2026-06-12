@@ -2850,64 +2850,118 @@ async function readerGlobalSearch(request, DB) {
   if (!check.ok) return check.response;
 
   const url = new URL(request.url);
-  const q = (url.searchParams.get("q") || "").trim();
-  if (!q || q.length < 2) return json({ ok: true, readers: [], participants: [] });
+  const q    = (url.searchParams.get("q")    || "").trim();
+  const type = (url.searchParams.get("type") || "").trim(); // reader | group | khatma | "" (all)
+  if (!q || q.length < 2) return json({ ok: true, readers: [], participants: [], groups: [], khatmas: [] });
 
   await ensureManagedSchema(DB);
 
   const isOwner = check.user.role === "owner";
   const memberIds = isOwner ? [] : await getCreatorGroupMemberIds(DB, check.user.id);
+  await ensureCreatorGroupSchema(DB);
+  const userGroupIds = isOwner ? [] : await getUserGroupIds(DB, check.user.id);
 
   const like = `%${q}%`;
   const kp   = isOwner ? [] : memberIds;
-  const kClause = isOwner ? "" : `AND mk.created_by_user_id IN (${memberIds.map(() => "?").join(",")})`;
+
   const rClause = isOwner ? "" : `AND mrp.created_by_user_id IN (${memberIds.map(() => "?").join(",")})`;
+
+  let khatmaWhereExtra;
+  let khatmaParams;
+  if (isOwner) {
+    khatmaWhereExtra = "";
+    khatmaParams = [];
+  } else if (userGroupIds.length) {
+    khatmaWhereExtra = `AND (mk.created_by_user_id IN (${memberIds.map(() => "?").join(",")}) OR (mk.shared_creator_group_id IS NOT NULL AND mk.shared_creator_group_id IN (${userGroupIds.map(() => "?").join(",")})))`;
+    khatmaParams = [...memberIds, ...userGroupIds];
+  } else {
+    khatmaWhereExtra = `AND mk.created_by_user_id IN (${memberIds.map(() => "?").join(",")})`;
+    khatmaParams = [...memberIds];
+  }
+
+  let grpWhereExtra;
+  let grpParams;
+  if (isOwner) {
+    grpWhereExtra = "";
+    grpParams = [];
+  } else if (userGroupIds.length) {
+    grpWhereExtra = `AND (g.created_by_user_id IN (${memberIds.map(() => "?").join(",")}) OR (g.shared_creator_group_id IS NOT NULL AND g.shared_creator_group_id IN (${userGroupIds.map(() => "?").join(",")})))`;
+    grpParams = [...memberIds, ...userGroupIds];
+  } else {
+    grpWhereExtra = `AND g.created_by_user_id IN (${memberIds.map(() => "?").join(",")})`;
+    grpParams = [...memberIds];
+  }
 
   const safeAll = async (stmt) => { try { return (await stmt.all()).results || []; } catch { return []; } };
 
-  const [readerRows, participantRows] = await Promise.all([
-    safeAll(DB.prepare(`
+  const wantReader  = !type || type === "reader";
+  const wantGroup   = !type || type === "group";
+  const wantKhatma  = !type || type === "khatma";
+
+  const [readerRows, groupRows, khatmaRows] = await Promise.all([
+    wantReader ? safeAll(DB.prepare(`
       SELECT mrp.id, mrp.reader_name AS name, mrp.phone, mrp.access_code, mrp.serial_code,
              mrp.start_juz, mrp.parts_count, mrp.notes,
-             mrg.name AS group_name, mrg.id AS group_id
+             mrg.name AS group_name, mrg.id AS group_id, mrg.group_serial_number AS group_serial
       FROM managed_reader_profiles mrp
-      LEFT JOIN managed_reader_groups mrg ON mrg.id = mrp.group_id
+      LEFT JOIN managed_reader_groups mrg ON mrg.id = mrp.group_id AND mrg.status != 'deleted'
       WHERE mrp.status != 'deleted'
         AND (mrp.reader_name LIKE ? OR mrp.phone LIKE ? OR mrp.access_code LIKE ? OR mrp.serial_code LIKE ?)
         ${rClause}
-      LIMIT 15
-    `).bind(like, like, like, like, ...kp)),
+      LIMIT 20
+    `).bind(like, like, like, like, ...kp)) : Promise.resolve([]),
 
-    safeAll(DB.prepare(`
-      SELECT mcp.id, mcp.participant_name AS name, mcp.phone, mcp.access_code,
-             mcp.start_juz, mcp.parts_count, mcp.notes,
-             mk.title AS khatma_title, mk.week_number, mk.khatma_type, mk.id AS khatma_id
-      FROM managed_khatma_participants mcp
-      JOIN managed_khatmas mk ON mk.id = mcp.khatma_id AND mk.deleted_at IS NULL
-      WHERE (mcp.participant_name LIKE ? OR mcp.phone LIKE ? OR mcp.access_code LIKE ?)
-        ${kClause}
-      LIMIT 15
-    `).bind(like, like, like, ...kp)),
+    wantGroup ? safeAll(DB.prepare(`
+      SELECT g.id, g.name, g.group_serial_number,
+             COUNT(p.id) AS readers_count
+      FROM managed_reader_groups g
+      LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
+      WHERE g.status != 'deleted'
+        AND (g.name LIKE ? OR g.id LIKE ? OR g.group_serial_number LIKE ?)
+        ${grpWhereExtra}
+      GROUP BY g.id
+      LIMIT 20
+    `).bind(like, like, like, ...grpParams)) : Promise.resolve([]),
+
+    wantKhatma ? safeAll(DB.prepare(`
+      SELECT mk.id, mk.title, mk.status, mk.khatma_type, mk.khatma_serial_number,
+             mk.week_number, mk.khatma_date,
+             mrg.name AS group_name, mrg.id AS group_id
+      FROM managed_khatmas mk
+      LEFT JOIN managed_reader_groups mrg ON mrg.id = mk.group_id AND mrg.status != 'deleted'
+      WHERE mk.deleted_at IS NULL
+        AND (mk.title LIKE ? OR mk.week_number LIKE ? OR mk.khatma_serial_number LIKE ?)
+        ${khatmaWhereExtra}
+      ORDER BY mk.created_at DESC
+      LIMIT 20
+    `).bind(like, like, like, ...khatmaParams)) : Promise.resolve([]),
   ]);
 
   return json({
     ok: true,
     query: q,
+    type: type || "all",
     readers: readerRows.map(r => ({
       type: "reader", id: r.id, name: r.name || "",
       phone: r.phone || "", accessCode: r.access_code || "",
       serialCode: r.serial_code || "",
       startJuz: r.start_juz || "", partsCount: r.parts_count || "",
       notes: r.notes || "", groupName: r.group_name || "", groupId: r.group_id || "",
+      groupSerial: r.group_serial || "",
     })),
-    participants: participantRows.map(p => ({
-      type: "participant", id: p.id, name: p.name || "",
-      phone: p.phone || "", accessCode: p.access_code || "",
-      startJuz: p.start_juz || "", partsCount: p.parts_count || "",
-      notes: p.notes || "", khatmaTitle: p.khatma_title || "",
-      weekNumber: p.week_number || "", khatmaType: p.khatma_type || "",
-      khatmaId: p.khatma_id || "",
+    groups: groupRows.map(g => ({
+      type: "group", id: g.id, name: g.name || "",
+      serialNumber: g.group_serial_number || "",
+      readersCount: Number(g.readers_count) || 0,
     })),
+    khatmas: khatmaRows.map(k => ({
+      type: "khatma", id: k.id, name: k.title || "",
+      serialNumber: k.khatma_serial_number || "",
+      status: k.status || "", khatmaType: k.khatma_type || "",
+      weekNumber: k.week_number || "", khatmaDate: k.khatma_date || "",
+      groupName: k.group_name || "", groupId: k.group_id || "",
+    })),
+    participants: [],
   });
 }
 
