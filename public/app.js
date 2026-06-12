@@ -4128,22 +4128,22 @@ async function setupManagedCreate(){
     weekNumInput.value = nums.length ? Math.max(...nums) + 1 : 1;
   }
 
-  // Load groups for group selector
-  let groups = [];
-  try{ const res = await api('/managed-reader-groups'); groups = res.groups || []; }catch{}
-
-  // Inject group selector before participants panel
+  // Searchable group selector — server-side search via ?q= (supports any number of groups)
   const participantsPanel = form.querySelector('.managed-participants-panel');
   if(participantsPanel){
     const groupSelectorHtml = `<section class="inline-panel action-sheet" id="groupSelectorSection" style="margin-bottom:16px">
       <div class="sheet-head"><h3>اختيار مجموعة القراء</h3><span>اختياري</span></div>
       <p style="color:var(--muted);margin:0 0 10px">اختر مجموعة قراء جاهزة لتعبئة المشاركين تلقائيًا حسب التدوير الحالي.</p>
-      <label>مجموعة القراء
-        <select id="managedGroupSelector">
-          <option value="">— بلا مجموعة (إدخال يدوي) —</option>
-          ${groups.map(g => `<option value="${escapeHtml(g.id)}" data-rotation-type="${escapeHtml(g.rotation_type || 'monthly')}" data-rotation-start="${escapeHtml(g.rotation_start_date || '')}">${escapeHtml(g.name)} (${g.readerCount || 0} قارئ)</option>`).join('')}
-        </select>
+      <label style="display:block">مجموعة القراء
+        <div style="position:relative;margin-top:4px">
+          <input type="text" id="groupSearchInput" placeholder="اكتب اسم المجموعة أو رقمها للبحث..." autocomplete="off" style="width:100%;box-sizing:border-box">
+          <div id="groupSearchDropdown" style="position:absolute;top:100%;right:0;left:0;background:var(--bg,#fff);border:1px solid var(--line,#e5e7eb);border-radius:6px;max-height:220px;overflow-y:auto;z-index:200;display:none;box-shadow:0 4px 12px rgba(0,0,0,.1)">
+            <div id="groupSearchStatus" style="padding:8px 12px;color:var(--muted);font-size:13px;border-bottom:1px solid var(--line,#f0f0f0)">انقر للبحث أو اكتب اسم المجموعة...</div>
+            <ul id="groupSearchResults" style="list-style:none;margin:0;padding:0"></ul>
+          </div>
+        </div>
       </label>
+      <p id="groupSelectedDisplay" style="margin:6px 0 0;color:var(--primary);font-weight:700;font-size:14px;display:none"></p>
       <p id="groupRotationInfo" style="color:var(--primary);font-weight:700;margin-top:8px;display:none"></p>
     </section>`;
     participantsPanel.insertAdjacentHTML('beforebegin', groupSelectorHtml);
@@ -4154,13 +4154,45 @@ async function setupManagedCreate(){
   syncManagedAssignments(form);
   setupManagedEditor(form, {participants: []});
 
-  // Group selector change handler
-  document.getElementById('managedGroupSelector')?.addEventListener('change', async e => {
-    const groupId = e.target.value;
-    const selected = e.target.selectedOptions[0];
-    const rotationType = selected?.dataset.rotationType || 'monthly';
-    const rotationStart = selected?.dataset.rotationStart || '';
+  // Searchable group selector logic — search is server-side, no upfront bulk load
+  let _grpTimer = null;
+
+  async function _grpSearch(q) {
+    const drop = document.getElementById('groupSearchDropdown');
+    const status = document.getElementById('groupSearchStatus');
+    const list = document.getElementById('groupSearchResults');
+    if(!drop || !status || !list) return;
+    drop.style.display = 'block';
+    status.textContent = 'جاري البحث...';
+    list.innerHTML = '';
+    try{
+      const res = await api('/managed-reader-groups?page=1&limit=25' + (q ? '&q=' + encodeURIComponent(q) : ''));
+      const gs = res.groups || [];
+      if(!gs.length){ status.textContent = 'لا توجد نتائج مطابقة'; return; }
+      const more = (res.total || 0) > gs.length ? ` · من ${res.total} إجمالاً` : '';
+      status.textContent = q ? `${gs.length} نتيجة لـ "${q}"${more}` : `آخر ${gs.length} مجموعة${more} — اكتب للبحث`;
+      list.innerHTML = gs.map(g =>
+        `<li data-id="${escapeHtml(g.id)}" data-rtype="${escapeHtml(g.rotation_type||'monthly')}" data-rstart="${escapeHtml(g.rotation_start_date||'')}" data-name="${escapeHtml(g.name)}" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--line,#f0f0f0);font-size:14px">${escapeHtml(g.name)} <span style="color:var(--muted);font-size:12px">(${g.readerCount||0} قارئ)</span></li>`
+      ).join('');
+      list.querySelectorAll('li').forEach(li => {
+        li.addEventListener('mouseenter', ()=>{ li.style.background='var(--hover,#f5f5f5)'; });
+        li.addEventListener('mouseleave', ()=>{ li.style.background=''; });
+        li.addEventListener('mousedown', e => {
+          e.preventDefault();
+          _grpSelect(li.dataset.id, li.dataset.name, li.dataset.rtype, li.dataset.rstart);
+        });
+      });
+    }catch(e){ status.textContent = 'تعذر تحميل المجموعات'; }
+  }
+
+  async function _grpSelect(groupId, groupName, rotationType, rotationStart) {
+    const inp = document.getElementById('groupSearchInput');
+    const drop = document.getElementById('groupSearchDropdown');
+    const disp = document.getElementById('groupSelectedDisplay');
     const infoEl = document.getElementById('groupRotationInfo');
+    if(inp) inp.value = groupName;
+    if(drop) drop.style.display = 'none';
+    if(disp){ disp.style.display = 'block'; disp.textContent = '✓ ' + groupName; }
 
     if(!groupId){
       if(infoEl) infoEl.style.display = 'none';
@@ -4174,10 +4206,8 @@ async function setupManagedCreate(){
       if(!readers.length){ toast('المجموعة لا تحتوي قراء'); return; }
 
       const periodIndex = computeCurrentPeriodIndex(rotationStart, rotationType);
-      const typeLabel = rotationType === 'weekly' ? 'أسبوع' : rotationType === 'monthly' ? 'شهر' : rotationType === 'yearly' ? 'سنة' : 'دورة';
       if(infoEl){ infoEl.style.display = 'block'; infoEl.textContent = `الدورة الحالية: ${currentHijriPeriodLabel(rotationStart, rotationType) || (periodIndex + 1)}${formatPeriodEnd(rotationStart, rotationType) ? ' · ينتهي: ' + formatPeriodEnd(rotationStart, rotationType) : ''} · كل قارئ يرى أجزاءه المحسوبة تلقائيًا`; }
 
-      // Map assignments: juzNumber → accessCode
       const assignments = {};
       readers.forEach(r => {
         const juz = (r.startJuz && r.partsCount) ? computeRotationJuz(r.startJuz, r.partsCount, periodIndex) : [];
@@ -4186,7 +4216,6 @@ async function setupManagedCreate(){
 
       renderManagedParticipantRows(document.getElementById('managedParticipantsRows'), readers);
 
-      // Set custom selection to cover exactly the assigned juz
       const allJuz = [...new Set(Object.keys(assignments).map(Number))].sort((a,b)=>a-b);
       if(allJuz.length){
         const selMode = form.querySelector('[name="selectionMode"]');
@@ -4195,9 +4224,7 @@ async function setupManagedCreate(){
         if(customSection){
           customSection.hidden = false;
           renderCustomUnitsPicker(customSection, form.querySelector('[name="division"]')?.value || 'juz');
-          customSection.querySelectorAll('input[name="selectedUnit"]').forEach(cb => {
-            cb.checked = true; // Show all units; group-covered ones are pre-assigned, uncovered ones stay available for manual assignment
-          });
+          customSection.querySelectorAll('input[name="selectedUnit"]').forEach(cb => { cb.checked = true; });
         }
       }
 
@@ -4208,13 +4235,27 @@ async function setupManagedCreate(){
       if(!rsInput){ rsInput = document.createElement('input'); rsInput.type='hidden'; rsInput.name='rotationStartDate'; form.appendChild(rsInput); }
       rsInput.value = rotationStart;
 
-      // After rendering rows, sync assignments using accessCode matching
       syncManagedAssignments(form, assignments);
-      // setTimeout ensures DOM is settled before forcing assignment values
       setTimeout(() => { applyAssignmentsToGrid(form, assignments); }, 0);
       toast(`تم تحميل ${readers.length} قارئ · ${allJuz.length} جزء معيّن تلقائيًا`);
     }catch(err){ toast(err.message || 'تعذر تحميل قراء المجموعة'); }
-  });
+  }
+
+  const grpInp = document.getElementById('groupSearchInput');
+  if(grpInp){
+    grpInp.addEventListener('focus', () => { _grpSearch(grpInp.value.trim()); });
+    grpInp.addEventListener('input', () => {
+      const gInput = form.querySelector('input[name="groupId"]');
+      if(gInput) gInput.value = '';
+      const disp = document.getElementById('groupSelectedDisplay');
+      if(disp) disp.style.display = 'none';
+      clearTimeout(_grpTimer);
+      _grpTimer = setTimeout(() => _grpSearch(grpInp.value.trim()), 300);
+    });
+    grpInp.addEventListener('blur', () => {
+      setTimeout(() => { const d = document.getElementById('groupSearchDropdown'); if(d) d.style.display = 'none'; }, 200);
+    });
+  }
 
 }
 async function setupManagedKhatma(id, manageMode=false){
