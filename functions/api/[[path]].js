@@ -1087,6 +1087,7 @@ function mapManagedKhatma(row, units = [], participants = [], includeSecrets = f
     rotationStartDate: row.rotation_start_date || "",
     groupId: row.group_id || "",
     rotationDurationYears: row.rotation_duration_years || 5,
+    khatmaSerialNumber: row.khatma_serial_number || "",
     participants: participants.map(p => {
       const canSeeParticipant = includeSecrets || visibleIdSet.has(String(p.id || ""));
       return {
@@ -1835,7 +1836,7 @@ async function listManagedKhatmas(request, DB) {
             mk.hijri_date, mk.gregorian_date, mk.expires_at, mk.division, mk.selection_mode,
             mk.owner_name, mk.created_by_user_id, mk.status, mk.created_at, mk.closed_at,
             mk.archived_at, mk.shared_creator_group_id, mk.group_id, mk.rotation_start_date,
-            mk.rotation_duration_years
+            mk.rotation_duration_years, mk.khatma_serial_number
      FROM managed_khatmas mk ${baseWhere} ORDER BY mk.created_at DESC LIMIT ? OFFSET ?`
   ).bind(...params, limit, offset).all()).results || [];
 
@@ -1908,15 +1909,7 @@ async function createManagedKhatma(request, DB) {
   const parsedUnits = parseManagedUnits(data, division);
   if (!parsedUnits.ok) return json({ ok: false, error: parsedUnits.error }, 400);
 
-  const weekNumber = String(data.weekNumber || "").trim();
-  if (weekNumber) {
-    await ensureCreatorGroupSchema(DB);
-    const visibleIds = await getCreatorGroupMemberIds(DB, check.user.id);
-    const existing = await DB.prepare(
-      `SELECT id FROM managed_khatmas WHERE week_number = ? AND deleted_at IS NULL AND archived_at IS NULL AND created_by_user_id IN (${visibleIds.map(()=>"?").join(",")})`
-    ).bind(weekNumber, ...visibleIds).first();
-    if (existing) return json({ ok: false, error: `رقم الختمة "${weekNumber}" موجود مسبقاً في مجموعتك` }, 409);
-  }
+  const weekNumber = "";
 
   const id = newId("mkhatma");
   const t = now();
@@ -1950,7 +1943,7 @@ async function createManagedKhatma(request, DB) {
   `).bind(
     id,
     data.title || "ختمة مُدارة جديدة",
-    data.weekNumber || "",
+    "",
     khatmaType,
     data.khatmaDate || "",
     data.hijriDate || "",
