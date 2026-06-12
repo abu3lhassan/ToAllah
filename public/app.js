@@ -2575,7 +2575,7 @@ async function setupManagedReaders(){
               </div>
               <div class="khatma-list-titleline v32">
                 <h3>${escapeHtml(g.name)}</h3>
-                <p>${g.readerCount || 0} قارئ${g.rotation_start_date ? ' · بدأ ' + escapeHtml(g.rotation_start_date.slice(0,10)) : ''}</p>
+                <p>${g.group_serial_number ? escapeHtml(g.group_serial_number) + ' · ' : ''}${g.readerCount || 0} قارئ${g.rotation_start_date ? ' · بدأ ' + escapeHtml(g.rotation_start_date.slice(0,10)) : ''}</p>
               </div>
             </div>
             <div class="khatma-list-side v32">
@@ -3443,7 +3443,7 @@ async function setupReaderGroup(id){
 
   view.innerHTML = `
     <section class="page-head">
-      <span class="eyebrow">مجموعة قراء</span>
+      <span class="eyebrow">مجموعة قراء${group.group_serial_number ? ' · ' + escapeHtml(group.group_serial_number) : ''}</span>
       <h1>${escapeHtml(group.name)}</h1>
       <p>${escapeHtml(rotationTypeLabel[group.rotation_type]||'')} · ${readers.length} قارئ · ${currentHijriPeriodLabel(group.rotation_start_date, group.rotation_type) || 'الدورة ' + (periodIndex+1)}</p>
       <div class="status-line">
@@ -4140,6 +4140,7 @@ function managedKhatmaListRowHtml(k){
       <div class="khatma-list-content v32">
         <div class="khatma-list-badges v32">
           <span class="mini-pill v32">${escapeHtml(k.weekNumber ? 'الختمة ' + khatmaTypeAdjective(k.khatmaType) + ' ' + k.weekNumber : khatmaFallbackLabel())}</span>
+          ${k.khatmaSerialNumber ? `<span class="mini-pill v32" style="font-family:monospace;opacity:.8">${escapeHtml(k.khatmaSerialNumber)}</span>` : ''}
           <span class="mini-pill v32 status ${status.className}">${status.label}</span>
           ${k.sharedCreatorGroupId ? `<span class="mini-pill v32" style="background:rgba(15,95,69,.13);color:var(--primary)">مشارك</span>` : ''}
         </div>

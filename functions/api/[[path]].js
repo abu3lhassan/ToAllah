@@ -734,6 +734,32 @@ async function ensureGroupSchema(DB) {
   _groupSchemaReady = true;
 }
 
+let _serialSchemaReady = false;
+async function ensureSerialSchema(DB) {
+  if (_serialSchemaReady) return;
+  await Promise.allSettled([
+    DB.prepare("ALTER TABLE managed_khatmas ADD COLUMN khatma_serial_number TEXT").run(),
+    DB.prepare("ALTER TABLE managed_reader_groups ADD COLUMN group_serial_number TEXT").run(),
+    DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_mk_serial_number ON managed_khatmas(khatma_serial_number) WHERE khatma_serial_number IS NOT NULL").run(),
+    DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_mrg_serial_number ON managed_reader_groups(group_serial_number) WHERE group_serial_number IS NOT NULL").run(),
+  ]);
+  _serialSchemaReady = true;
+}
+
+async function nextGroupSerial(DB) {
+  const row = await DB.prepare(
+    `SELECT COALESCE(MAX(CAST(SUBSTR(group_serial_number, 3) AS INTEGER)), 0) AS maxNum FROM managed_reader_groups WHERE group_serial_number IS NOT NULL`
+  ).first();
+  return "G-" + String((row?.maxNum || 0) + 1).padStart(6, "0");
+}
+
+async function nextKhatmaSerial(DB) {
+  const row = await DB.prepare(
+    `SELECT COALESCE(MAX(CAST(SUBSTR(khatma_serial_number, 3) AS INTEGER)), 0) AS maxNum FROM managed_khatmas WHERE khatma_serial_number IS NOT NULL`
+  ).first();
+  return "K-" + String((row?.maxNum || 0) + 1).padStart(6, "0");
+}
+
 async function listReaderGroups(request, DB) {
   await ensureGroupSchema(DB);
   const check = await requireManagedCreator(request, DB);
@@ -864,6 +890,7 @@ async function getReaderGroupById(request, DB, groupId) {
 
 async function createReaderGroup(request, DB) {
   await ensureGroupSchema(DB);
+  await ensureSerialSchema(DB);
   const check = await requireManagedCreator(request, DB);
   if (!check.ok) return check.response;
   const body = await readJson(request);
@@ -874,10 +901,11 @@ async function createReaderGroup(request, DB) {
   const rotationDurationYears = Math.min(15, Math.max(1, Number(body.rotationDurationYears || body.rotation_duration_years || 5) || 5));
   const id = newId("mgroup");
   const t = now();
+  const groupSerial = await nextGroupSerial(DB);
   await DB.prepare(`
-    INSERT INTO managed_reader_groups (id, created_by_user_id, name, notes, rotation_type, rotation_start_date, rotation_duration_years, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-  `).bind(id, check.user.id, name, body.notes || "", rotationType, rotationStartDate || null, rotationDurationYears, t, t).run();
+    INSERT INTO managed_reader_groups (id, created_by_user_id, name, notes, rotation_type, rotation_start_date, rotation_duration_years, group_serial_number, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+  `).bind(id, check.user.id, name, body.notes || "", rotationType, rotationStartDate || null, rotationDurationYears, groupSerial, t, t).run();
   const group = await DB.prepare("SELECT * FROM managed_reader_groups WHERE id = ? LIMIT 1").bind(id).first();
   return json({ ok: true, group: { ...group, readerCount: 0 } }, 201);
 }
@@ -1857,6 +1885,7 @@ async function listManagedKhatmas(request, DB) {
         groupId: row.group_id || "",
         rotationStartDate: rotationStart,
         rotationDurationYears: row.rotation_duration_years || 5,
+        khatmaSerialNumber: row.khatma_serial_number || "",
         unitSummary: {
           total: Number(u.total_units) || 0,
           completed: Number(u.completed_units) || 0,
@@ -1909,13 +1938,15 @@ async function createManagedKhatma(request, DB) {
   const autoExpiresAt = rotationStartDate && (khatmaType === 'monthly' || khatmaType === 'weekly' || khatmaType === 'yearly')
     ? (computeRotationPeriodEnd(rotationStartDate, khatmaType)?.toISOString() || data.expiresAt || "")
     : (data.expiresAt || "");
+  await ensureSerialSchema(DB);
+  const khatmaSerial = await nextKhatmaSerial(DB);
   await DB.prepare(`
     INSERT INTO managed_khatmas (
       id, title, week_number, khatma_type, khatma_date, hijri_date, gregorian_date, expires_at,
       division, selection_mode, owner_name, created_by_user_id, coordinator_name, coordinator_whatsapp,
       dedication, quote_by, quote_text, quote_source, notes, status, created_at, closed_at, deleted_at,
-      group_id, rotation_start_date
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, NULL, ?, ?)
+      group_id, rotation_start_date, khatma_serial_number
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, NULL, ?, ?, ?)
   `).bind(
     id,
     data.title || "ختمة مُدارة جديدة",
@@ -1938,7 +1969,8 @@ async function createManagedKhatma(request, DB) {
     data.notes || "",
     t,
     groupId,
-    rotationStartDate
+    rotationStartDate,
+    khatmaSerial
   ).run();
 
   const participantStmt = DB.prepare(`
