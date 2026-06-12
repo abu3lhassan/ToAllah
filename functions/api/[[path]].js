@@ -3405,12 +3405,9 @@ function _buildXlsx(sheets) {
 // ── Owner: export groups readers as .xlsx ─────────────────────────────────
 
 async function ownerExportMuharramGroupsXlsx(request, DB) {
-  const OWNER_ID = 'user_245e3fc4cf0445a78e';
-  const PAT = 'mgroup_muh1448_%';
-
   const [groupsRes, readersRes] = await DB.batch([
-    DB.prepare(`SELECT id, name FROM managed_reader_groups WHERE id LIKE ? AND created_by_user_id = ? AND status = 'active' ORDER BY id ASC`).bind(PAT, OWNER_ID),
-    DB.prepare(`SELECT group_id, serial_code, reader_name FROM managed_reader_profiles WHERE group_id LIKE ? AND status = 'active' ORDER BY group_id ASC, CASE WHEN serial_code IS NULL OR serial_code = '' THEN 1 ELSE 0 END, serial_code ASC`).bind(PAT)
+    DB.prepare(`SELECT id, name FROM managed_reader_groups WHERE status != 'deleted' ORDER BY id ASC`),
+    DB.prepare(`SELECT group_id, serial_code, reader_name, access_code, country, phone FROM managed_reader_profiles WHERE status = 'active' ORDER BY group_id ASC, CASE WHEN serial_code IS NULL OR serial_code = '' THEN 1 ELSE 0 END ASC, serial_code ASC`)
   ]);
 
   const groups = groupsRes.results || [];
@@ -3425,8 +3422,14 @@ async function ownerExportMuharramGroupsXlsx(request, DB) {
   const sheets = groups.map(g => ({
     name: g.name,
     rows: [
-      ['الرقم التسلسلي', 'اسم القارئ'],
-      ...(byGroup[g.id] || []).map(r => [r.serial_code ?? '', r.reader_name ?? ''])
+      ['الرقم التسلسلي', 'اسم القارئ', 'كود الدخول / PIN', 'الدولة', 'رقم الجوال'],
+      ...(byGroup[g.id] || []).map(r => [
+        r.serial_code ?? '',
+        r.reader_name ?? '',
+        r.access_code ?? '',
+        r.country ?? '',
+        r.phone ?? ''
+      ])
     ]
   }));
 
