@@ -822,6 +822,46 @@ async function listReaderGroups(request, DB) {
   return json(result);
 }
 
+async function getReaderGroupById(request, DB, groupId) {
+  await ensureGroupSchema(DB);
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+
+  let row;
+  if (check.user.role === "owner") {
+    row = await DB.prepare(
+      `SELECT g.*, COUNT(p.id) AS readers_count
+       FROM managed_reader_groups g
+       LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
+       WHERE g.id = ? AND g.status != 'deleted'
+       GROUP BY g.id`
+    ).bind(groupId).first();
+  } else {
+    await ensureCreatorGroupSchema(DB);
+    const visibleIds = await getCreatorGroupMemberIds(DB, check.user.id);
+    const userGroupIds2 = await getUserGroupIds(DB, check.user.id);
+    let whereClause, whereParams;
+    if (userGroupIds2.length) {
+      const sharedRgClause = `OR (g.shared_creator_group_id IS NOT NULL AND g.shared_creator_group_id IN (${userGroupIds2.map(() => "?").join(",")}))`;
+      whereClause = `WHERE g.id = ? AND g.status != 'deleted' AND (g.created_by_user_id IN (${visibleIds.map(() => "?").join(",")}) ${sharedRgClause})`;
+      whereParams = [groupId, ...visibleIds, ...userGroupIds2];
+    } else {
+      whereClause = `WHERE g.id = ? AND g.status != 'deleted' AND g.created_by_user_id IN (${visibleIds.map(() => "?").join(",")})`;
+      whereParams = [groupId, ...visibleIds];
+    }
+    row = await DB.prepare(
+      `SELECT g.*, COUNT(p.id) AS readers_count
+       FROM managed_reader_groups g
+       LEFT JOIN managed_reader_profiles p ON p.group_id = g.id AND p.status != 'deleted'
+       ${whereClause}
+       GROUP BY g.id`
+    ).bind(...whereParams).first();
+  }
+
+  if (!row) return json({ ok: false, error: "not_found" }, 404);
+  return json({ ok: true, group: { ...row, readerCount: Number(row.readers_count) || 0, rotationDurationYears: row.rotation_duration_years || 5 } });
+}
+
 async function createReaderGroup(request, DB) {
   await ensureGroupSchema(DB);
   const check = await requireManagedCreator(request, DB);
@@ -3522,6 +3562,7 @@ export async function onRequest(context) {
       if (method === "POST") return createReaderGroup(request, env.DB);
     }
     if (parts.length === 2 && parts[0] === "managed-reader-groups") {
+      if (method === "GET") return getReaderGroupById(request, env.DB, parts[1]);
       if (method === "PUT" || method === "POST") return updateReaderGroup(request, env.DB, parts[1]);
       if (method === "DELETE") return deleteReaderGroup(request, env.DB, parts[1]);
     }

@@ -3261,14 +3261,13 @@ async function setupReaderGroup(id){
   const manageMode = hash.endsWith('/manage');
   if(!canUseManagedKhatmas()){ view.innerHTML = `<article class="feature-card empty-state"><h3>غير مصرح</h3></article>`; return; }
 
-  let group = null, readers = [], groups = [];
+  let group = null, readers = [];
   try{
     const [gRes, rRes] = await Promise.all([
-      api('/managed-reader-groups?page=1&limit=25'),
+      api('/managed-reader-groups/' + encodeURIComponent(id)),
       api('/managed-readers?groupId=' + encodeURIComponent(id))
     ]);
-    groups = gRes.groups || [];
-    group = groups.find(g => g.id === id);
+    group = gRes.group || null;
     readers = rRes.readers || [];
   }catch(err){ view.innerHTML = `<article class="feature-card empty-state"><h3>تعذر تحميل المجموعة</h3><p>${escapeHtml(err.message)}</p></article>`; return; }
   if(!group){ view.innerHTML = `<article class="feature-card empty-state"><h3>المجموعة غير موجودة</h3><a class="btn primary" href="#/managed-readers">الرجوع</a></article>`; return; }
