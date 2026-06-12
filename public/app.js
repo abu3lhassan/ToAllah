@@ -232,7 +232,7 @@ function renderAuthLinks(){
   // Rename managed-nav labels: non-owners see clean generic labels, owners keep "مُدارة" labels
   const managedNavBtn = managedNavGroup?.querySelector('.nav-group-btn');
   const managedCreateNavLink = managedNavGroup?.querySelector('a[href="#/managed-create"]');
-  if(managedNavBtn) managedNavBtn.textContent = isOwner ? 'الختمات المُدارة ▾' : 'الختمات ▾';
+  if(managedNavBtn) managedNavBtn.textContent = isOwner ? 'الختمات المُدارة ▾' : 'لوحة التحكم ▾';
   if(managedCreateNavLink) managedCreateNavLink.textContent = isOwner ? 'إنشاء ختمة مُدارة' : 'إنشاء ختمة';
 
   // Desktop: keep the account inside the premium pill only.
@@ -2129,7 +2129,7 @@ function managedEditorPayload(form){
   data.participants = managedParticipantRows();
   if(data.selectionMode === 'custom'){
     data.selectedUnits = selectedManagedUnitNumbers(form);
-    if(!data.selectedUnits.length) throw new Error('يجب اختيار وحدة واحدة على الأقل');
+    if(!data.selectedUnits.length) throw new Error('يجب اختيار جزء واحد على الأقل');
   }
   const assignments = {};
   form.querySelectorAll('input[data-managed-unit-assignment]:checked').forEach(input => {
@@ -2819,11 +2819,12 @@ async function setupReaderLogin(){
     </section>
     <section class="form-card glass" style="max-width:560px;margin-inline:auto;margin-bottom:24px">
       <form id="readerPortalForm">
-        <label style="margin-top:0">الكود أو رقم الجوال أو الاسم
+        <label style="margin-top:0">الكود أو رقم الجوال أو الاسم أو الرقم التسلسلي
           <input id="readerPortalIdentity" autocomplete="off" inputmode="text"
-            placeholder="مثال: 1234 أو 05XXXXXXXX أو اسم القارئ"
+            placeholder="مثال: 1234 أو 05XXXXXXXX أو اسم القارئ أو R-002080"
             value="${escapeHtml(savedIdentity)}" style="margin-top:6px" />
         </label>
+        <p id="readerSerialHint" style="margin:4px 0 0;font-size:12px;color:var(--muted);display:none"></p>
         <div style="display:flex;gap:10px;margin-top:12px">
           <button class="btn primary" type="submit" id="readerPortalBtn" style="flex:1">عرض ختماتي</button>
           <button class="btn ghost" type="button" id="readerPortalClear" style="padding:14px 16px">مسح</button>
@@ -2836,6 +2837,22 @@ async function setupReaderLogin(){
     localStorage.removeItem('reader_portal_identity');
     document.getElementById('readerPortalIdentity').value = '';
     document.getElementById('readerPortalResult').innerHTML = '';
+    const hint = document.getElementById('readerSerialHint');
+    if(hint){ hint.style.display = 'none'; hint.textContent = ''; }
+  });
+
+  // Show serial hint when user types pure digits
+  document.getElementById('readerPortalIdentity')?.addEventListener('input', () => {
+    const val = (document.getElementById('readerPortalIdentity')?.value || '').trim();
+    const hint = document.getElementById('readerSerialHint');
+    if(!hint) return;
+    if(/^\d{1,6}$/.test(val)){
+      hint.textContent = 'سيتم البحث كرقم تسلسلي: R-' + val.padStart(6, '0');
+      hint.style.display = '';
+    } else {
+      hint.style.display = 'none';
+      hint.textContent = '';
+    }
   });
 
   async function doLookup(identity) {
@@ -3170,6 +3187,21 @@ async function setupReaderKhatma(khatmaId){
         </div>`;
     }
 
+    // Cumulative stats across all khatmas
+    const allKhatmaUnits = khatmas.flatMap(k => k.units || []);
+    const cumDone = allKhatmaUnits.filter(u => u.status === 'completed').length;
+    const cumAssigned = allKhatmaUnits.filter(u => u.status !== 'available').length;
+    const cumPct = cumAssigned ? Math.round(cumDone / cumAssigned * 100) : 0;
+    const cumHtml = `
+      <section class="khatma-detail glass" style="margin-top:16px">
+        <div class="sheet-head"><h3>إحصائياتك التجميعية</h3><span>منذ أول ختمة</span></div>
+        <div class="mini-stats">
+          <div><strong>${khatmas.length}</strong><span>ختمة شاركت فيها</span></div>
+          <div><strong>${cumDone}</strong><span>جزء أكملته</span></div>
+          <div><strong>${cumPct}%</strong><span>نسبة الإنجاز الكلية</span></div>
+        </div>
+      </section>`;
+
     view.innerHTML = `
       <section class="page-head">
         <span class="eyebrow">بوابة القراء</span>
@@ -3180,7 +3212,8 @@ async function setupReaderKhatma(khatmaId){
         <a class="btn ghost compact-btn" href="#/reader-login">← ختماتي</a>
         <button class="btn ghost compact-btn" id="readerKhatmaLogoutBtn" type="button">تسجيل الخروج</button>
       </div>
-      <div class="form-card glass">${unitsHtml}</div>`;
+      <div class="form-card glass">${unitsHtml}</div>
+      ${cumHtml}`;
 
     // Logout button
     view.querySelector('#readerKhatmaLogoutBtn')?.addEventListener('click', () => {
@@ -3890,8 +3923,8 @@ async function setupDashboard(){
       <div class="dash-stat-card glass">
         <div class="stat-icon">✅</div>
         <div class="stat-value">${u.completed}</div>
-        <div class="stat-label">وحدة مكتملة</div>
-        <div class="stat-sub">${unitPct}% من ${u.total} وحدة إجمالاً</div>
+        <div class="stat-label">جزء مكتمل</div>
+        <div class="stat-sub">${unitPct}% من ${u.total} جزء إجمالاً</div>
       </div>
       <div class="dash-stat-card glass">
         <div class="stat-icon">👤</div>
@@ -3902,8 +3935,8 @@ async function setupDashboard(){
       <div class="dash-stat-card glass">
         <div class="stat-icon">⏳</div>
         <div class="stat-value">${u.reading+u.assigned}</div>
-        <div class="stat-label">وحدة تحت الإنجاز</div>
-        <div class="stat-sub">${u.available} وحدة متاحة</div>
+        <div class="stat-label">جزء تحت الإنجاز</div>
+        <div class="stat-sub">${u.available} جزء متاح</div>
       </div>
     </div>
 
@@ -3917,7 +3950,7 @@ async function setupDashboard(){
         </div>
       </div>
       <div class="form-card glass">
-        <div class="sheet-head"><h3>حالة الوحدات</h3><span>${unitPct}% إنجاز</span></div>
+        <div class="sheet-head"><h3>حالة الأجزاء</h3><span>${unitPct}% إنجاز</span></div>
         <div class="dash-donut-wrap">
           ${donutSvg(unitSlices)}
           ${donutLegend(unitSlices)}
@@ -3940,7 +3973,7 @@ async function setupDashboard(){
 
     <!-- Top Readers -->
     <div class="form-card glass" style="margin-top:16px">
-      <div class="sheet-head"><h3>أعلى القراء إنجازاً</h3><span>الوحدات المكتملة</span></div>
+      <div class="sheet-head"><h3>أعلى القراء إنجازاً</h3><span>الأجزاء المكتملة</span></div>
       ${topReadersHtml(topReaders)}
     </div>`;
 

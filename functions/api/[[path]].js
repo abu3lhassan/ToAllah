@@ -2442,6 +2442,16 @@ async function readerPortal(request, DB) {
       participants = (await DB.prepare(base + " WHERE mcp.reader_profile_id = ?").bind(profileRow.id).all()).results || [];
     }
   }
+  // Pure digits (1-6): also try as abbreviated serial code (e.g., "2080" → "R-002080")
+  if (!participants.length && /^\d{1,6}$/.test(identityRaw)) {
+    const paddedSerial = "R-" + identityRaw.padStart(6, "0");
+    const profileRow = await DB.prepare(
+      "SELECT id FROM managed_reader_profiles WHERE serial_code = ? AND status != 'deleted' LIMIT 1"
+    ).bind(paddedSerial).first();
+    if (profileRow) {
+      participants = (await DB.prepare(base + " WHERE mcp.reader_profile_id = ?").bind(profileRow.id).all()).results || [];
+    }
+  }
   if (!participants.length && accessCode && isValidAccessCode(accessCode)) {
     participants = (await DB.prepare(base + " WHERE mcp.access_code = ?").bind(accessCode).all()).results || [];
   }
