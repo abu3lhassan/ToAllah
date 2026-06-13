@@ -168,6 +168,9 @@ async function loadCurrentUser(){
 function canUseManagedKhatmas(){
   return Boolean(state.user && (state.user.role === 'owner' || state.user.managedKhatmaCreator || state.user.managed_khatma_creator));
 }
+function canUseSupervisor(){
+  return Boolean(state.user?.isSupervisor);
+}
 const KHATMA_TYPE_OPTIONS = [
   ['weekly', 'أسبوعية', 'الأسبوعية'],
   ['monthly', 'شهرية', 'الشهرية'],
@@ -226,6 +229,8 @@ function renderAuthLinks(){
   const ownerControlNav = document.getElementById('ownerControlNav');
   if(ownerControlNav) ownerControlNav.hidden = !isOwner;
   if(managedNavGroup) managedNavGroup.hidden = !canUseManagedKhatmas();
+  const supervisorNav = document.getElementById('supervisorNav');
+  if(supervisorNav) supervisorNav.hidden = !(Boolean(state.user?.isSupervisor) && state.user?.role !== 'owner');
   if(userMenuOwner) userMenuOwner.hidden = !isOwner;
   const khatmasDropdownLink = document.getElementById('khatmasDropdownLink');
   if(khatmasDropdownLink) khatmasDropdownLink.hidden = !isOwner;
@@ -397,6 +402,7 @@ async function router(){
   if(hash.startsWith('#/reader-khatma/')) return renderTemplate('readerKhatmaTemplate', () => { const parts = hash.split('/'); setupReaderKhatma(parts[2]); });
   if(hash.startsWith('#/reader-group/')) return renderTemplate('readerGroupTemplate', () => { const parts = hash.split('/'); setupReaderGroup(parts[2]); });
   if(hash.startsWith('#/managed-khatma/')) return renderTemplate('managedKhatmaTemplate', () => { const parts = hash.split('/'); setupManagedKhatma(parts[2], parts[3] === 'manage'); });
+  if(hash.startsWith('#/supervisor-panel')) return renderTemplate('supervisorPanelTemplate', setupSupervisorPanel);
   if(hash.startsWith('#/managed-khatmas/archived')) return renderTemplate('managedKhatmasArchivedTemplate', setupManagedKhatmasArchived);
   if(hash.startsWith('#/managed-khatmas')) return renderTemplate('managedKhatmasTemplate', setupManagedKhatmas);
   if(hash.startsWith('#/create')){
@@ -477,9 +483,10 @@ async function setupOwner(){
     </div>
 
     <div class="owner-tab-bar">
-      <button class="owner-tab-btn active" data-tab="users"  onclick="window.switchOwnerTab('users')">المستخدمون</button>
-      <button class="owner-tab-btn"        data-tab="groups" onclick="window.switchOwnerTab('groups')">المجموعات</button>
-      <button class="owner-tab-btn"        data-tab="system" onclick="window.switchOwnerTab('system')">النظام</button>
+      <button class="owner-tab-btn active" data-tab="users"       onclick="window.switchOwnerTab('users')">المستخدمون</button>
+      <button class="owner-tab-btn"        data-tab="supervisors" onclick="window.switchOwnerTab('supervisors')">المشرفون</button>
+      <button class="owner-tab-btn"        data-tab="groups"      onclick="window.switchOwnerTab('groups')">المجموعات</button>
+      <button class="owner-tab-btn"        data-tab="system"      onclick="window.switchOwnerTab('system')">النظام</button>
     </div>
 
     <!-- Tab: Users -->
@@ -521,10 +528,16 @@ async function setupOwner(){
           <button class="btn ghost compact-btn owner-role-filter" data-role="owner">المالك</button>
           <button class="btn ghost compact-btn owner-role-filter" data-role="managed">منشئ متحكم</button>
           <button class="btn ghost compact-btn owner-role-filter" data-role="creator">منشئ عادي</button>
+          <button class="btn ghost compact-btn owner-role-filter" data-role="supervisor">مشرف</button>
         </div>
       </div>
 
       <div id="usersList" class="cards-grid" style="margin-top:12px"></div>
+    </div>
+
+    <!-- Tab: Supervisors -->
+    <div id="ownerTab-supervisors" class="owner-tab-pane" hidden>
+      <div id="supervisorsSection"></div>
     </div>
 
     <!-- Tab: Groups -->
@@ -546,6 +559,10 @@ async function setupOwner(){
     state.ownerTab = tab;
     document.querySelectorAll('.owner-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
     document.querySelectorAll('.owner-tab-pane').forEach(p => { p.hidden = (p.id !== 'ownerTab-' + tab); });
+    if(tab === 'supervisors'){
+      const el = document.getElementById('supervisorsSection');
+      if(el && !el.children.length) renderSupervisors();
+    }
     if(tab === 'groups'){
       const el = document.getElementById('creatorGroupsSection');
       if(el && !el.children.length) renderCreatorGroups();
@@ -598,6 +615,387 @@ async function loadOwnerStats(){
     set('oStat-groups',  s.groups  ?? '—');
     set('oStat-khatmas', s.activeKhatmas ?? '—');
   }catch{ /* stats are cosmetic, ignore failures */ }
+}
+
+async function toggleSupervisorPermission(userId, enable){
+  try{
+    const res = await api('/users/' + encodeURIComponent(userId) + '/supervisor-permission', {method:'POST', body:{enabled: enable}});
+    toast(enable ? 'تم تفعيل صلاحية المشرف' : 'تم إلغاء صلاحية المشرف');
+    await renderUsers(state.usersPage || 1);
+    loadOwnerStats();
+    const supEl = document.getElementById('supervisorsSection');
+    if(supEl && supEl.children.length) renderSupervisors();
+  }catch(err){ toast(err.message || 'تعذر تغيير الصلاحية'); }
+}
+
+async function renderSupervisors(){
+  const el = document.getElementById('supervisorsSection');
+  if(!el) return;
+  el.innerHTML = '<p style="color:var(--muted);padding:16px">جاري التحميل...</p>';
+  try{
+    const res = await api('/supervisors');
+    const supervisors = res.supervisors || [];
+    if(!supervisors.length){
+      el.innerHTML = `<div class="admin-panel premium-admin-panel"><div class="sheet-head"><h3 style="margin:0">المشرفون</h3><p style="margin:3px 0 0;color:var(--muted);font-size:13px">لا يوجد مشرفون حتى الآن</p></div><p style="margin-top:16px;color:var(--muted);font-size:14px">لتعيين مشرف، اذهب لتبويب المستخدمون واضغط "مشرف" على أي مستخدم.</p></div>`;
+      return;
+    }
+    el.innerHTML = `
+      <div class="admin-panel premium-admin-panel">
+        <div class="sheet-head"><h3 style="margin:0">المشرفون</h3><p style="margin:3px 0 0;color:var(--muted);font-size:13px">إدارة نطاقات الإشراف</p></div>
+        <div id="supervisorsList" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">
+          ${supervisors.map(s => supervisorRowHtml(s)).join('')}
+        </div>
+      </div>
+      ${supervisorPickerModalHtml()}
+    `;
+  }catch(err){ el.innerHTML = `<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`; }
+}
+
+function supervisorRowHtml(s){
+  const name = escapeHtml(s.display_name || s.username);
+  const groups = (s.assignments || []).map(a => `<span class="badge" style="font-size:11px;margin:2px">${escapeHtml(a.name || a.entity_id)}</span>`).join('');
+  return `<article class="owner-row user-row" style="flex-wrap:wrap;gap:6px">
+    <div class="owner-row-main" style="flex:1;min-width:160px">
+      <strong class="owner-row-title">${name}</strong>
+      <span class="owner-row-meta">${escapeHtml(s.username)} · مشرف</span>
+      <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px">${groups || '<span style="color:var(--muted);font-size:12px">لا توجد مجموعات مربوطة</span>'}</div>
+    </div>
+    <div class="owner-row-actions">
+      <button class="btn ghost compact-btn" onclick="openSupervisorPicker('${escapeJs(s.user_id)}','${escapeJs(s.display_name || s.username)}')">تعديل التعيينات</button>
+      <button class="btn ghost danger-btn compact-btn" onclick="toggleSupervisorPermission('${escapeJs(s.user_id)}',false)">إلغاء الإشراف</button>
+    </div>
+  </article>`;
+}
+
+function supervisorPickerModalHtml(){
+  return `<div id="supervisorPickerModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9000;align-items:center;justify-content:center">
+    <div style="background:var(--card);border-radius:24px;padding:24px;width:min(480px,94vw);max-height:80vh;display:flex;flex-direction:column;gap:12px;box-shadow:var(--shadow)">
+      <div class="sheet-head" style="padding:0">
+        <div><h3 style="margin:0" id="pickerTitle">تعيين مجموعات المشرف</h3></div>
+        <button class="btn ghost compact-btn" onclick="closeSupervisorPicker()">×</button>
+      </div>
+      <input id="pickerSearchInput" type="search" placeholder="بحث عن مجموعة..." style="width:100%;height:40px;border-radius:14px;padding:0 14px;font-size:14px;border:1px solid var(--line);background:var(--bg);color:var(--text);box-sizing:border-box" />
+      <div id="pickerListEl" style="flex:1;overflow-y:auto;max-height:280px;display:flex;flex-direction:column;gap:4px"></div>
+      <div id="pickerSelectedEl" style="min-height:28px;display:flex;flex-wrap:wrap;gap:4px"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn primary" style="flex:1" onclick="confirmSupervisorAssignments()">حفظ التعيينات</button>
+        <button class="btn ghost" onclick="closeSupervisorPicker()">إلغاء</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+const _pickerState = { supervisorId: null, selectedIds: new Set(), nextCursor: null, hasMore: false, loading: false, q: '' };
+let _pickerDebounce = null;
+
+async function openSupervisorPicker(supervisorId, supervisorName){
+  _pickerState.supervisorId = supervisorId;
+  _pickerState.selectedIds = new Set();
+  _pickerState.nextCursor = null;
+  _pickerState.hasMore = false;
+  _pickerState.loading = false;
+  _pickerState.q = '';
+  const modal = document.getElementById('supervisorPickerModal');
+  if(!modal) return;
+  modal.style.display = 'flex';
+  const titleEl = document.getElementById('pickerTitle');
+  if(titleEl) titleEl.textContent = 'تعيين مجموعات: ' + supervisorName;
+  const searchEl = document.getElementById('pickerSearchInput');
+  if(searchEl){ searchEl.value = ''; searchEl.oninput = ()=>{ clearTimeout(_pickerDebounce); _pickerDebounce = setTimeout(()=>{ _pickerState.q = searchEl.value.trim(); _pickerState.nextCursor = null; document.getElementById('pickerListEl').innerHTML = ''; loadPickerPage(true); }, 300); }; }
+  const listEl = document.getElementById('pickerListEl');
+  if(listEl){ listEl.innerHTML = ''; listEl.onscroll = ()=>{ if(!_pickerState.hasMore || _pickerState.loading) return; if(listEl.scrollTop + listEl.clientHeight >= listEl.scrollHeight - 80) loadPickerPage(false); }; }
+  try{
+    const res = await api('/supervisors/' + encodeURIComponent(supervisorId) + '/assignments');
+    (res.assignments || []).forEach(a => _pickerState.selectedIds.add(a.entity_id));
+  }catch{}
+  loadPickerPage(true);
+}
+
+async function loadPickerPage(reset){
+  if(_pickerState.loading) return;
+  if(!reset && !_pickerState.hasMore) return;
+  _pickerState.loading = true;
+  const listEl = document.getElementById('pickerListEl');
+  if(!listEl){ _pickerState.loading = false; return; }
+  if(reset){ listEl.innerHTML = '<p style="color:var(--muted);padding:8px;font-size:13px">جاري التحميل...</p>'; _pickerState.nextCursor = null; }
+  try{
+    let url = '/picker/creator-groups?limit=20';
+    if(_pickerState.q) url += '&q=' + encodeURIComponent(_pickerState.q);
+    if(!reset && _pickerState.nextCursor) url += '&cursor=' + encodeURIComponent(_pickerState.nextCursor);
+    const res = await api(url);
+    if(reset) listEl.innerHTML = '';
+    const items = res.items || [];
+    _pickerState.hasMore = Boolean(res.hasMore);
+    _pickerState.nextCursor = res.nextCursor || null;
+    if(!items.length && reset){ listEl.innerHTML = '<p style="color:var(--muted);padding:8px;font-size:13px">لا توجد مجموعات</p>'; _pickerState.loading = false; return; }
+    items.forEach(item => {
+      const selected = _pickerState.selectedIds.has(item.id);
+      const div = document.createElement('label');
+      div.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;cursor:pointer;border:1px solid ' + (selected ? 'var(--primary)' : 'var(--line)') + ';background:' + (selected ? 'var(--primary-soft)' : 'transparent');
+      div.dataset.id = item.id;
+      div.innerHTML = `<input type="checkbox" style="width:16px;height:16px;accent-color:var(--primary)" ${selected ? 'checked' : ''} /><span style="font-size:14px;font-weight:700">${escapeHtml(item.name)}</span>`;
+      const cb = div.querySelector('input');
+      cb.onchange = ()=>{
+        if(cb.checked){ _pickerState.selectedIds.add(item.id); div.style.border = '1px solid var(--primary)'; div.style.background = 'var(--primary-soft)'; }
+        else{ _pickerState.selectedIds.delete(item.id); div.style.border = '1px solid var(--line)'; div.style.background = 'transparent'; }
+        renderPickerSelected();
+      };
+      listEl.appendChild(div);
+    });
+    renderPickerSelected();
+  }catch(err){ if(reset) listEl.innerHTML = `<p style="color:var(--danger);padding:8px">${escapeHtml(err.message)}</p>`; }
+  finally{ _pickerState.loading = false; }
+}
+
+function renderPickerSelected(){
+  const el = document.getElementById('pickerSelectedEl');
+  if(!el) return;
+  if(!_pickerState.selectedIds.size){ el.innerHTML = '<span style="color:var(--muted);font-size:12px">لم يتم تحديد أي مجموعة</span>'; return; }
+  el.innerHTML = [..._pickerState.selectedIds].map(id => {
+    const label = document.querySelector(`#pickerListEl [data-id="${CSS.escape(id)}"] span`)?.textContent || id;
+    return `<span class="badge" style="font-size:11px;cursor:pointer" onclick="_pickerState.selectedIds.delete('${escapeJs(id)}');document.querySelector('#pickerListEl [data-id=\\'${escapeJs(id)}\\'] input') && (document.querySelector('#pickerListEl [data-id=\\'${escapeJs(id)}\\'] input').checked=false);renderPickerSelected()">${escapeHtml(label)} ×</span>`;
+  }).join('');
+}
+
+async function confirmSupervisorAssignments(){
+  if(!_pickerState.supervisorId) return;
+  try{
+    await api('/supervisors/' + encodeURIComponent(_pickerState.supervisorId) + '/assignments', {method:'POST', body:{groupIds:[..._pickerState.selectedIds]}});
+    toast('تم حفظ التعيينات');
+    closeSupervisorPicker();
+    renderSupervisors();
+  }catch(err){ toast(err.message || 'تعذر حفظ التعيينات'); }
+}
+
+function closeSupervisorPicker(){
+  const modal = document.getElementById('supervisorPickerModal');
+  if(modal) modal.style.display = 'none';
+  _pickerState.supervisorId = null;
+  _pickerState.selectedIds = new Set();
+}
+
+// ── Supervisor Panel ──────────────────────────────────────────────────
+
+async function setupSupervisorPanel(){
+  const root = document.getElementById('supervisorPanelView');
+  if(!root) return;
+  if(!state.user){ root.innerHTML = `<article class="feature-card"><h3>تسجيل الدخول مطلوب</h3><a class="btn primary" href="#/login">تسجيل الدخول</a></article>`; return; }
+  if(!canUseSupervisor()){ root.innerHTML = `<article class="feature-card"><h3>غير مصرح</h3><p>هذه الصفحة مخصصة للمشرفين فقط.</p></article>`; return; }
+  root.innerHTML = `
+    <div class="owner-stats-bar">
+      <div class="owner-stat-card"><span class="owner-stat-num" id="supStat-khatmas">…</span><span class="owner-stat-label">الختمات</span></div>
+      <div class="owner-stat-card"><span class="owner-stat-num" id="supStat-readers">…</span><span class="owner-stat-label">القراء</span></div>
+      <div class="owner-stat-card"><span class="owner-stat-num" id="supStat-groups">…</span><span class="owner-stat-label">المجموعات</span></div>
+    </div>
+    <div class="owner-tab-bar">
+      <button class="owner-tab-btn active" data-stab="khatmas"       onclick="window.switchSupTab('khatmas')">الختمات</button>
+      <button class="owner-tab-btn"        data-stab="readers"       onclick="window.switchSupTab('readers')">القراء</button>
+      <button class="owner-tab-btn"        data-stab="reader-groups" onclick="window.switchSupTab('reader-groups')">مجموعات القراء</button>
+    </div>
+    <div id="supTab-khatmas" class="owner-tab-pane"><div id="supKhatmasList"></div></div>
+    <div id="supTab-readers" class="owner-tab-pane" hidden><div id="supReadersList"></div></div>
+    <div id="supTab-reader-groups" class="owner-tab-pane" hidden><div id="supGroupsList"></div></div>
+  `;
+  window.switchSupTab = function(tab){
+    document.querySelectorAll('.owner-tab-btn[data-stab]').forEach(b => b.classList.toggle('active', b.dataset.stab === tab));
+    document.querySelectorAll('#supervisorPanelView .owner-tab-pane').forEach(p => { p.hidden = (p.id !== 'supTab-' + tab); });
+    if(tab === 'readers' && !document.getElementById('supReadersList').children.length) renderSupervisorReaders(1, '');
+    if(tab === 'reader-groups' && !document.getElementById('supGroupsList').children.length) renderSupervisorReaderGroups(1, '');
+  };
+  supervisorPanelStats();
+  renderSupervisorKhatmas(1, '');
+}
+
+async function supervisorPanelStats(){
+  try{
+    const res = await api('/supervisor/stats');
+    const k = document.getElementById('supStat-khatmas');
+    const r = document.getElementById('supStat-readers');
+    const g = document.getElementById('supStat-groups');
+    if(k) k.textContent = res.khatmasCount ?? 0;
+    if(r) r.textContent = res.readersCount ?? 0;
+    if(g) g.textContent = res.readerGroupsCount ?? 0;
+  }catch{}
+}
+
+async function renderSupervisorKhatmas(page, q){
+  const el = document.getElementById('supKhatmasList');
+  if(!el) return;
+  el.innerHTML = '<p style="color:var(--muted);padding:16px">جاري التحميل...</p>';
+  try{
+    let url = '/supervisor/khatmas?page=' + page + '&limit=25';
+    if(q) url += '&q=' + encodeURIComponent(q);
+    const res = await api(url);
+    const khatmas = res.khatmas || [];
+    if(!khatmas.length){ el.innerHTML = '<p style="color:var(--muted);padding:16px">لا توجد ختمات في نطاق إشرافك.</p>'; return; }
+    el.innerHTML = `
+      <div style="margin-bottom:12px;display:flex;gap:8px">
+        <input id="supKhatmaSearch" type="search" placeholder="بحث في الختمات..." value="${escapeHtml(q)}" style="flex:1;height:38px;border-radius:12px;padding:0 12px;font-size:14px;border:1px solid var(--line);background:var(--bg);color:var(--text)" />
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${khatmas.map(k => supervisorKhatmaRowHtml(k)).join('')}
+      </div>
+      ${res.pages > 1 ? paginationHtml(page, res.pages, 'renderSupervisorKhatmas') : ''}
+    `;
+    document.getElementById('supKhatmaSearch')?.addEventListener('change', e => renderSupervisorKhatmas(1, e.target.value.trim()));
+  }catch(err){ el.innerHTML = `<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`; }
+}
+
+function supervisorKhatmaRowHtml(k){
+  const progress = k.totalUnits > 0 ? Math.round(k.completedUnits / k.totalUnits * 100) : 0;
+  return `<article class="owner-row" style="flex-direction:column;align-items:stretch;gap:6px">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+      <div>
+        <strong>${escapeHtml(k.title)}</strong>
+        ${k.weekNumber ? `<span class="badge" style="margin-right:6px;font-size:11px">${escapeHtml(k.weekNumber)}</span>` : ''}
+      </div>
+      <span class="badge" style="font-size:11px">${k.completedUnits}/${k.totalUnits} مكتمل · ${progress}%</span>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn ghost compact-btn" onclick="openSupervisorKhatmaDetail('${escapeJs(k.id)}','${escapeJs(k.title)}')">عرض التفاصيل والوحدات</button>
+    </div>
+  </article>`;
+}
+
+async function openSupervisorKhatmaDetail(khatmaId, title){
+  try{
+    const res = await api('/supervisor/khatmas/' + encodeURIComponent(khatmaId));
+    const khatma = res.khatma;
+    if(!khatma){ toast('تعذر تحميل الختمة'); return; }
+    const units = khatma.units || [];
+    const participants = khatma.participants || [];
+    const participantOptions = participants.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.accessCode)})</option>`).join('');
+    const statusLabels = { available: 'متاح', assigned: 'محجوز', reading: 'قراءة', completed: 'مكتمل', complete: 'مكتمل' };
+    const unitsHtml = units.map(u => `
+      <tr>
+        <td style="padding:6px 8px;font-weight:700">${escapeHtml(u.label || String(u.number))}</td>
+        <td style="padding:6px 8px">${escapeHtml(statusLabels[u.status] || u.status)}</td>
+        <td style="padding:6px 8px">${escapeHtml(u.participantName || '—')}</td>
+        <td style="padding:6px 8px;white-space:nowrap">
+          <select onchange="supervisorChangeUnit('${escapeJs(khatmaId)}',${u.number},this.value)" style="font-size:12px;border-radius:8px;border:1px solid var(--line);padding:2px 6px;background:var(--bg);color:var(--text)">
+            <option value="">تغيير الحالة...</option>
+            <option value="available">متاح</option>
+            <option value="reading">قراءة</option>
+            <option value="complete">مكتمل</option>
+          </select>
+          ${participants.length ? `<select onchange="supervisorReassign('${escapeJs(khatmaId)}',${u.number},this.value)" style="font-size:12px;border-radius:8px;border:1px solid var(--line);padding:2px 6px;background:var(--bg);color:var(--text);margin-top:4px"><option value="">إعادة تخصيص...</option>${participantOptions}</select>` : ''}
+        </td>
+      </tr>
+    `).join('');
+    showModal(`<div style="max-height:70vh;overflow-y:auto"><h3 style="margin:0 0 12px">${escapeHtml(title)}</h3><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="border-bottom:1px solid var(--line)"><th style="padding:6px 8px;text-align:right">الوحدة</th><th style="padding:6px 8px;text-align:right">الحالة</th><th style="padding:6px 8px;text-align:right">القارئ</th><th style="padding:6px 8px;text-align:right">إجراء</th></tr></thead><tbody>${unitsHtml}</tbody></table></div>`);
+  }catch(err){ toast(err.message || 'تعذر تحميل التفاصيل'); }
+}
+
+async function supervisorChangeUnit(khatmaId, unitNum, status){
+  if(!status) return;
+  try{
+    await api('/supervisor/khatmas/' + encodeURIComponent(khatmaId) + '/units/' + unitNum + '/status', {method:'POST', body:{status}});
+    toast('تم تحديث حالة الوحدة');
+    closeModal();
+    renderSupervisorKhatmas(1, '');
+    supervisorPanelStats();
+  }catch(err){ toast(err.message || 'تعذر تحديث الحالة'); }
+}
+
+async function supervisorReassign(khatmaId, unitNum, participantId){
+  if(!participantId) return;
+  try{
+    await api('/supervisor/khatmas/' + encodeURIComponent(khatmaId) + '/units/' + unitNum + '/reassign', {method:'POST', body:{participantId}});
+    toast('تم إعادة التخصيص');
+    closeModal();
+    renderSupervisorKhatmas(1, '');
+  }catch(err){ toast(err.message || 'تعذر إعادة التخصيص'); }
+}
+
+async function renderSupervisorReaders(page, q){
+  const el = document.getElementById('supReadersList');
+  if(!el) return;
+  el.innerHTML = '<p style="color:var(--muted);padding:16px">جاري التحميل...</p>';
+  try{
+    let url = '/supervisor/readers?page=' + page + '&limit=25';
+    if(q) url += '&q=' + encodeURIComponent(q);
+    const res = await api(url);
+    const readers = res.readers || [];
+    if(!readers.length){ el.innerHTML = '<p style="color:var(--muted);padding:16px">لا يوجد قراء في نطاق إشرافك.</p>'; return; }
+    el.innerHTML = `
+      <div style="margin-bottom:12px;display:flex;gap:8px">
+        <input id="supReaderSearch" type="search" placeholder="بحث في القراء..." value="${escapeHtml(q)}" style="flex:1;height:38px;border-radius:12px;padding:0 12px;font-size:14px;border:1px solid var(--line);background:var(--bg);color:var(--text)" />
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${readers.map(r => supervisorReaderRowHtml(r)).join('')}
+      </div>
+      ${res.pages > 1 ? paginationHtml(page, res.pages, 'renderSupervisorReaders') : ''}
+    `;
+    document.getElementById('supReaderSearch')?.addEventListener('change', e => renderSupervisorReaders(1, e.target.value.trim()));
+  }catch(err){ el.innerHTML = `<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`; }
+}
+
+function supervisorReaderRowHtml(r){
+  return `<article class="owner-row" style="flex-wrap:wrap;gap:6px">
+    <div class="owner-row-main" style="flex:1;min-width:160px">
+      <strong>${escapeHtml(r.reader_name)}</strong>
+      <span class="owner-row-meta">${escapeHtml(r.access_code)}${r.group_name ? ' · ' + escapeHtml(r.group_name) : ''}</span>
+    </div>
+    <div class="owner-row-actions">
+      <button class="btn ghost compact-btn" onclick="openSupervisorEditNotes('${escapeJs(r.id)}','${escapeJs(r.notes || '')}')">تعديل الملاحظات</button>
+    </div>
+  </article>`;
+}
+
+async function openSupervisorEditNotes(readerId, currentNotes){
+  showModal(`<div><h3 style="margin:0 0 12px">تعديل ملاحظات القارئ</h3><textarea id="supNotesInput" rows="4" style="width:100%;border-radius:12px;padding:10px;font-size:14px;border:1px solid var(--line);background:var(--bg);color:var(--text);box-sizing:border-box;resize:vertical">${escapeHtml(currentNotes)}</textarea><div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary" style="flex:1" onclick="confirmSupNotes('${escapeJs(readerId)}')">حفظ</button><button class="btn ghost" onclick="closeModal()">إلغاء</button></div></div>`);
+}
+
+async function confirmSupNotes(readerId){
+  const notesEl = document.getElementById('supNotesInput');
+  const notes = notesEl ? notesEl.value.trim() : '';
+  try{
+    await api('/supervisor/readers/' + encodeURIComponent(readerId) + '/notes', {method:'PATCH', body:{notes}});
+    toast('تم حفظ الملاحظات');
+    closeModal();
+    renderSupervisorReaders(1, '');
+  }catch(err){ toast(err.message || 'تعذر حفظ الملاحظات'); }
+}
+
+async function renderSupervisorReaderGroups(page, q){
+  const el = document.getElementById('supGroupsList');
+  if(!el) return;
+  el.innerHTML = '<p style="color:var(--muted);padding:16px">جاري التحميل...</p>';
+  try{
+    let url = '/supervisor/reader-groups?page=' + page + '&limit=25';
+    if(q) url += '&q=' + encodeURIComponent(q);
+    const res = await api(url);
+    const groups = res.groups || [];
+    if(!groups.length){ el.innerHTML = '<p style="color:var(--muted);padding:16px">لا توجد مجموعات قراء في نطاق إشرافك.</p>'; return; }
+    el.innerHTML = `<div style="display:flex;flex-direction:column;gap:6px">${groups.map(g => `<article class="owner-row"><div class="owner-row-main"><strong>${escapeHtml(g.name)}</strong><span class="owner-row-meta">${g.reader_count} قارئ${g.group_serial_number ? ' · ' + escapeHtml(g.group_serial_number) : ''}</span></div></article>`).join('')}</div>${res.pages > 1 ? paginationHtml(page, res.pages, 'renderSupervisorReaderGroups') : ''}`;
+  }catch(err){ el.innerHTML = `<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`; }
+}
+
+function showModal(html){
+  let overlay = document.getElementById('_genericModal');
+  if(!overlay){
+    overlay = document.createElement('div');
+    overlay.id = '_genericModal';
+    overlay.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:8000;align-items:center;justify-content:center';
+    overlay.onclick = e => { if(e.target === overlay) closeModal(); };
+    document.body.appendChild(overlay);
+  }
+  overlay.innerHTML = `<div style="background:var(--card);border-radius:24px;padding:24px;width:min(560px,94vw);max-height:85vh;overflow-y:auto;box-shadow:var(--shadow)">${html}</div>`;
+  overlay.style.display = 'flex';
+}
+function closeModal(){
+  const overlay = document.getElementById('_genericModal');
+  if(overlay) overlay.style.display = 'none';
+}
+
+function paginationHtml(page, pages, fnName){
+  if(pages <= 1) return '';
+  let html = '<div style="display:flex;gap:6px;justify-content:center;margin-top:14px;flex-wrap:wrap">';
+  if(page > 1) html += `<button class="btn ghost compact-btn" onclick="${fnName}(${page-1},'')">السابق</button>`;
+  html += `<span style="padding:6px 12px;font-size:13px;color:var(--muted)">${page} / ${pages}</span>`;
+  if(page < pages) html += `<button class="btn ghost compact-btn" onclick="${fnName}(${page+1},'')">التالي</button>`;
+  html += '</div>';
+  return html;
 }
 
 function renderOwnerSystemSection(container){
@@ -819,7 +1217,13 @@ function userCardHtml(u){
   const editOpen = state.activeEditUserId === u.id;
   const statusLabel = u.status === 'active' ? 'نشط' : 'معطل';
   const managedEnabled = Boolean(u.managedKhatmaCreator || u.managed_khatma_creator);
-  const roleLabel = isOwner ? 'مالك' : (managedEnabled ? 'منشئ متحكم' : 'منشئ');
+  const supervisorEnabled = Boolean(u.isSupervisor);
+  let roleLabel;
+  if (isOwner) roleLabel = 'مالك';
+  else if (managedEnabled && supervisorEnabled) roleLabel = 'منشئ متحكم + مشرف';
+  else if (managedEnabled) roleLabel = 'منشئ متحكم';
+  else if (supervisorEnabled) roleLabel = 'مشرف';
+  else roleLabel = 'منشئ معلّق';
   const displayName = escapeHtml(u.display_name || u.displayName || u.username);
   const username = escapeHtml(u.username);
 
@@ -830,7 +1234,7 @@ function userCardHtml(u){
   const editBtn = `<button class="btn ghost compact-btn" onclick="openEditUser('${escapeJs(u.id)}')">تعديل</button>`;
   const actions = isOwner
     ? `${editBtn}<button class="btn ghost compact-btn" onclick="openResetUserPassword('${escapeJs(u.id)}')">إعادة تعيين</button>`
-    : `${editBtn}<button class="btn ghost compact-btn" onclick="openResetUserPassword('${escapeJs(u.id)}')">إعادة تعيين</button><button class="btn ghost compact-btn" onclick="toggleManagedUserPermission('${escapeJs(u.id)}',${managedEnabled ? 'false' : 'true'})">${managedEnabled ? 'إلغاء التحكم' : 'منشئ متحكم'}</button><button class="btn ghost compact-btn" onclick="toggleUserStatus('${escapeJs(u.id)}','${u.status === 'active' ? 'disabled' : 'active'}')">${u.status === 'active' ? 'تعطيل' : 'تفعيل'}</button><button class="btn ghost danger-btn compact-btn" onclick="openDeleteUser('${escapeJs(u.id)}')">حذف</button>`;
+    : `${editBtn}<button class="btn ghost compact-btn" onclick="openResetUserPassword('${escapeJs(u.id)}')">إعادة تعيين</button><button class="btn ghost compact-btn" onclick="toggleManagedUserPermission('${escapeJs(u.id)}',${managedEnabled ? 'false' : 'true'})">${managedEnabled ? 'إلغاء التحكم' : 'منشئ متحكم'}</button><button class="btn ghost compact-btn" onclick="toggleSupervisorPermission('${escapeJs(u.id)}',${supervisorEnabled ? 'false' : 'true'})">${supervisorEnabled ? 'إلغاء الإشراف' : 'مشرف'}</button><button class="btn ghost compact-btn" onclick="toggleUserStatus('${escapeJs(u.id)}','${u.status === 'active' ? 'disabled' : 'active'}')">${u.status === 'active' ? 'تعطيل' : 'تفعيل'}</button><button class="btn ghost danger-btn compact-btn" onclick="openDeleteUser('${escapeJs(u.id)}')">حذف</button>`;
   return `<article class="owner-row user-row" data-user-id="${escapeHtml(u.id)}">
     <div class="owner-row-main">
       <strong class="owner-row-title">${displayName}</strong>
