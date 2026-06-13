@@ -299,9 +299,16 @@ async function listUsers(request, DB) {
   const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
   const limit = Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25));
   const offset = (page - 1) * limit;
-  const countRow = await DB.prepare("SELECT COUNT(*) AS total FROM users WHERE status != 'deleted'").first();
+  const q = (url.searchParams.get("q") || "").trim();
+  const likeQ = q ? `%${q}%` : null;
+  const whereClause = likeQ
+    ? "WHERE users.status != 'deleted' AND (users.username LIKE ? OR users.display_name LIKE ?)"
+    : "WHERE users.status != 'deleted'";
+  const countRow = likeQ
+    ? await DB.prepare(`SELECT COUNT(*) AS total FROM users ${whereClause}`).bind(likeQ, likeQ).first()
+    : await DB.prepare(`SELECT COUNT(*) AS total FROM users ${whereClause}`).first();
   const total = countRow?.total || 0;
-  const rows = await DB.prepare(`
+  const baseQuery = `
     SELECT
       users.id,
       users.username,
@@ -313,10 +320,13 @@ async function listUsers(request, DB) {
       CASE WHEN managed_khatma_permissions.status = 'active' THEN 1 ELSE 0 END AS managedKhatmaCreator
     FROM users
     LEFT JOIN managed_khatma_permissions ON managed_khatma_permissions.user_id = users.id
-    WHERE users.status != 'deleted'
+    ${whereClause}
     ORDER BY users.created_at DESC
     LIMIT ? OFFSET ?
-  `).bind(limit, offset).all();
+  `;
+  const rows = likeQ
+    ? await DB.prepare(baseQuery).bind(likeQ, likeQ, limit, offset).all()
+    : await DB.prepare(baseQuery).bind(limit, offset).all();
   return json({ ok: true, users: rows.results || [], total, page, limit, pages: Math.ceil(total / limit) || 1 });
 }
 
@@ -370,14 +380,56 @@ async function setUserStatus(request, DB, id) {
   return json({ ok: true });
 }
 
+async function editUser(request, DB, id) {
+  const check = await requireOwner(request, DB);
+  if (!check.ok) return check.response;
+  const body = await readJson(request);
+  const username = body.username !== undefined ? String(body.username || "").trim() : undefined;
+  const displayName = body.display_name !== undefined ? String(body.display_name || "").trim() : undefined;
+  if (username === undefined && displayName === undefined) return json({ ok: false, error: "لا توجد بيانات للتحديث" }, 400);
+  const target = await DB.prepare("SELECT id, role, username FROM users WHERE id = ? AND status != 'deleted' LIMIT 1").bind(id).first();
+  if (!target) return json({ ok: false, error: "المستخدم غير موجود" }, 404);
+  if (username !== undefined) {
+    if (!username) return json({ ok: false, error: "اسم المستخدم لا يمكن أن يكون فارغًا" }, 400);
+    const conflict = await DB.prepare("SELECT id FROM users WHERE username = ? AND id != ? LIMIT 1").bind(username, id).first();
+    if (conflict) return json({ ok: false, error: "اسم المستخدم مستخدم مسبقًا" }, 409);
+  }
+  const updates = [];
+  const params = [];
+  if (username !== undefined) { updates.push("username = ?"); params.push(username); }
+  if (displayName !== undefined) { updates.push("display_name = ?"); params.push(displayName); }
+  updates.push("updated_at = ?"); params.push(now());
+  params.push(id);
+  await DB.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).bind(...params).run();
+  const updated = await DB.prepare("SELECT id, username, display_name, role, status, created_at, updated_at FROM users WHERE id = ?").bind(id).first();
+  return json({ ok: true, user: publicUser(updated) });
+}
+
+async function changePassword(request, DB) {
+  const user = await currentUser(request, DB);
+  if (!user) return json({ ok: false, error: "تسجيل الدخول مطلوب" }, 401);
+  const body = await readJson(request);
+  const currentPw = String(body.currentPassword || "");
+  const newPw = String(body.newPassword || "").trim();
+  const confirmPw = String(body.confirmPassword || "").trim();
+  if (!currentPw || !newPw || !confirmPw) return json({ ok: false, error: "جميع الحقول مطلوبة" }, 400);
+  if (newPw !== confirmPw) return json({ ok: false, error: "كلمة المرور الجديدة وتأكيدها غير متطابقتين" }, 400);
+  if (newPw.length < 4) return json({ ok: false, error: "كلمة المرور الجديدة قصيرة جدًا" }, 400);
+  if (!await verifyPassword(user.password_hash, currentPw, user.username)) return json({ ok: false, error: "كلمة المرور الحالية غير صحيحة" }, 400);
+  await DB.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").bind(await hashPassword(newPw, user.username), now(), user.id).run();
+  return json({ ok: true });
+}
+
 async function deleteUser(request, DB, id) {
   const check = await requireOwner(request, DB);
   if (!check.ok) return check.response;
   const target = await DB.prepare("SELECT id, role, username FROM users WHERE id = ? LIMIT 1").bind(id).first();
   if (!target) return json({ ok: false, error: "المستخدم غير موجود" }, 404);
   if (target.role === "owner") return json({ ok: false, error: "لا يمكن حذف حساب المالك" }, 400);
+  await ensureManagedSchema(DB);
   await DB.batch([
     DB.prepare("DELETE FROM user_sessions WHERE user_id = ?").bind(id),
+    DB.prepare("DELETE FROM managed_creator_group_members WHERE user_id = ?").bind(id),
     DB.prepare("UPDATE users SET status = 'deleted', updated_at = ? WHERE id = ?").bind(now(), id)
   ]);
   return json({ ok: true, deleted: true, username: target.username });
@@ -3615,10 +3667,12 @@ export async function onRequest(context) {
     if (parts.length === 2 && parts[0] === "auth" && parts[1] === "login" && method === "POST") return login(request, env.DB);
     if (parts.length === 2 && parts[0] === "auth" && parts[1] === "me" && method === "GET") return me(request, env.DB);
     if (parts.length === 2 && parts[0] === "auth" && parts[1] === "logout" && method === "POST") return logout(request, env.DB);
+    if (parts.length === 2 && parts[0] === "auth" && parts[1] === "change-password" && method === "POST") return changePassword(request, env.DB);
     if (parts.length === 1 && parts[0] === "users") {
       if (method === "GET") return listUsers(request, env.DB);
       if (method === "POST") return createUser(request, env.DB);
     }
+    if (parts.length === 2 && parts[0] === "users" && method === "PATCH") return editUser(request, env.DB, parts[1]);
     if (parts.length === 3 && parts[0] === "users" && parts[2] === "reset-password" && method === "POST") return resetUserPassword(request, env.DB, parts[1]);
     if (parts.length === 3 && parts[0] === "users" && parts[2] === "status" && method === "POST") return setUserStatus(request, env.DB, parts[1]);
     if (parts.length === 3 && parts[0] === "users" && parts[2] === "managed-permission" && method === "POST") return setManagedUserPermission(request, env.DB, parts[1]);

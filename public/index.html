@@ -767,12 +767,9 @@ body.nav-open .topbar .menu-toggle span:nth-child(1){transform:none!important;wi
         <div class="nav-group" id="managedNavGroup" hidden>
           <button class="nav-group-btn" type="button" onclick="window.toggleNavGroup('managedNavGroup')">لوحة التحكم ▾</button>
           <div class="nav-group-menu">
-            <a href="#/dashboard">لوحة التحكم</a>
             <a href="#/managed-create">إنشاء ختمة مُدارة</a>
             <a href="#/managed-khatmas">عرض الختمات</a>
             <a href="#/managed-readers">قراء الختمات</a>
-            <!-- managed-monitor: hidden (page uses k.units which is no longer in list responses) -->
-            <!-- <a href="#/managed-monitor">مراقبة التقدم</a> -->
             <a href="#/managed-khatmas/archived">الأرشيف</a>
           </div>
         </div>
@@ -788,6 +785,7 @@ body.nav-open .topbar .menu-toggle span:nth-child(1){transform:none!important;wi
         <div id="userDropdown" class="user-dropdown" hidden>
           <a id="userMenuOwner" href="#/owner" hidden>الإدارة</a>
           <a id="khatmasDropdownLink" href="#/khatmas">ختماتي</a>
+          <a href="#" id="changePasswordLink" onclick="event.preventDefault();window.openChangePasswordModal()">تغيير كلمة المرور</a>
           <a href="#/logout" class="logout-link">خروج</a>
         </div>
       </div>

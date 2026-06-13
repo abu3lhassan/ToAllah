@@ -668,9 +668,28 @@ window.deleteCreatorGroup = async function(id){
 
 async function renderUsers(page){
   const list = document.getElementById('usersList');
+  if(!list) return;
+
+  // Search bar — inject once above the list
+  let searchRow = document.getElementById('usersSearchRow');
+  if(!searchRow){
+    searchRow = document.createElement('div');
+    searchRow.id = 'usersSearchRow';
+    searchRow.style.cssText = 'display:flex;gap:8px;margin-bottom:12px';
+    searchRow.innerHTML = `<input id="usersSearchInput" type="search" placeholder="بحث باسم المستخدم أو الاسم الظاهر..." style="flex:1;height:38px;border-radius:14px;padding:0 14px;font-size:14px;border:1px solid var(--line);background:var(--bg);color:var(--text)" value="${escapeHtml(state.usersSearch||'')}" />`;
+    list.before(searchRow);
+    searchRow.querySelector('#usersSearchInput').addEventListener('input', e => {
+      state.usersSearch = e.target.value;
+      clearTimeout(state._usersSearchTimer);
+      state._usersSearchTimer = setTimeout(() => renderUsers(1), 300);
+    });
+  }
+
   try{
     const requestedPage = Math.max(1, Number(page || state.usersPage || 1) || 1);
-    const res = await api('/users?page=' + requestedPage + '&limit=25');
+    let path = '/users?page=' + requestedPage + '&limit=25';
+    if(state.usersSearch) path += '&q=' + encodeURIComponent(state.usersSearch);
+    const res = await api(path);
     const users = res.users || [];
     state.usersPage = res.page || requestedPage;
     state.usersPages = res.pages || 1;
@@ -706,21 +725,28 @@ function userCardHtml(u){
   const isOwner = u.role === 'owner';
   const resetOpen = state.activeResetUserId === u.id;
   const deleteOpen = state.activeDeleteUserId === u.id;
+  const editOpen = state.activeEditUserId === u.id;
   const statusLabel = u.status === 'active' ? 'نشط' : 'معطل';
   const roleLabel = isOwner ? 'المالك' : 'منشئ ختمة';
   const managedEnabled = Boolean(u.managedKhatmaCreator || u.managed_khatma_creator);
-  const resetBlock = resetOpen ? `<div class="inline-panel user-inline-panel action-sheet"><div class="sheet-head"><h4>إعادة تعيين كلمة المرور</h4><span>تحديث آمن</span></div><label>كلمة المرور الجديدة<input id="resetPassword_${u.id}" type="password" autocomplete="new-password" placeholder="اكتب كلمة المرور الجديدة" /></label><div class="compact-actions"><button class="btn primary compact-btn" onclick="confirmResetUserPassword('${u.id}')">حفظ</button><button class="btn ghost compact-btn" onclick="cancelUserInlineAction()">إلغاء</button></div></div>` : '';
-  const deleteBlock = deleteOpen ? `<div class="inline-panel user-inline-panel action-sheet danger-inline"><div class="sheet-head"><h4>حذف المستخدم</h4><span>حذف نهائي</span></div><p>سيتم حذف المستخدم من قاعدة البيانات وتسجيل خروجه من جميع الجلسات. لن تُحذف الختمات السابقة.</p><div class="compact-actions"><button class="btn danger-btn compact-btn" onclick="confirmDeleteUser('${u.id}')">نعم، حذف</button><button class="btn ghost compact-btn" onclick="cancelUserInlineAction()">إلغاء</button></div></div>` : '';
+  const displayName = escapeHtml(u.display_name || u.displayName || u.username);
+  const username = escapeHtml(u.username);
+
+  const editBlock = editOpen ? `<div class="inline-panel user-inline-panel action-sheet"><div class="sheet-head"><h4>تعديل بيانات المستخدم</h4><span>اسم المستخدم والاسم الظاهر</span></div><label>الاسم الظاهر<input id="editDisplayName_${u.id}" type="text" autocomplete="off" value="${displayName}" placeholder="الاسم الظاهر" /></label><label style="margin-top:8px">اسم المستخدم<input id="editUsername_${u.id}" type="text" autocomplete="off" value="${username}" placeholder="اسم المستخدم" /></label><div class="compact-actions" style="margin-top:10px"><button class="btn primary compact-btn" onclick="confirmEditUser('${escapeJs(u.id)}')">حفظ</button><button class="btn ghost compact-btn" onclick="cancelUserInlineAction()">إلغاء</button></div></div>` : '';
+  const resetBlock = resetOpen ? `<div class="inline-panel user-inline-panel action-sheet"><div class="sheet-head"><h4>إعادة تعيين كلمة المرور</h4><span>تحديث آمن</span></div><label>كلمة المرور الجديدة<input id="resetPassword_${u.id}" type="password" autocomplete="new-password" placeholder="اكتب كلمة المرور الجديدة" /></label><div class="compact-actions"><button class="btn primary compact-btn" onclick="confirmResetUserPassword('${escapeJs(u.id)}')">حفظ</button><button class="btn ghost compact-btn" onclick="cancelUserInlineAction()">إلغاء</button></div></div>` : '';
+  const deleteBlock = deleteOpen ? `<div class="inline-panel user-inline-panel action-sheet danger-inline"><div class="sheet-head"><h4>حذف المستخدم</h4><span>حذف نهائي</span></div><p>سيتم حذف المستخدم من قاعدة البيانات وتسجيل خروجه من جميع الجلسات وإزالته من كل المجموعات. لن تُحذف الختمات السابقة.</p><div class="compact-actions"><button class="btn danger-btn compact-btn" onclick="confirmDeleteUser('${escapeJs(u.id)}')">نعم، حذف</button><button class="btn ghost compact-btn" onclick="cancelUserInlineAction()">إلغاء</button></div></div>` : '';
+
+  const editBtn = `<button class="btn ghost compact-btn" onclick="openEditUser('${escapeJs(u.id)}')">تعديل</button>`;
   const actions = isOwner
-    ? `<button class="btn ghost compact-btn" onclick="openResetUserPassword('${u.id}')">إعادة تعيين</button>`
-    : `<button class="btn ghost compact-btn" onclick="openResetUserPassword('${u.id}')">إعادة تعيين</button><button class="btn ghost compact-btn" onclick="toggleManagedUserPermission('${u.id}',${managedEnabled ? 'false' : 'true'})">${managedEnabled ? 'إلغاء التحكم' : 'منشئ متحكم'}</button><button class="btn ghost compact-btn" onclick="toggleUserStatus('${u.id}','${u.status === 'active' ? 'disabled' : 'active'}')">${u.status === 'active' ? 'تعطيل' : 'تفعيل'}</button><button class="btn ghost danger-btn compact-btn" onclick="openDeleteUser('${u.id}')">حذف</button>`;
+    ? `${editBtn}<button class="btn ghost compact-btn" onclick="openResetUserPassword('${escapeJs(u.id)}')">إعادة تعيين</button>`
+    : `${editBtn}<button class="btn ghost compact-btn" onclick="openResetUserPassword('${escapeJs(u.id)}')">إعادة تعيين</button><button class="btn ghost compact-btn" onclick="toggleManagedUserPermission('${escapeJs(u.id)}',${managedEnabled ? 'false' : 'true'})">${managedEnabled ? 'إلغاء التحكم' : 'منشئ متحكم'}</button><button class="btn ghost compact-btn" onclick="toggleUserStatus('${escapeJs(u.id)}','${u.status === 'active' ? 'disabled' : 'active'}')">${u.status === 'active' ? 'تعطيل' : 'تفعيل'}</button><button class="btn ghost danger-btn compact-btn" onclick="openDeleteUser('${escapeJs(u.id)}')">حذف</button>`;
   return `<article class="owner-row user-row" data-user-id="${escapeHtml(u.id)}">
     <div class="owner-row-main">
-      <strong class="owner-row-title">${escapeHtml(u.display_name || u.displayName || u.username)}</strong>
-      <span class="owner-row-meta">${escapeHtml(u.username)} · ${roleLabel} · ${statusLabel}${managedEnabled ? ' · منشئ ختمات متحكم' : ''}</span>
+      <strong class="owner-row-title">${displayName}</strong>
+      <span class="owner-row-meta">${username} · ${roleLabel} · ${statusLabel}${managedEnabled ? ' · منشئ ختمات متحكم' : ''}</span>
     </div>
     <div class="owner-row-actions">${actions}</div>
-    ${resetBlock}${deleteBlock}
+    ${editBlock}${resetBlock}${deleteBlock}
   </article>`;
 }
 async function createUserFromOwnerPanel(e){
@@ -741,14 +767,33 @@ async function createUserFromOwnerPanel(e){
     if(submit){ submit.disabled = false; submit.textContent = 'إنشاء المستخدم'; }
   }
 }
+window.openEditUser = function(id){
+  state.activeEditUserId = id;
+  state.activeResetUserId = '';
+  state.activeDeleteUserId = '';
+  renderUsers();
+}
+window.confirmEditUser = async function(id){
+  const displayName = document.getElementById('editDisplayName_' + id)?.value.trim() || '';
+  const username = document.getElementById('editUsername_' + id)?.value.trim() || '';
+  if(!displayName && !username){ toast('اكتب البيانات المطلوب تعديلها'); return; }
+  try{
+    await api('/users/' + encodeURIComponent(id), {method:'PATCH', body:{display_name: displayName, username}});
+    state.activeEditUserId = '';
+    toast('تم تحديث البيانات');
+    await renderUsers();
+  }catch(err){ toast(err.message || 'تعذر التحديث'); }
+}
 window.openResetUserPassword = function(id){
   state.activeResetUserId = id;
   state.activeDeleteUserId = '';
+  state.activeEditUserId = '';
   renderUsers();
 }
 window.cancelUserInlineAction = function(){
   state.activeResetUserId = '';
   state.activeDeleteUserId = '';
+  state.activeEditUserId = '';
   renderUsers();
 }
 window.confirmResetUserPassword = async function(id){
@@ -765,6 +810,7 @@ window.confirmResetUserPassword = async function(id){
 window.openDeleteUser = function(id){
   state.activeDeleteUserId = id;
   state.activeResetUserId = '';
+  state.activeEditUserId = '';
   renderUsers();
 }
 window.confirmDeleteUser = async function(id){
@@ -1578,6 +1624,12 @@ function _occTabSearch(el){
 // ─────────────────────────────────────────────────────────
 
 function setupHome(){
+  if(state.user){
+    // Redirect logged-in users to the dashboard as the primary entry point
+    location.hash = '#/dashboard';
+    return;
+  }
+
   const hero = document.querySelector('.hero.grid-2');
   const heroCopy = document.querySelector('.hero-copy');
   const heroCard = document.querySelector('.hero-card');
@@ -1586,48 +1638,11 @@ function setupHome(){
   // Features section has 2 cards after Zakat removal; force 2-column grid
   if(features) features.style.gridTemplateColumns = 'repeat(2, 1fr)';
 
-  if(!state.user){
-    // Anonymous: centre the hero, hide stats card
-    if(hero){ hero.style.gridTemplateColumns = '1fr'; hero.style.textAlign = 'center'; hero.style.justifyItems = 'center'; }
-    if(heroCopy){ heroCopy.style.maxWidth = '860px'; heroCopy.style.marginInline = 'auto'; }
-    hero?.querySelectorAll('p').forEach(p => { p.style.marginInline = 'auto'; });
-    if(heroCard) heroCard.style.display = 'none';
-    return;
-  }
-
-  // Restore hero layout for logged-in users
-  if(hero){ hero.style.gridTemplateColumns = ''; hero.style.textAlign = ''; hero.style.justifyItems = ''; }
-  if(heroCopy){ heroCopy.style.maxWidth = ''; heroCopy.style.marginInline = ''; }
-  hero?.querySelectorAll('p').forEach(p => { p.style.marginInline = ''; });
-  if(heroCard){ heroCard.style.display = ''; heroCard.classList.remove('hidden'); }
-
-  const isOwner = state.user.role === 'owner';
-
-  if(!isOwner){
-    // Non-owner managed creator: stats from managed khatmas
-    const data = state.managedKhatmas;
-    const total = state.managedKhatmasTotal || data.length;
-    const completed = data.filter(k => managedProgress(k).pct === 100).length;
-    const open = data.filter(k => managedKhatmaStatus(k).key === 'active').length;
-    const avg = data.length ? Math.round(data.reduce((s,k)=>s+managedProgress(k).pct,0)/data.length) : 0;
-    document.getElementById('statKhatmas').textContent = total;
-    document.getElementById('statDone').textContent = completed;
-    document.getElementById('statOpen').textContent = open;
-    document.getElementById('homeProgress').textContent = avg + '%';
-    document.querySelector('.progress-ring')?.style.setProperty('--pct', avg + '%');
-    return;
-  }
-
-  // Owner: stats from regular khatmas
-  const total = state.khatmas.length;
-  const completed = state.khatmas.filter(k => progress(k).pct === 100).length;
-  const open = state.khatmas.filter(k => khatmaStatus(k).key === 'active').length;
-  const avg = total ? Math.round(state.khatmas.reduce((s,k)=>s+progress(k).pct,0)/total) : 0;
-  document.getElementById('statKhatmas').textContent = total;
-  document.getElementById('statDone').textContent = completed;
-  document.getElementById('statOpen').textContent = open;
-  document.getElementById('homeProgress').textContent = avg + '%';
-  document.querySelector('.progress-ring')?.style.setProperty('--pct', avg + '%');
+  // Anonymous: centre the hero, hide stats card
+  if(hero){ hero.style.gridTemplateColumns = '1fr'; hero.style.textAlign = 'center'; hero.style.justifyItems = 'center'; }
+  if(heroCopy){ heroCopy.style.maxWidth = '860px'; heroCopy.style.marginInline = 'auto'; }
+  hero?.querySelectorAll('p').forEach(p => { p.style.marginInline = 'auto'; });
+  if(heroCard) heroCard.style.display = 'none';
 }
 function renderCustomUnitsPicker(section, division){
   const metaMap = {juz:{total:30,label:'الجزء'}, hizb:{total:60,label:'الحزب'}, quarter:{total:240,label:'الربع'}};
@@ -5226,6 +5241,46 @@ function showDeleteConfirmModal({ title, message }) {
   });
 }
 function escapeJs(value){ return String(value || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'"); }
+
+window.openChangePasswordModal = function(){
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" dir="rtl">
+    <div class="sheet-head"><h3>تغيير كلمة المرور</h3><span>تأمين حسابك</span></div>
+    <label style="display:block;margin-bottom:10px">كلمة المرور الحالية<input id="cpCurrentPw" type="password" autocomplete="current-password" placeholder="كلمة المرور الحالية" style="display:block;width:100%;margin-top:4px" /></label>
+    <label style="display:block;margin-bottom:10px">كلمة المرور الجديدة<input id="cpNewPw" type="password" autocomplete="new-password" placeholder="كلمة المرور الجديدة" style="display:block;width:100%;margin-top:4px" /></label>
+    <label style="display:block;margin-bottom:14px">تأكيد كلمة المرور الجديدة<input id="cpConfirmPw" type="password" autocomplete="new-password" placeholder="أعد كتابة كلمة المرور الجديدة" style="display:block;width:100%;margin-top:4px" /></label>
+    <div id="cpError" style="display:none;color:var(--danger);font-size:13px;margin-bottom:10px;font-weight:700"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="cpCancel" type="button">إلغاء</button>
+      <button class="btn primary" id="cpSubmit" type="button">تغيير كلمة المرور</button>
+    </div>
+  </div>`;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  const showErr = msg => { const el = backdrop.querySelector('#cpError'); el.textContent = msg; el.style.display = 'block'; };
+  backdrop.querySelector('#cpCancel').addEventListener('click', close);
+  backdrop.addEventListener('click', e => { if(e.target === backdrop) close(); });
+  const submit = backdrop.querySelector('#cpSubmit');
+  submit.addEventListener('click', async () => {
+    const currentPassword = backdrop.querySelector('#cpCurrentPw').value;
+    const newPassword = backdrop.querySelector('#cpNewPw').value.trim();
+    const confirmPassword = backdrop.querySelector('#cpConfirmPw').value.trim();
+    if(!currentPassword || !newPassword || !confirmPassword){ showErr('جميع الحقول مطلوبة'); return; }
+    if(newPassword !== confirmPassword){ showErr('كلمة المرور الجديدة وتأكيدها غير متطابقتين'); return; }
+    if(newPassword.length < 4){ showErr('كلمة المرور الجديدة قصيرة جدًا (4 أحرف على الأقل)'); return; }
+    submit.disabled = true; submit.textContent = 'جاري الحفظ...';
+    try{
+      await api('/auth/change-password', {method:'POST', body:{currentPassword, newPassword, confirmPassword}});
+      close();
+      toast('تم تغيير كلمة المرور بنجاح');
+    }catch(err){
+      showErr(err.message || 'تعذر تغيير كلمة المرور');
+      submit.disabled = false; submit.textContent = 'تغيير كلمة المرور';
+    }
+  });
+  setTimeout(() => backdrop.querySelector('#cpCurrentPw').focus(), 30);
+};
 
 // PWA — register service worker (static shell only, no API caching)
 if ('serviceWorker' in navigator) {
