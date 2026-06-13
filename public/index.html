@@ -633,6 +633,17 @@ input,select,textarea{border-color:var(--premium-border);background:rgba(255,255
   line-height:1.2!important;
   box-shadow:0 8px 18px rgba(15,95,69,.06)!important;
 }
+/* ── Owner Premium Layout ── */
+.owner-stats-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+.owner-stat-card{border:1px solid var(--premium-border,var(--line));border-radius:20px;padding:16px 14px;background:var(--premium-wash,var(--card));text-align:center;box-shadow:var(--shadow-soft)}
+.owner-stat-num{display:block;font-size:28px;font-weight:900;color:var(--primary);line-height:1.2}
+.owner-stat-label{display:block;font-size:12px;font-weight:800;color:var(--muted);margin-top:4px}
+.owner-tab-bar{display:flex;gap:6px;margin-bottom:18px;border-bottom:1px solid var(--line);padding-bottom:0}
+.owner-tab-btn{padding:10px 18px;border:none;background:none;font:inherit;font-weight:800;font-size:14px;color:var(--muted);cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-1px;border-radius:0;transition:.15s}
+.owner-tab-btn.active{color:var(--primary);border-bottom-color:var(--primary)}
+.owner-tab-pane{animation:fadeIn .18s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.owner-role-filter.active{background:var(--primary-soft)!important;color:var(--primary)!important;border-color:var(--primary)!important}
 .owner-toolbar{
   margin-top:16px;
   border-radius:24px;
@@ -695,7 +706,12 @@ input,select,textarea{border-color:var(--premium-border);background:rgba(255,255
   .khatma-share-actions{display:grid!important;grid-template-columns:1fr 1fr!important}
   .khatma-share-actions .btn{width:100%!important}
 }
+@media(max-width:600px){
+  .owner-stats-bar{grid-template-columns:repeat(2,1fr)}
+  .owner-tab-btn{padding:8px 12px;font-size:13px}
+}
 @media(max-width:480px){
+  .owner-stats-bar{grid-template-columns:repeat(2,1fr)}
   .owner-row-actions,.khatma-admin-actions,.khatma-share-actions{grid-template-columns:1fr!important}
 }
 
@@ -1010,25 +1026,12 @@ body.nav-open .topbar .menu-toggle span:nth-child(1){transform:none!important;wi
 
   <template id="ownerTemplate">
     <section class="page-head">
-      <span class="eyebrow">الإدارة</span>
-      <h1>إدارة المستخدمين</h1>
-      <p>هذه الصفحة تظهر للمالك فقط بعد تسجيل الدخول.</p>
+      <span class="eyebrow">لوحة المالك</span>
+      <h1>إدارة المستخدمين والصلاحيات</h1>
+      <p>نظرة كاملة على المستخدمين والمجموعات وبيانات النظام.</p>
     </section>
-    <section id="ownerView">
-      <form id="createUserForm" class="form-card glass">
-        <h3>إضافة مستخدم جديد</h3>
-        <div class="form-grid">
-          <label>اسم المستخدم<input name="username" required placeholder="ادخل اسم مستخدم جديد" /></label>
-          <label>الاسم الظاهر<input name="displayName" required placeholder="اسم الشخص" /></label>
-          <label>كلمة المرور المؤقتة<input name="password" required placeholder="كلمة مرور مؤقتة" /></label>
-          <label>الصلاحية<select name="role"><option value="creator">منشئ ختمة</option><option value="owner">مالك</option></select></label>
-        </div>
-        <button class="btn primary wide" type="submit">إنشاء المستخدم</button>
-      </form>
-<div id="usersList" class="cards-grid" style="margin-top:22px"></div>
-<div id="creatorGroupsSection" style="margin-top:22px"></div>
-</section>
-</template>
+    <section id="ownerView"></section>
+  </template>
 
 <template id="ownerControlTemplate">
   <section class="page-head">

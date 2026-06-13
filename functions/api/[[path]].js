@@ -300,33 +300,35 @@ async function listUsers(request, DB) {
   const limit = Math.min(25, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 25));
   const offset = (page - 1) * limit;
   const q = (url.searchParams.get("q") || "").trim();
+  const roleFilter = (url.searchParams.get("role") || "").trim();
   const likeQ = q ? `%${q}%` : null;
-  const whereClause = likeQ
-    ? "WHERE users.status != 'deleted' AND (users.username LIKE ? OR users.display_name LIKE ?)"
-    : "WHERE users.status != 'deleted'";
-  const countRow = likeQ
-    ? await DB.prepare(`SELECT COUNT(*) AS total FROM users ${whereClause}`).bind(likeQ, likeQ).first()
-    : await DB.prepare(`SELECT COUNT(*) AS total FROM users ${whereClause}`).first();
+
+  let conditions = ["users.status != 'deleted'"];
+  const bindParams = [];
+  if (likeQ) {
+    conditions.push("(users.username LIKE ? OR users.display_name LIKE ?)");
+    bindParams.push(likeQ, likeQ);
+  }
+  if (roleFilter === "owner") { conditions.push("users.role = 'owner'"); }
+  else if (roleFilter === "creator") { conditions.push("users.role = 'creator'"); }
+  else if (roleFilter === "managed") { conditions.push("users.role = 'creator' AND managed_khatma_permissions.status = 'active'"); }
+
+  const whereClause = "WHERE " + conditions.join(" AND ");
+
+  const countBase = `SELECT COUNT(*) AS total FROM users LEFT JOIN managed_khatma_permissions ON managed_khatma_permissions.user_id = users.id ${whereClause}`;
+  const countRow = await DB.prepare(countBase).bind(...bindParams).first();
   const total = countRow?.total || 0;
-  const baseQuery = `
+  const rows = await DB.prepare(`
     SELECT
-      users.id,
-      users.username,
-      users.display_name,
-      users.role,
-      users.status,
-      users.created_at,
-      users.updated_at,
+      users.id, users.username, users.display_name, users.role, users.status,
+      users.created_at, users.updated_at,
       CASE WHEN managed_khatma_permissions.status = 'active' THEN 1 ELSE 0 END AS managedKhatmaCreator
     FROM users
     LEFT JOIN managed_khatma_permissions ON managed_khatma_permissions.user_id = users.id
     ${whereClause}
     ORDER BY users.created_at DESC
     LIMIT ? OFFSET ?
-  `;
-  const rows = likeQ
-    ? await DB.prepare(baseQuery).bind(likeQ, likeQ, limit, offset).all()
-    : await DB.prepare(baseQuery).bind(limit, offset).all();
+  `).bind(...bindParams, limit, offset).all();
   return json({ ok: true, users: rows.results || [], total, page, limit, pages: Math.ceil(total / limit) || 1 });
 }
 
@@ -426,7 +428,7 @@ async function deleteUser(request, DB, id) {
   const target = await DB.prepare("SELECT id, role, username FROM users WHERE id = ? LIMIT 1").bind(id).first();
   if (!target) return json({ ok: false, error: "المستخدم غير موجود" }, 404);
   if (target.role === "owner") return json({ ok: false, error: "لا يمكن حذف حساب المالك" }, 400);
-  await ensureManagedSchema(DB);
+  await ensureCreatorGroupSchema(DB);
   await DB.batch([
     DB.prepare("DELETE FROM user_sessions WHERE user_id = ?").bind(id),
     DB.prepare("DELETE FROM managed_creator_group_members WHERE user_id = ?").bind(id),
@@ -675,7 +677,7 @@ async function listCreatorGroups(request, DB) {
     const members = (await DB.prepare(`
       SELECT mcgm.user_id, u.display_name, u.username
       FROM managed_creator_group_members mcgm
-      LEFT JOIN users u ON u.id = mcgm.user_id
+      JOIN users u ON u.id = mcgm.user_id AND u.status != 'deleted'
       WHERE mcgm.group_id = ?`).bind(g.id).all()).results || [];
     result.push({ ...g, members });
   }

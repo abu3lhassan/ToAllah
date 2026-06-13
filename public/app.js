@@ -467,139 +467,216 @@ async function setupOwner(){
   if(!state.user){ root.innerHTML = `<article class="feature-card"><h3>تسجيل الدخول مطلوب</h3><p>سجل الدخول بحساب المالك لإدارة المستخدمين.</p><a class="btn primary" href="#/login">تسجيل الدخول</a></article>`; return; }
   if(state.user.role !== 'owner'){ root.innerHTML = `<article class="feature-card"><h3>غير مصرح</h3><p>هذه الصفحة تظهر للمالك فقط.</p></article>`; return; }
 
-  const createUserForm = document.getElementById('createUserForm');
-  if(createUserForm){
-    createUserForm.classList.add('collapsible-owner-form');
-    createUserForm.hidden = !state.ownerCreateUserOpen;
-    createUserForm.insertAdjacentHTML('beforebegin', `<div class="owner-toolbar glass"><div><h3>المستخدمون</h3><p>إدارة الحسابات المصرحة بإنشاء الختمات.</p></div><button class="btn primary compact-btn" id="toggleCreateUser" type="button">${state.ownerCreateUserOpen ? 'إخفاء النموذج' : '+ إضافة مستخدم'}</button></div>`);
-    document.getElementById('toggleCreateUser')?.addEventListener('click', ()=>{ state.ownerCreateUserOpen = !state.ownerCreateUserOpen; router(); });
-    createUserForm.addEventListener('submit', createUserFromOwnerPanel);
-  }
+  // ── Premium layout scaffold ──
+  root.innerHTML = `
+    <div class="owner-stats-bar">
+      <div class="owner-stat-card"><span class="owner-stat-num" id="oStat-users">…</span><span class="owner-stat-label">المستخدمون</span></div>
+      <div class="owner-stat-card"><span class="owner-stat-num" id="oStat-managed">…</span><span class="owner-stat-label">منشئو ختمات</span></div>
+      <div class="owner-stat-card"><span class="owner-stat-num" id="oStat-groups">…</span><span class="owner-stat-label">المجموعات</span></div>
+      <div class="owner-stat-card"><span class="owner-stat-num" id="oStat-khatmas">…</span><span class="owner-stat-label">الختمات المدارة</span></div>
+    </div>
 
+    <div class="owner-tab-bar">
+      <button class="owner-tab-btn active" data-tab="users"  onclick="window.switchOwnerTab('users')">المستخدمون</button>
+      <button class="owner-tab-btn"        data-tab="groups" onclick="window.switchOwnerTab('groups')">المجموعات</button>
+      <button class="owner-tab-btn"        data-tab="system" onclick="window.switchOwnerTab('system')">النظام</button>
+    </div>
 
-  await Promise.all([renderUsers(), renderCreatorGroups()]);
+    <!-- Tab: Users -->
+    <div id="ownerTab-users" class="owner-tab-pane">
+      <div class="admin-panel premium-admin-panel">
+        <div class="sheet-head">
+          <div>
+            <h3 style="margin:0 0 3px">المستخدمون</h3>
+            <p style="margin:0;color:var(--muted);font-size:13px;font-weight:800">إدارة الحسابات والصلاحيات</p>
+          </div>
+          <button class="btn primary compact-btn" id="toggleCreateUser" type="button">+ إضافة مستخدم</button>
+        </div>
 
-  // Backup & Restore section
-  const ownerRoot = document.getElementById('ownerView');
-  if(ownerRoot){
-    const backupHtml = `<div class="admin-panel premium-admin-panel" style="margin-top:28px">
-      <div class="sheet-head"><h3>النسخ الاحتياطي والاستعادة</h3><span>بيانات النظام كاملاً</span></div>
-      <p>تصدير جميع بيانات النظام (ختمات، قراء، مجموعات، مستخدمين، صلاحيات، قوالب) إلى ملف JSON يمكن استعادته لاحقاً.</p>
-      <div class="compact-actions">
-        <button class="btn primary compact-btn" id="downloadBackupBtn">⬇ تحميل نسخة احتياطية JSON</button>
-        <button class="btn ghost compact-btn" id="downloadCsvBackupBtn">تصدير CSV شامل</button>
-        <button class="btn ghost compact-btn danger-btn" id="restoreBackupBtn">↺ استعادة من نسخة احتياطية</button>
+        <form id="createUserForm" class="form-card glass" style="margin-top:14px" hidden>
+          <h3 style="margin:0 0 12px;font-size:17px">مستخدم جديد</h3>
+          <div class="form-grid">
+            <label>اسم المستخدم<input name="username" required placeholder="اسم مستخدم جديد" /></label>
+            <label>الاسم الظاهر<input name="displayName" required placeholder="الاسم الكامل" /></label>
+            <label>كلمة المرور المؤقتة<input name="password" required placeholder="كلمة مرور مؤقتة" /></label>
+            <label>الصلاحية
+              <select name="role">
+                <option value="creator">منشئ</option>
+                <option value="owner">مالك</option>
+              </select>
+            </label>
+          </div>
+          <div style="display:flex;gap:10px;margin-top:14px">
+            <button class="btn primary" type="submit" style="flex:1">إنشاء المستخدم</button>
+            <button class="btn ghost" type="button" id="cancelCreateUser">إلغاء</button>
+          </div>
+        </form>
+
+        <div style="margin-top:14px">
+          <input id="ownerUsersSearch" type="search" placeholder="بحث باسم المستخدم أو الاسم الظاهر..." style="width:100%;height:40px;border-radius:14px;padding:0 14px;font-size:14px;border:1px solid var(--line);background:var(--bg);color:var(--text);box-sizing:border-box" />
+        </div>
+        <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;align-items:center">
+          <span style="font-size:13px;font-weight:800;color:var(--muted)">فلترة:</span>
+          <button class="btn ghost compact-btn owner-role-filter active" data-role="">الكل</button>
+          <button class="btn ghost compact-btn owner-role-filter" data-role="owner">المالك</button>
+          <button class="btn ghost compact-btn owner-role-filter" data-role="managed">منشئ متحكم</button>
+          <button class="btn ghost compact-btn owner-role-filter" data-role="creator">منشئ عادي</button>
+        </div>
       </div>
-      <input type="file" id="restoreFileInput" accept=".json" style="display:none" />
-      <div id="restoreStatusMsg" style="display:none;margin-top:10px;padding:10px 14px;border-radius:14px;font-weight:800;font-size:14px"></div>
-    </div>`;
-    ownerRoot.insertAdjacentHTML('beforeend', backupHtml);
-    document.getElementById('downloadBackupBtn')?.addEventListener('click', async () => {
-      try{
-        const res = await api('/system-backup');
-        const ts = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-        const fullBackup = { version: res.version, exportedAt: res.exportedAt, summary: res.summary, data: res.data };
-        downloadTextFile(`khatmat-backup-${ts}.json`, JSON.stringify(fullBackup, null, 2), 'application/json');
-        const s = res.summary || {};
-        toast(`تم التصدير · ${s.users||0} مستخدم · ${s.managedKhatmas||0} ختمة مُدارة · ${s.readers||0} قارئ`);
-      }catch(err){ toast(err.message||'تعذر التصدير'); }
+
+      <div id="usersList" class="cards-grid" style="margin-top:12px"></div>
+    </div>
+
+    <!-- Tab: Groups -->
+    <div id="ownerTab-groups" class="owner-tab-pane" hidden>
+      <div id="creatorGroupsSection"></div>
+    </div>
+
+    <!-- Tab: System -->
+    <div id="ownerTab-system" class="owner-tab-pane" hidden>
+      <div id="ownerSystemSection"></div>
+    </div>
+  `;
+
+  // Load stats asynchronously
+  loadOwnerStats();
+
+  // Tab switching
+  window.switchOwnerTab = function(tab){
+    state.ownerTab = tab;
+    document.querySelectorAll('.owner-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.querySelectorAll('.owner-tab-pane').forEach(p => { p.hidden = (p.id !== 'ownerTab-' + tab); });
+    if(tab === 'groups'){
+      const el = document.getElementById('creatorGroupsSection');
+      if(el && !el.children.length) renderCreatorGroups();
+    }
+    if(tab === 'system'){
+      const el = document.getElementById('ownerSystemSection');
+      if(el && !el.children.length) renderOwnerSystemSection(el);
+    }
+  };
+
+  // Toggle create-user form
+  document.getElementById('toggleCreateUser')?.addEventListener('click', ()=>{
+    const form = document.getElementById('createUserForm');
+    const btn  = document.getElementById('toggleCreateUser');
+    form.hidden = !form.hidden;
+    btn.textContent = form.hidden ? '+ إضافة مستخدم' : '× إلغاء';
+  });
+  document.getElementById('cancelCreateUser')?.addEventListener('click', ()=>{
+    const form = document.getElementById('createUserForm');
+    const btn  = document.getElementById('toggleCreateUser');
+    form.hidden = true;
+    btn.textContent = '+ إضافة مستخدم';
+  });
+  document.getElementById('createUserForm')?.addEventListener('submit', createUserFromOwnerPanel);
+
+  // Role filter buttons
+  document.querySelectorAll('.owner-role-filter').forEach(btn => {
+    btn.addEventListener('click', ()=>{
+      document.querySelectorAll('.owner-role-filter').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.usersRoleFilter = btn.dataset.role;
+      state.usersSearch = '';
+      renderUsers(1);
     });
-    document.getElementById('downloadCsvBackupBtn')?.addEventListener('click', async () => {
-      try{
-        const res = await api('/system-backup');
-        const d = res.data;
-        const ts = new Date().toISOString().slice(0,10);
-        const files = [
-          [`users-${ts}.csv`, rowsToCsv(d.users||[])],
-          [`khatmas-${ts}.csv`, rowsToCsv((d.khatmas||[]).map(k=>({id:k.id,title:k.title,status:k.status,created_at:k.created_at})))],
-          [`managed-khatmas-${ts}.csv`, rowsToCsv((d.managedKhatmas||[]).map(k=>({id:k.id,title:k.title,khatma_type:k.khatma_type,archived_at:k.archived_at||'',status:k.status,created_at:k.created_at})))],
-          [`readers-${ts}.csv`, rowsToCsv(d.readers||[])],
-          [`reader-groups-${ts}.csv`, rowsToCsv(d.readerGroups||[])],
-          [`creator-groups-${ts}.csv`, rowsToCsv(d.creatorGroups||[])],
-          [`permissions-${ts}.csv`, rowsToCsv(d.permissions||[])],
-          [`templates-${ts}.csv`, rowsToCsv((d.khatmaTemplates||[]).map(t=>({id:t.id,name:t.name,created_at:t.created_at})))],
-        ];
-        for(const [name, csv] of files){ downloadTextFile(name, csv, 'text/csv;charset=utf-8'); await new Promise(r=>setTimeout(r,200)); }
-        toast('تم تصدير ' + files.length + ' ملفات CSV');
-      }catch(err){ toast(err.message||'تعذر التصدير'); }
-    });
+  });
 
-    // Restore
-    const restoreBtn = document.getElementById('restoreBackupBtn');
-    const restoreInput = document.getElementById('restoreFileInput');
-    const restoreStatus = document.getElementById('restoreStatusMsg');
-    const showRestoreStatus = (msg, ok=true) => {
-      restoreStatus.textContent = msg;
-      restoreStatus.style.display = 'block';
-      restoreStatus.style.background = ok ? 'rgba(15,95,69,.12)' : 'rgba(157,63,63,.12)';
-      restoreStatus.style.color = ok ? 'var(--primary)' : 'var(--danger)';
-      restoreStatus.style.border = ok ? '1px solid rgba(15,95,69,.22)' : '1px solid rgba(157,63,63,.22)';
-    };
+  // Restore tab from state
+  if(state.ownerTab && state.ownerTab !== 'users') window.switchOwnerTab(state.ownerTab);
 
-    restoreBtn?.addEventListener('click', () => restoreInput?.click());
+  await renderUsers();
+}
 
-    restoreInput?.addEventListener('change', async () => {
-      const file = restoreInput.files?.[0];
-      if(!file){ return; }
-      restoreInput.value = '';
+async function loadOwnerStats(){
+  try{
+    const res = await api('/owner/overview');
+    const s = res.stats || {};
+    const set = (id, val) => { const el = document.getElementById(id); if(el) el.textContent = val; };
+    set('oStat-users',   s.users   ?? '—');
+    set('oStat-managed', s.creators ?? '—');
+    set('oStat-groups',  s.groups  ?? '—');
+    set('oStat-khatmas', s.activeKhatmas ?? '—');
+  }catch{ /* stats are cosmetic, ignore failures */ }
+}
 
-      // Read file
-      let parsed;
-      try{
-        const text = await file.text();
-        parsed = JSON.parse(text);
-      }catch(err){
-        showRestoreStatus('تعذر قراءة الملف. تأكد أنه ملف JSON صالح.', false);
-        return;
-      }
+function renderOwnerSystemSection(container){
+  const el = container || document.getElementById('ownerSystemSection');
+  if(!el) return;
+  el.innerHTML = `<div class="admin-panel premium-admin-panel">
+    <div class="sheet-head"><h3>النسخ الاحتياطي والاستعادة</h3><span>بيانات النظام كاملاً</span></div>
+    <p>تصدير جميع بيانات النظام (ختمات، قراء، مجموعات، مستخدمين، صلاحيات، قوالب) إلى ملف JSON يمكن استعادته لاحقاً.</p>
+    <div class="compact-actions">
+      <button class="btn primary compact-btn" id="downloadBackupBtn">⬇ تحميل نسخة احتياطية JSON</button>
+      <button class="btn ghost compact-btn" id="downloadCsvBackupBtn">تصدير CSV شامل</button>
+      <button class="btn ghost compact-btn danger-btn" id="restoreBackupBtn">↺ استعادة من نسخة احتياطية</button>
+    </div>
+    <input type="file" id="restoreFileInput" accept=".json" style="display:none" />
+    <div id="restoreStatusMsg" style="display:none;margin-top:10px;padding:10px 14px;border-radius:14px;font-weight:800;font-size:14px"></div>
+  </div>`;
 
-      // Frontend validation
-      if(parsed.version !== 'v5'){
-        showRestoreStatus(`الملف غير متوافق (الإصدار: ${parsed.version || 'غير معروف'}). يجب أن يكون v5.`, false);
-        return;
-      }
-      if(!parsed.data || !Array.isArray(parsed.data.users)){
-        showRestoreStatus('الملف لا يحتوي على بيانات صالحة.', false);
-        return;
-      }
+  document.getElementById('downloadBackupBtn')?.addEventListener('click', async () => {
+    try{
+      const res = await api('/system-backup');
+      const ts = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+      downloadTextFile(`khatmat-backup-${ts}.json`, JSON.stringify({ version: res.version, exportedAt: res.exportedAt, summary: res.summary, data: res.data }, null, 2), 'application/json');
+      const s = res.summary || {};
+      toast(`تم التصدير · ${s.users||0} مستخدم · ${s.managedKhatmas||0} ختمة مُدارة · ${s.readers||0} قارئ`);
+    }catch(err){ toast(err.message||'تعذر التصدير'); }
+  });
 
-      const d = parsed.data;
-      const exportedAt = parsed.exportedAt ? new Date(parsed.exportedAt).toLocaleString('ar-SA') : 'تاريخ غير معروف';
-      const summary = [
-        `${(d.users||[]).length} مستخدم`,
-        `${(d.khatmas||[]).length} ختمة عادية`,
-        `${(d.managedKhatmas||[]).length} ختمة مُدارة`,
-        `${(d.readers||[]).length} قارئ`,
-        `${(d.readerGroups||[]).length} مجموعة`,
-        `${(d.permissions||[]).length} صلاحية`,
-        `${(d.khatmaTemplates||[]).length} قالب`,
-      ].join(' · ');
+  document.getElementById('downloadCsvBackupBtn')?.addEventListener('click', async () => {
+    try{
+      const res = await api('/system-backup');
+      const d = res.data; const ts = new Date().toISOString().slice(0,10);
+      const files = [
+        [`users-${ts}.csv`, rowsToCsv(d.users||[])],
+        [`khatmas-${ts}.csv`, rowsToCsv((d.khatmas||[]).map(k=>({id:k.id,title:k.title,status:k.status,created_at:k.created_at})))],
+        [`managed-khatmas-${ts}.csv`, rowsToCsv((d.managedKhatmas||[]).map(k=>({id:k.id,title:k.title,khatma_type:k.khatma_type,archived_at:k.archived_at||'',status:k.status,created_at:k.created_at})))],
+        [`readers-${ts}.csv`, rowsToCsv(d.readers||[])],
+        [`reader-groups-${ts}.csv`, rowsToCsv(d.readerGroups||[])],
+        [`creator-groups-${ts}.csv`, rowsToCsv(d.creatorGroups||[])],
+        [`permissions-${ts}.csv`, rowsToCsv(d.permissions||[])],
+        [`templates-${ts}.csv`, rowsToCsv((d.khatmaTemplates||[]).map(t=>({id:t.id,name:t.name,created_at:t.created_at})))],
+      ];
+      for(const [name, csv] of files){ downloadTextFile(name, csv, 'text/csv;charset=utf-8'); await new Promise(r=>setTimeout(r,200)); }
+      toast('تم تصدير ' + files.length + ' ملفات CSV');
+    }catch(err){ toast(err.message||'تعذر التصدير'); }
+  });
 
-      const confirmed = await showConfirmModal({
-        title: 'استعادة النظام من نسخة احتياطية',
-        message: `النسخة المؤرخة: ${exportedAt}\n\nسيُستعاد:\n${summary}\n\n⚠ تحذير: سيُحذف جميع البيانات الحالية ويُستبدل بمحتوى هذا الملف. هذا الإجراء لا يمكن التراجع عنه.`,
-        confirmText: 'استعادة الآن',
-        danger: true
-      });
-      if(!confirmed) return;
-
-      showRestoreStatus('جاري الاستعادة... لا تغلق الصفحة.', true);
-      restoreBtn.disabled = true;
-      try{
-        const res = await api('/system-restore', { method:'POST', body: parsed });
-        const r = res.restored || {};
-        showRestoreStatus(
-          `✓ تمت الاستعادة بنجاح · ${r.users||0} مستخدم · ${r.managedKhatmas||0} ختمة مُدارة · ${r.readers||0} قارئ · ${r.readerGroups||0} مجموعة`,
-          true
-        );
-        toast('تمت الاستعادة — سيتم تحديث الصفحة');
-        setTimeout(() => location.reload(), 2000);
-      }catch(err){
-        showRestoreStatus('فشلت الاستعادة: ' + (err.message || 'خطأ غير معروف'), false);
-        restoreBtn.disabled = false;
-      }
-    });
-  }
+  const restoreBtn   = document.getElementById('restoreBackupBtn');
+  const restoreInput = document.getElementById('restoreFileInput');
+  const restoreStatus = document.getElementById('restoreStatusMsg');
+  const showRestoreStatus = (msg, ok=true) => {
+    restoreStatus.textContent = msg; restoreStatus.style.display = 'block';
+    restoreStatus.style.background = ok ? 'rgba(15,95,69,.12)' : 'rgba(157,63,63,.12)';
+    restoreStatus.style.color  = ok ? 'var(--primary)' : 'var(--danger)';
+    restoreStatus.style.border = ok ? '1px solid rgba(15,95,69,.22)' : '1px solid rgba(157,63,63,.22)';
+  };
+  restoreBtn?.addEventListener('click', () => restoreInput?.click());
+  restoreInput?.addEventListener('change', async () => {
+    const file = restoreInput.files?.[0]; if(!file) return;
+    restoreInput.value = '';
+    let parsed;
+    try{ parsed = JSON.parse(await file.text()); }
+    catch{ showRestoreStatus('تعذر قراءة الملف. تأكد أنه ملف JSON صالح.', false); return; }
+    if(parsed.version !== 'v5'){ showRestoreStatus(`الملف غير متوافق (الإصدار: ${parsed.version || 'غير معروف'}). يجب أن يكون v5.`, false); return; }
+    if(!parsed.data || !Array.isArray(parsed.data.users)){ showRestoreStatus('الملف لا يحتوي على بيانات صالحة.', false); return; }
+    const d = parsed.data;
+    const exportedAt = parsed.exportedAt ? new Date(parsed.exportedAt).toLocaleString('ar-SA') : 'تاريخ غير معروف';
+    const summary = [`${(d.users||[]).length} مستخدم`,`${(d.khatmas||[]).length} ختمة عادية`,`${(d.managedKhatmas||[]).length} ختمة مُدارة`,`${(d.readers||[]).length} قارئ`,`${(d.readerGroups||[]).length} مجموعة`,`${(d.permissions||[]).length} صلاحية`,`${(d.khatmaTemplates||[]).length} قالب`].join(' · ');
+    const confirmed = await showConfirmModal({ title: 'استعادة النظام من نسخة احتياطية', message: `النسخة المؤرخة: ${exportedAt}\n\nسيُستعاد:\n${summary}\n\n⚠ تحذير: سيُحذف جميع البيانات الحالية. هذا الإجراء لا يمكن التراجع عنه.`, confirmText: 'استعادة الآن', danger: true });
+    if(!confirmed) return;
+    showRestoreStatus('جاري الاستعادة... لا تغلق الصفحة.', true);
+    restoreBtn.disabled = true;
+    try{
+      const res = await api('/system-restore', { method:'POST', body: parsed });
+      const r = res.restored || {};
+      showRestoreStatus(`✓ تمت الاستعادة بنجاح · ${r.users||0} مستخدم · ${r.managedKhatmas||0} ختمة مُدارة · ${r.readers||0} قارئ · ${r.readerGroups||0} مجموعة`, true);
+      toast('تمت الاستعادة — سيتم تحديث الصفحة');
+      setTimeout(() => location.reload(), 2000);
+    }catch(err){ showRestoreStatus('فشلت الاستعادة: ' + (err.message || 'خطأ غير معروف'), false); restoreBtn.disabled = false; }
+  });
 }
 
 async function renderCreatorGroups(){
@@ -632,7 +709,7 @@ async function renderCreatorGroups(){
               <button class="btn ghost compact-btn" onclick="window.addCreatorMember('${escapeJs(g.id)}')">إضافة</button>
               <button class="btn ghost danger-btn compact-btn" onclick="window.deleteCreatorGroup('${escapeJs(g.id)}')">حذف</button>
             </div>
-            ${(g.members||[]).length ? `<div style="width:100%;display:flex;flex-wrap:wrap;gap:6px;padding:8px 0 0">${(g.members||[]).map(m=>`<span class="badge" style="font-size:12px">${escapeHtml(m.display_name||m.username)} <button onclick="window.removeCreatorMember('${escapeJs(g.id)}','${escapeJs(m.userId)}')" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:14px;padding:0 2px;line-height:1">×</button></span>`).join('')}</div>` : ''}
+            ${(g.members||[]).length ? `<div style="width:100%;display:flex;flex-wrap:wrap;gap:6px;padding:8px 0 0">${(g.members||[]).map(m=>`<span class="badge" style="font-size:12px">${escapeHtml(m.display_name||m.username)} <button onclick="window.removeCreatorMember('${escapeJs(g.id)}','${escapeJs(m.user_id)}')" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:14px;padding:0 2px;line-height:1">×</button></span>`).join('')}</div>` : ''}
           </div>`).join('') || '<p style="color:var(--muted);padding:8px 0">لا توجد مجموعات بعد.</p>'}
         </div>
       </div>`;
@@ -670,25 +747,39 @@ async function renderUsers(page){
   const list = document.getElementById('usersList');
   if(!list) return;
 
-  // Search bar — inject once above the list
-  let searchRow = document.getElementById('usersSearchRow');
-  if(!searchRow){
-    searchRow = document.createElement('div');
-    searchRow.id = 'usersSearchRow';
-    searchRow.style.cssText = 'display:flex;gap:8px;margin-bottom:12px';
-    searchRow.innerHTML = `<input id="usersSearchInput" type="search" placeholder="بحث باسم المستخدم أو الاسم الظاهر..." style="flex:1;height:38px;border-radius:14px;padding:0 14px;font-size:14px;border:1px solid var(--line);background:var(--bg);color:var(--text)" value="${escapeHtml(state.usersSearch||'')}" />`;
-    list.before(searchRow);
-    searchRow.querySelector('#usersSearchInput').addEventListener('input', e => {
-      state.usersSearch = e.target.value;
-      clearTimeout(state._usersSearchTimer);
-      state._usersSearchTimer = setTimeout(() => renderUsers(1), 300);
-    });
+  // Bind search input (premium panel has #ownerUsersSearch, fallback injects one)
+  const premiumSearch = document.getElementById('ownerUsersSearch');
+  if(premiumSearch){
+    if(premiumSearch.dataset.bound !== '1'){
+      premiumSearch.dataset.bound = '1';
+      premiumSearch.value = state.usersSearch || '';
+      premiumSearch.addEventListener('input', e => {
+        state.usersSearch = e.target.value;
+        clearTimeout(state._usersSearchTimer);
+        state._usersSearchTimer = setTimeout(() => renderUsers(1), 300);
+      });
+    }
+  } else {
+    let searchRow = document.getElementById('usersSearchRow');
+    if(!searchRow){
+      searchRow = document.createElement('div');
+      searchRow.id = 'usersSearchRow';
+      searchRow.style.cssText = 'display:flex;gap:8px;margin-bottom:12px';
+      searchRow.innerHTML = `<input id="usersSearchInput" type="search" placeholder="بحث باسم المستخدم أو الاسم الظاهر..." style="flex:1;height:38px;border-radius:14px;padding:0 14px;font-size:14px;border:1px solid var(--line);background:var(--bg);color:var(--text)" value="${escapeHtml(state.usersSearch||'')}" />`;
+      list.before(searchRow);
+      searchRow.querySelector('#usersSearchInput').addEventListener('input', e => {
+        state.usersSearch = e.target.value;
+        clearTimeout(state._usersSearchTimer);
+        state._usersSearchTimer = setTimeout(() => renderUsers(1), 300);
+      });
+    }
   }
 
   try{
     const requestedPage = Math.max(1, Number(page || state.usersPage || 1) || 1);
     let path = '/users?page=' + requestedPage + '&limit=25';
     if(state.usersSearch) path += '&q=' + encodeURIComponent(state.usersSearch);
+    if(state.usersRoleFilter) path += '&role=' + encodeURIComponent(state.usersRoleFilter);
     const res = await api(path);
     const users = res.users || [];
     state.usersPage = res.page || requestedPage;
@@ -727,8 +818,8 @@ function userCardHtml(u){
   const deleteOpen = state.activeDeleteUserId === u.id;
   const editOpen = state.activeEditUserId === u.id;
   const statusLabel = u.status === 'active' ? 'نشط' : 'معطل';
-  const roleLabel = isOwner ? 'المالك' : 'منشئ ختمة';
   const managedEnabled = Boolean(u.managedKhatmaCreator || u.managed_khatma_creator);
+  const roleLabel = isOwner ? 'مالك' : (managedEnabled ? 'منشئ متحكم' : 'منشئ');
   const displayName = escapeHtml(u.display_name || u.displayName || u.username);
   const username = escapeHtml(u.username);
 
@@ -743,7 +834,7 @@ function userCardHtml(u){
   return `<article class="owner-row user-row" data-user-id="${escapeHtml(u.id)}">
     <div class="owner-row-main">
       <strong class="owner-row-title">${displayName}</strong>
-      <span class="owner-row-meta">${username} · ${roleLabel} · ${statusLabel}${managedEnabled ? ' · منشئ ختمات متحكم' : ''}</span>
+      <span class="owner-row-meta">${username} · ${roleLabel} · ${statusLabel}</span>
     </div>
     <div class="owner-row-actions">${actions}</div>
     ${editBlock}${resetBlock}${deleteBlock}
@@ -758,8 +849,13 @@ async function createUserFromOwnerPanel(e){
   try{
     const res = await api('/users', {method:'POST', body:data});
     form.reset();
+    // Close the form panel in premium layout
+    form.hidden = true;
+    const toggleBtn = document.getElementById('toggleCreateUser');
+    if(toggleBtn) toggleBtn.textContent = '+ إضافة مستخدم';
     toast('تم إنشاء المستخدم');
     await renderUsers(1);
+    loadOwnerStats();
     if(res.user){ setTimeout(()=>document.querySelector(`[data-user-id="${CSS.escape(res.user.id)}"]`)?.scrollIntoView({behavior:'smooth', block:'center'}), 60); }
   }catch(err){
     toast(err.message || 'تعذر إنشاء المستخدم');
@@ -814,14 +910,14 @@ window.openDeleteUser = function(id){
   renderUsers();
 }
 window.confirmDeleteUser = async function(id){
-  const ok = await showDeleteConfirmModal({title:'حذف المستخدم', message:'سيتم حذف المستخدم نهائيًا من قاعدة البيانات وتسجيل خروجه من جميع الجلسات.'});
+  const ok = await showDeleteConfirmModal({title:'حذف المستخدم', message:'سيتم حذف المستخدم نهائيًا وإزالته من جميع الجلسات والمجموعات. لن تُحذف الختمات أو القراء.'});
   if(!ok) return;
   try{
     await api('/users/' + encodeURIComponent(id), {method:'DELETE'});
     state.activeDeleteUserId = '';
-    document.querySelector(`[data-user-id="${CSS.escape(id)}"]`)?.remove();
-    toast('تم حذف المستخدم من قاعدة البيانات');
-    await renderUsers();
+    toast('تم حذف المستخدم وإزالته من المجموعات');
+    loadOwnerStats();
+    await Promise.all([renderUsers(), renderCreatorGroups()]);
   }catch(err){ toast(err.message || 'تعذر حذف المستخدم'); }
 }
 window.toggleUserStatus = async function(id, status){
