@@ -787,6 +787,7 @@ body.nav-open .topbar .menu-toggle span:nth-child(1){transform:none!important;wi
             <a href="#/managed-khatmas">عرض الختمات</a>
             <a href="#/managed-readers">قراء الختمات</a>
             <a href="#/managed-khatmas/archived">الأرشيف</a>
+            <a id="managedSupervisorsNav" href="#/managed-supervisors" hidden>مشرفو مجموعتي</a>
           </div>
         </div>
         <a href="#/reader-login">بوابة القراء</a>
@@ -1041,6 +1042,15 @@ body.nav-open .topbar .menu-toggle span:nth-child(1){transform:none!important;wi
     <p>إدارة شاملة لجميع بيانات النظام.</p>
   </section>
   <section id="ownerControlView"></section>
+</template>
+
+<template id="managedSupervisorsTemplate">
+  <section class="page-head">
+    <span class="eyebrow">إدارة المشرفين</span>
+    <h1>مشرفو مجموعتي</h1>
+    <p>أضف مشرفين لمجموعتك وأدر نطاق إشرافهم ضمن مجموعتك فقط.</p>
+  </section>
+  <section id="managedSupervisorsView"></section>
 </template>
 
 <template id="supervisorPanelTemplate">

@@ -231,6 +231,9 @@ function renderAuthLinks(){
   if(managedNavGroup) managedNavGroup.hidden = !canUseManagedKhatmas();
   const supervisorNav = document.getElementById('supervisorNav');
   if(supervisorNav) supervisorNav.hidden = !(Boolean(state.user?.isSupervisor) && state.user?.role !== 'owner');
+  const managedSupervisorsNav = document.getElementById('managedSupervisorsNav');
+  const isManagedNonOwner = canUseManagedKhatmas() && state.user?.role !== 'owner';
+  if(managedSupervisorsNav) managedSupervisorsNav.hidden = !isManagedNonOwner;
   if(userMenuOwner) userMenuOwner.hidden = !isOwner;
   const khatmasDropdownLink = document.getElementById('khatmasDropdownLink');
   if(khatmasDropdownLink) khatmasDropdownLink.hidden = !isOwner;
@@ -402,6 +405,7 @@ async function router(){
   if(hash.startsWith('#/reader-khatma/')) return renderTemplate('readerKhatmaTemplate', () => { const parts = hash.split('/'); setupReaderKhatma(parts[2]); });
   if(hash.startsWith('#/reader-group/')) return renderTemplate('readerGroupTemplate', () => { const parts = hash.split('/'); setupReaderGroup(parts[2]); });
   if(hash.startsWith('#/managed-khatma/')) return renderTemplate('managedKhatmaTemplate', () => { const parts = hash.split('/'); setupManagedKhatma(parts[2], parts[3] === 'manage'); });
+  if(hash.startsWith('#/managed-supervisors')) return renderTemplate('managedSupervisorsTemplate', setupManagedSupervisors);
   if(hash.startsWith('#/supervisor-panel')) return renderTemplate('supervisorPanelTemplate', setupSupervisorPanel);
   if(hash.startsWith('#/managed-khatmas/archived')) return renderTemplate('managedKhatmasArchivedTemplate', setupManagedKhatmasArchived);
   if(hash.startsWith('#/managed-khatmas')) return renderTemplate('managedKhatmasTemplate', setupManagedKhatmas);
@@ -628,6 +632,144 @@ async function toggleSupervisorPermission(userId, enable){
   }catch(err){ toast(err.message || 'تعذر تغيير الصلاحية'); }
 }
 
+// ── Managed Creator: مشرفو مجموعتي ──────────────────────────────────
+
+async function setupManagedSupervisors(){
+  const root = document.getElementById('managedSupervisorsView');
+  if(!root) return;
+  if(!state.user || !canUseManagedKhatmas() || state.user.role === 'owner'){
+    root.innerHTML = `<article class="feature-card"><h3>غير مصرح</h3><p>هذه الصفحة للمنشئ المتحكم فقط.</p></article>`;
+    return;
+  }
+  root.innerHTML = '<p style="color:var(--muted);padding:16px">جاري التحميل...</p>';
+  // Fetch my creator groups to know scope
+  let myGroups = [];
+  try{
+    const res = await api('/picker/creator-groups?limit=20');
+    myGroups = res.items || [];
+  }catch(err){ root.innerHTML = `<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`; return; }
+
+  root.innerHTML = `
+    <div class="admin-panel premium-admin-panel" style="margin-bottom:20px">
+      <div class="sheet-head">
+        <div><h3 style="margin:0 0 3px">إضافة مشرف جديد</h3><p style="margin:0;color:var(--muted);font-size:13px">سيُربط المشرف بمجموعتك فقط</p></div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div style="flex:1;min-width:200px">
+          <label style="font-size:13px;font-weight:800;color:var(--muted);display:block;margin-bottom:4px">البحث عن مستخدم</label>
+          <input id="supSearchInput" type="search" placeholder="اكتب اسم المستخدم أو الاسم الظاهر..." style="width:100%;height:40px;border-radius:14px;padding:0 14px;font-size:14px;border:1px solid var(--line);background:var(--bg);color:var(--text);box-sizing:border-box" />
+        </div>
+        <button class="btn ghost compact-btn" onclick="triggerSupSearch()" style="height:40px">بحث</button>
+      </div>
+      <div id="supSearchResults" style="margin-top:10px;display:flex;flex-direction:column;gap:4px"></div>
+    </div>
+    <div class="admin-panel premium-admin-panel">
+      <div class="sheet-head"><h3 style="margin:0">مشرفو مجموعتي</h3><p style="margin:3px 0 0;color:var(--muted);font-size:13px">المشرفون المرتبطون بمجموعاتك فقط</p></div>
+      <div id="mySupervisorsList" style="margin-top:16px"></div>
+    </div>
+    ${supervisorPickerModalHtml()}
+  `;
+  // Store myGroups for use in grant function
+  root._myGroups = myGroups;
+  // Wire up search
+  const inp = document.getElementById('supSearchInput');
+  let _debounce = null;
+  if(inp) inp.oninput = () => { clearTimeout(_debounce); _debounce = setTimeout(triggerSupSearch, 350); };
+  // Load current supervisors
+  loadMySupervisors();
+}
+
+async function triggerSupSearch(){
+  const inp = document.getElementById('supSearchInput');
+  const q = inp ? inp.value.trim() : '';
+  const resultsEl = document.getElementById('supSearchResults');
+  if(!resultsEl) return;
+  if(q.length < 2){ resultsEl.innerHTML = ''; return; }
+  resultsEl.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:4px">جاري البحث...</p>';
+  try{
+    const res = await api('/users/search?q=' + encodeURIComponent(q));
+    const users = res.users || [];
+    if(!users.length){ resultsEl.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:4px">لا نتائج</p>'; return; }
+    resultsEl.innerHTML = users.map(u => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-radius:12px;border:1px solid var(--line);background:var(--bg)">
+        <span style="font-size:14px;font-weight:700">${escapeHtml(u.display_name || u.username)} <span style="color:var(--muted);font-weight:400">@${escapeHtml(u.username)}</span></span>
+        <button class="btn primary compact-btn" onclick="grantSupervisorToUser('${escapeJs(u.id)}','${escapeJs(u.display_name || u.username)}')">منح صلاحية مشرف</button>
+      </div>
+    `).join('');
+  }catch(err){ resultsEl.innerHTML = `<p style="color:var(--danger);font-size:13px">${escapeHtml(err.message)}</p>`; }
+}
+
+async function grantSupervisorToUser(userId, userName){
+  const root = document.getElementById('managedSupervisorsView');
+  const myGroups = root?._myGroups || [];
+  try{
+    // Grant supervisor permission
+    await api('/users/' + encodeURIComponent(userId) + '/supervisor-permission', {method:'POST', body:{enabled:true}});
+    // Assign to groups
+    if(myGroups.length === 1){
+      // Auto-assign to only group
+      await api('/supervisors/' + encodeURIComponent(userId) + '/assignments', {method:'POST', body:{groupIds:[myGroups[0].id]}});
+      toast('تم منح الصلاحية وربط المشرف بمجموعتك تلقائياً');
+      loadMySupervisors();
+    } else if(myGroups.length > 1){
+      // Show picker for multi-group
+      toast('تم منح الصلاحية — اختر المجموعات الآن');
+      loadMySupervisors();
+      await new Promise(r => setTimeout(r, 300));
+      openSupervisorPicker(userId, userName);
+    } else {
+      toast('تم منح الصلاحية (لا توجد مجموعات لربطها)');
+      loadMySupervisors();
+    }
+    // Clear search
+    const inp = document.getElementById('supSearchInput');
+    if(inp) inp.value = '';
+    const res = document.getElementById('supSearchResults');
+    if(res) res.innerHTML = '';
+  }catch(err){ toast(err.message || 'تعذر منح الصلاحية'); }
+}
+
+async function loadMySupervisors(){
+  const el = document.getElementById('mySupervisorsList');
+  if(!el) return;
+  el.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:4px">جاري التحميل...</p>';
+  try{
+    const res = await api('/supervisors');
+    const supervisors = res.supervisors || [];
+    if(!supervisors.length){
+      el.innerHTML = '<p style="color:var(--muted);font-size:14px;padding:4px">لا يوجد مشرفون مرتبطون بمجموعاتك حتى الآن.</p>';
+      return;
+    }
+    el.innerHTML = supervisors.map(s => mySupervisorRowHtml(s)).join('');
+  }catch(err){ el.innerHTML = `<p style="color:var(--danger)">${escapeHtml(err.message)}</p>`; }
+}
+
+function mySupervisorRowHtml(s){
+  const name = escapeHtml(s.display_name || s.username);
+  const groups = (s.assignments || []).map(a => `<span class="badge" style="font-size:11px;margin:2px">${escapeHtml(a.name || a.entity_id)}</span>`).join('');
+  return `<article class="owner-row" style="flex-wrap:wrap;gap:6px;margin-bottom:8px">
+    <div class="owner-row-main" style="flex:1;min-width:160px">
+      <strong>${name}</strong>
+      <span class="owner-row-meta">@${escapeHtml(s.username)}</span>
+      <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px">${groups || '<span style="color:var(--muted);font-size:12px">لا مجموعات مربوطة</span>'}</div>
+    </div>
+    <div class="owner-row-actions">
+      <button class="btn ghost compact-btn" onclick="openSupervisorPicker('${escapeJs(s.user_id)}','${escapeJs(s.display_name || s.username)}')">تعديل مجموعاتي</button>
+      <button class="btn ghost danger-btn compact-btn" onclick="removeFromMyGroups('${escapeJs(s.user_id)}','${escapeJs(s.display_name || s.username)}')">إزالة من مجموعتي</button>
+    </div>
+  </article>`;
+}
+
+async function removeFromMyGroups(supervisorId, name){
+  if(!confirm(`هل تريد إزالة ${name} من مجموعاتك؟ (لن تُلغى صلاحيته العامة)`)) return;
+  try{
+    // saveSupervisorAssignments with empty array — backend only removes within our scope
+    await api('/supervisors/' + encodeURIComponent(supervisorId) + '/assignments', {method:'POST', body:{groupIds:[]}});
+    toast('تم إزالة المشرف من مجموعاتك');
+    loadMySupervisors();
+  }catch(err){ toast(err.message || 'تعذر الإزالة'); }
+}
+
 async function renderSupervisors(){
   const el = document.getElementById('supervisorsSection');
   if(!el) return;
@@ -763,7 +905,9 @@ async function confirmSupervisorAssignments(){
     await api('/supervisors/' + encodeURIComponent(_pickerState.supervisorId) + '/assignments', {method:'POST', body:{groupIds:[..._pickerState.selectedIds]}});
     toast('تم حفظ التعيينات');
     closeSupervisorPicker();
-    renderSupervisors();
+    // Refresh whichever panel is currently visible
+    if(document.getElementById('mySupervisorsList')) loadMySupervisors();
+    else renderSupervisors();
   }catch(err){ toast(err.message || 'تعذر حفظ التعيينات'); }
 }
 

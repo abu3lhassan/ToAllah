@@ -492,6 +492,18 @@ async function setSupervisorPermission(request, DB, id) {
   return json({ ok: true, enabled });
 }
 
+async function searchUsersForSupervisor(request, DB) {
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  const url = new URL(request.url);
+  const q = (url.searchParams.get("q") || "").trim();
+  if (q.length < 2) return json({ ok: true, users: [] });
+  const rows = (await DB.prepare(
+    "SELECT id, username, display_name FROM users WHERE status != 'deleted' AND role = 'creator' AND (username LIKE ? OR display_name LIKE ?) LIMIT 10"
+  ).bind(`%${q}%`, `%${q}%`).all()).results || [];
+  return json({ ok: true, users: rows });
+}
+
 async function listSupervisors(request, DB) {
   await ensureSupervisorSchema(DB);
   await ensureCreatorGroupSchema(DB);
@@ -4311,6 +4323,7 @@ export async function onRequest(context) {
       }
     }
     // Supervisor management (owner + managed creator)
+    if (parts.length === 2 && parts[0] === "users" && parts[1] === "search" && method === "GET") return searchUsersForSupervisor(request, env.DB);
     if (parts.length === 3 && parts[0] === "users" && parts[2] === "supervisor-permission" && method === "POST") return setSupervisorPermission(request, env.DB, parts[1]);
     if (parts[0] === "supervisors") {
       if (parts.length === 1 && method === "GET") return listSupervisors(request, env.DB);
