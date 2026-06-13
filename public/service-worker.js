@@ -1,9 +1,7 @@
-const CACHE_NAME = "toallah-pwa-v1";
+const CACHE_NAME = "toallah-pwa-v2";
 const APP_SHELL = [
   "/",
   "/index.html",
-  "/styles.css",
-  "/app.js",
   "/manifest.webmanifest",
   "/apple-touch-icon.png",
   "/icons/icon-192x192.png",
