@@ -67,5 +67,21 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // JS/CSS app files: always network-first, bypass HTTP cache entirely
+  if (["/app.js", "/styles.css", "/config.js"].includes(url.pathname)) {
+    event.respondWith(
+      fetch(new Request(request, { cache: "no-store" }))
+        .then((response) => {
+          if (response.ok) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
+
   // Everything else (dynamic pages, etc.): network only — no caching
 });
