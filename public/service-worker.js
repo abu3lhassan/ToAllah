@@ -1,9 +1,7 @@
-const CACHE_NAME = "toallah-pwa-v1";
+const CACHE_NAME = "toallah-pwa-v2";
 const APP_SHELL = [
   "/",
   "/index.html",
-  "/styles.css",
-  "/app.js",
   "/manifest.webmanifest",
   "/apple-touch-icon.png",
   "/icons/icon-192x192.png",
@@ -65,6 +63,22 @@ self.addEventListener("fetch", (event) => {
           return response;
         });
       })
+    );
+    return;
+  }
+
+  // JS/CSS app files: always network-first, bypass HTTP cache entirely
+  if (["/app.js", "/styles.css", "/config.js"].includes(url.pathname)) {
+    event.respondWith(
+      fetch(new Request(request, { cache: "no-store" }))
+        .then((response) => {
+          if (response.ok) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
     );
     return;
   }

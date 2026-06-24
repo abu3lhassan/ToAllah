@@ -189,7 +189,10 @@ function publicUser(row) {
 async function publicUserWithManagedPermission(DB, row) {
   if (!row) return null;
   await ensureManagedSchema(DB);
-  return { ...publicUser(row), managedKhatmaCreator: row.role === "owner" || await hasManagedPermission(DB, row) };
+  await ensureSupervisorSchema(DB);
+  const isManagedCreator = row.role === "owner" || await hasManagedPermission(DB, row);
+  const isSupervisor = await hasSupervisorPermission(DB, row);
+  return { ...publicUser(row), managedKhatmaCreator: isManagedCreator, isSupervisor };
 }
 
 function mapKhatma(row, units = []) {
@@ -293,6 +296,7 @@ async function listUsers(request, DB) {
   const check = await requireOwner(request, DB);
   if (!check.ok) return check.response;
   await ensureManagedSchema(DB);
+  await ensureSupervisorSchema(DB);
   const url = new URL(request.url);
   const pageRaw = parseInt(url.searchParams.get("page") || "1", 10);
   const limitRaw = parseInt(url.searchParams.get("limit") || "25", 10);
@@ -310,21 +314,24 @@ async function listUsers(request, DB) {
     bindParams.push(likeQ, likeQ);
   }
   if (roleFilter === "owner") { conditions.push("users.role = 'owner'"); }
-  else if (roleFilter === "creator") { conditions.push("users.role = 'creator'"); }
-  else if (roleFilter === "managed") { conditions.push("users.role = 'creator' AND managed_khatma_permissions.status = 'active'"); }
+  else if (roleFilter === "creator") { conditions.push("users.role = 'creator' AND (mcp.status IS NULL OR mcp.status != 'active') AND (sp.status IS NULL OR sp.status != 'active')"); }
+  else if (roleFilter === "managed") { conditions.push("mcp.status = 'active'"); }
+  else if (roleFilter === "supervisor") { conditions.push("sp.status = 'active'"); }
 
   const whereClause = "WHERE " + conditions.join(" AND ");
 
-  const countBase = `SELECT COUNT(*) AS total FROM users LEFT JOIN managed_khatma_permissions ON managed_khatma_permissions.user_id = users.id ${whereClause}`;
+  const countBase = `SELECT COUNT(*) AS total FROM users LEFT JOIN managed_khatma_permissions mcp ON mcp.user_id = users.id LEFT JOIN supervisor_permissions sp ON sp.user_id = users.id ${whereClause}`;
   const countRow = await DB.prepare(countBase).bind(...bindParams).first();
   const total = countRow?.total || 0;
   const rows = await DB.prepare(`
     SELECT
       users.id, users.username, users.display_name, users.role, users.status,
       users.created_at, users.updated_at,
-      CASE WHEN managed_khatma_permissions.status = 'active' THEN 1 ELSE 0 END AS managedKhatmaCreator
+      CASE WHEN mcp.status = 'active' THEN 1 ELSE 0 END AS managedKhatmaCreator,
+      CASE WHEN sp.status = 'active' THEN 1 ELSE 0 END AS isSupervisor
     FROM users
-    LEFT JOIN managed_khatma_permissions ON managed_khatma_permissions.user_id = users.id
+    LEFT JOIN managed_khatma_permissions mcp ON mcp.user_id = users.id
+    LEFT JOIN supervisor_permissions sp ON sp.user_id = users.id
     ${whereClause}
     ORDER BY users.created_at DESC
     LIMIT ? OFFSET ?
@@ -429,9 +436,12 @@ async function deleteUser(request, DB, id) {
   if (!target) return json({ ok: false, error: "المستخدم غير موجود" }, 404);
   if (target.role === "owner") return json({ ok: false, error: "لا يمكن حذف حساب المالك" }, 400);
   await ensureCreatorGroupSchema(DB);
+  await ensureSupervisorSchema(DB);
   await DB.batch([
     DB.prepare("DELETE FROM user_sessions WHERE user_id = ?").bind(id),
     DB.prepare("DELETE FROM managed_creator_group_members WHERE user_id = ?").bind(id),
+    DB.prepare("DELETE FROM supervisor_permissions WHERE user_id = ?").bind(id),
+    DB.prepare("DELETE FROM supervisor_assignments WHERE supervisor_id = ?").bind(id),
     DB.prepare("UPDATE users SET status = 'deleted', updated_at = ? WHERE id = ?").bind(now(), id)
   ]);
   return json({ ok: true, deleted: true, username: target.username });
@@ -457,6 +467,438 @@ async function setManagedUserPermission(request, DB, id) {
     `).bind(id, enabled ? "active" : "disabled", check.user.id, t, t).run();
   }
   return json({ ok: true, enabled });
+}
+
+async function setSupervisorPermission(request, DB, id) {
+  await ensureSupervisorSchema(DB);
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  const body = await readJson(request);
+  const enabled = body.enabled === true || body.status === "active";
+  const target = await DB.prepare("SELECT id, role FROM users WHERE id = ? AND status != 'deleted' LIMIT 1").bind(id).first();
+  if (!target) return json({ ok: false, error: "المستخدم غير موجود" }, 404);
+  if (target.role === "owner") return json({ ok: true, enabled: true, implicit: true });
+  if (id === check.user.id) return json({ ok: false, error: "لا يمكنك تعيين نفسك مشرفاً" }, 400);
+  if (!enabled && check.user.role !== "owner") {
+    return json({ ok: false, error: "إلغاء صلاحية المشرف متاح للمالك فقط" }, 403);
+  }
+  const t = now();
+  const existing = await DB.prepare("SELECT user_id FROM supervisor_permissions WHERE user_id = ? LIMIT 1").bind(id).first();
+  if (existing) {
+    await DB.prepare("UPDATE supervisor_permissions SET status = ?, updated_at = ? WHERE user_id = ?").bind(enabled ? "active" : "revoked", t, id).run();
+  } else {
+    await DB.prepare("INSERT INTO supervisor_permissions (user_id, granted_by, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(id, check.user.id, "active", t, t).run();
+  }
+  return json({ ok: true, enabled });
+}
+
+async function searchUsersForSupervisor(request, DB) {
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  const url = new URL(request.url);
+  const q = (url.searchParams.get("q") || "").trim();
+  if (q.length < 2) return json({ ok: true, users: [] });
+  const rows = (await DB.prepare(
+    "SELECT id, username, display_name FROM users WHERE status != 'deleted' AND role = 'creator' AND (username LIKE ? OR display_name LIKE ?) LIMIT 10"
+  ).bind(`%${q}%`, `%${q}%`).all()).results || [];
+  return json({ ok: true, users: rows });
+}
+
+async function listSupervisors(request, DB) {
+  await ensureSupervisorSchema(DB);
+  await ensureCreatorGroupSchema(DB);
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  let assignerGroupIds = [];
+  if (check.user.role !== "owner") {
+    assignerGroupIds = await getUserGroupIds(DB, check.user.id);
+  }
+  let rows;
+  if (check.user.role === "owner") {
+    rows = (await DB.prepare(`
+      SELECT sp.user_id, u.display_name, u.username, sp.status, sp.created_at
+      FROM supervisor_permissions sp
+      JOIN users u ON u.id = sp.user_id AND u.status != 'deleted'
+      WHERE sp.status = 'active'
+      ORDER BY sp.created_at DESC
+    `).all()).results || [];
+  } else {
+    if (!assignerGroupIds.length) return json({ ok: true, supervisors: [] });
+    rows = (await DB.prepare(`
+      SELECT DISTINCT sp.user_id, u.display_name, u.username, sp.status, sp.created_at
+      FROM supervisor_permissions sp
+      JOIN users u ON u.id = sp.user_id AND u.status != 'deleted'
+      JOIN supervisor_assignments sa ON sa.supervisor_id = sp.user_id
+      WHERE sp.status = 'active'
+        AND sa.entity_type = 'creator_group'
+        AND sa.entity_id IN (${assignerGroupIds.map(() => "?").join(",")})
+      ORDER BY sp.created_at DESC
+    `).bind(...assignerGroupIds).all()).results || [];
+  }
+  const result = [];
+  for (const r of rows) {
+    const assignments = (await DB.prepare(
+      "SELECT sa.entity_id, mcg.name FROM supervisor_assignments sa LEFT JOIN managed_creator_groups mcg ON mcg.id = sa.entity_id WHERE sa.supervisor_id = ? AND sa.entity_type = 'creator_group'"
+    ).bind(r.user_id).all()).results || [];
+    result.push({ ...r, assignments });
+  }
+  return json({ ok: true, supervisors: result });
+}
+
+async function getSupervisorAssignments(request, DB, supervisorId) {
+  await ensureSupervisorSchema(DB);
+  await ensureCreatorGroupSchema(DB);
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  const rows = (await DB.prepare(`
+    SELECT sa.entity_id, mcg.name
+    FROM supervisor_assignments sa
+    LEFT JOIN managed_creator_groups mcg ON mcg.id = sa.entity_id
+    WHERE sa.supervisor_id = ? AND sa.entity_type = 'creator_group'
+  `).bind(supervisorId).all()).results || [];
+  return json({ ok: true, assignments: rows });
+}
+
+async function saveSupervisorAssignments(request, DB, supervisorId) {
+  await ensureSupervisorSchema(DB);
+  await ensureCreatorGroupSchema(DB);
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  const body = await readJson(request);
+  const groupIds = Array.isArray(body.groupIds) ? body.groupIds.map(String).filter(Boolean) : [];
+  const target = await DB.prepare("SELECT id FROM users WHERE id = ? AND status != 'deleted' LIMIT 1").bind(supervisorId).first();
+  if (!target) return json({ ok: false, error: "المستخدم غير موجود" }, 404);
+  const permRow = await DB.prepare("SELECT status FROM supervisor_permissions WHERE user_id = ? LIMIT 1").bind(supervisorId).first();
+  if (!permRow || permRow.status !== "active") return json({ ok: false, error: "المستخدم ليس مشرفاً نشطاً" }, 400);
+
+  let allowedGroupIds;
+  if (check.user.role === "owner") {
+    allowedGroupIds = null;
+  } else {
+    allowedGroupIds = await getUserGroupIds(DB, check.user.id);
+    for (const gid of groupIds) {
+      if (!allowedGroupIds.includes(gid)) {
+        return json({ ok: false, error: "لا تملك صلاحية ربط مشرف بهذه المجموعة" }, 403);
+      }
+    }
+  }
+
+  const t = now();
+  const stmts = [];
+  if (allowedGroupIds === null) {
+    stmts.push(DB.prepare("DELETE FROM supervisor_assignments WHERE supervisor_id = ? AND entity_type = 'creator_group'").bind(supervisorId));
+  } else {
+    if (allowedGroupIds.length) {
+      stmts.push(DB.prepare(
+        `DELETE FROM supervisor_assignments WHERE supervisor_id = ? AND entity_type = 'creator_group' AND entity_id IN (${allowedGroupIds.map(() => "?").join(",")})`
+      ).bind(supervisorId, ...allowedGroupIds));
+    }
+  }
+  for (const gid of groupIds) {
+    stmts.push(DB.prepare(
+      "INSERT OR IGNORE INTO supervisor_assignments (id, supervisor_id, entity_type, entity_id, assigned_by, created_at) VALUES (?, ?, 'creator_group', ?, ?, ?)"
+    ).bind(newId("supas"), supervisorId, gid, check.user.id, t));
+  }
+  if (stmts.length) await DB.batch(stmts);
+  return json({ ok: true, groupIds });
+}
+
+async function pickerCreatorGroups(request, DB) {
+  await ensureCreatorGroupSchema(DB);
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  const url = new URL(request.url);
+  const q = (url.searchParams.get("q") || "").trim();
+  const cursorRaw = url.searchParams.get("cursor") || "";
+  const limit = Math.min(20, Math.max(1, parseInt(url.searchParams.get("limit") || "20", 10)));
+  let cursorDate = null, cursorId = null;
+  if (cursorRaw) {
+    try {
+      const decoded = JSON.parse(atob(cursorRaw));
+      cursorDate = decoded.created_at || null;
+      cursorId = decoded.id || null;
+    } catch {}
+  }
+
+  let rows;
+  if (check.user.role === "owner") {
+    let whereParts = ["status != 'deleted'"];
+    const params = [];
+    if (q) { whereParts.push("name LIKE ?"); params.push(`%${q}%`); }
+    if (cursorDate && cursorId) {
+      whereParts.push("(created_at < ? OR (created_at = ? AND id < ?))");
+      params.push(cursorDate, cursorDate, cursorId);
+    }
+    const where = whereParts.length ? "WHERE " + whereParts.join(" AND ") : "";
+    rows = (await DB.prepare(`SELECT id, name, created_at FROM managed_creator_groups ${where} ORDER BY created_at DESC, id DESC LIMIT ?`).bind(...params, limit + 1).all()).results || [];
+  } else {
+    const myGroupIds = await getUserGroupIds(DB, check.user.id);
+    if (!myGroupIds.length) return json({ ok: true, items: [], hasMore: false, nextCursor: null });
+    let whereParts = [`id IN (${myGroupIds.map(() => "?").join(",")})`, "status != 'deleted'"];
+    const params = [...myGroupIds];
+    if (q) { whereParts.push("name LIKE ?"); params.push(`%${q}%`); }
+    const where = "WHERE " + whereParts.join(" AND ");
+    rows = (await DB.prepare(`SELECT id, name, created_at FROM managed_creator_groups ${where} ORDER BY created_at DESC, id DESC`).bind(...params).all()).results || [];
+    return json({ ok: true, items: rows.map(r => ({ id: r.id, name: r.name })), hasMore: false, nextCursor: null });
+  }
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+  let nextCursor = null;
+  if (hasMore && items.length) {
+    const last = items[items.length - 1];
+    nextCursor = btoa(JSON.stringify({ id: last.id, created_at: last.created_at }));
+  }
+  return json({ ok: true, items: items.map(r => ({ id: r.id, name: r.name })), hasMore, nextCursor });
+}
+
+async function supervisorStats(request, DB) {
+  const check = await requireSupervisor(request, DB);
+  if (!check.ok) return check.response;
+  await ensureManagedSchema(DB);
+  await ensureGroupSchema(DB);
+  await ensureCreatorGroupSchema(DB);
+  if (check.user.role === "owner") {
+    const [k, r, g] = await Promise.all([
+      DB.prepare("SELECT COUNT(*) AS c FROM managed_khatmas WHERE deleted_at IS NULL").first(),
+      DB.prepare("SELECT COUNT(*) AS c FROM managed_reader_profiles WHERE status != 'deleted'").first(),
+      DB.prepare("SELECT COUNT(*) AS c FROM managed_reader_groups WHERE status = 'active'").first()
+    ]);
+    return json({ ok: true, khatmasCount: k?.c || 0, readersCount: r?.c || 0, readerGroupsCount: g?.c || 0 });
+  }
+  const groupIds = await getSupervisorCreatorGroupIds(DB, check.user.id);
+  if (!groupIds.length) return json({ ok: true, khatmasCount: 0, readersCount: 0, readerGroupsCount: 0 });
+  const memberIds = await getSupervisorMemberIds(DB, check.user.id);
+  if (!memberIds.length) return json({ ok: true, khatmasCount: 0, readersCount: 0, readerGroupsCount: 0 });
+  const idIn = memberIds.map(() => "?").join(",");
+  const gIn = groupIds.map(() => "?").join(",");
+  const [k, r, g] = await Promise.all([
+    DB.prepare(`SELECT COUNT(*) AS c FROM managed_khatmas WHERE deleted_at IS NULL AND (created_by_user_id IN (${idIn}) OR shared_creator_group_id IN (${gIn}))`).bind(...memberIds, ...groupIds).first(),
+    DB.prepare(`SELECT COUNT(*) AS c FROM managed_reader_profiles WHERE status != 'deleted' AND (created_by_user_id IN (${idIn}) OR shared_creator_group_id IN (${gIn}))`).bind(...memberIds, ...groupIds).first(),
+    DB.prepare(`SELECT COUNT(*) AS c FROM managed_reader_groups WHERE status = 'active' AND (created_by_user_id IN (${idIn}) OR shared_creator_group_id IN (${gIn}))`).bind(...memberIds, ...groupIds).first()
+  ]);
+  return json({ ok: true, khatmasCount: k?.c || 0, readersCount: r?.c || 0, readerGroupsCount: g?.c || 0 });
+}
+
+async function supervisorListKhatmas(request, DB) {
+  const check = await requireSupervisor(request, DB);
+  if (!check.ok) return check.response;
+  await ensureManagedSchema(DB);
+  await ensureCreatorGroupSchema(DB);
+  const url = new URL(request.url);
+  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
+  const limit = Math.min(25, Math.max(1, parseInt(url.searchParams.get("limit") || "25", 10)));
+  const offset = (page - 1) * limit;
+  const q = (url.searchParams.get("q") || "").trim();
+  const statusFilter = url.searchParams.get("status") || "";
+
+  let baseWhere = "WHERE mk.deleted_at IS NULL";
+  if (statusFilter === "archived") baseWhere += " AND mk.archived_at IS NOT NULL";
+  else if (statusFilter === "active") baseWhere += " AND mk.archived_at IS NULL AND mk.status = 'active'";
+  else if (statusFilter === "closed") baseWhere += " AND mk.archived_at IS NULL AND mk.status = 'closed'";
+  else baseWhere += " AND mk.archived_at IS NULL";
+
+  let params = [];
+  if (check.user.role !== "owner") {
+    const groupIds = await getSupervisorCreatorGroupIds(DB, check.user.id);
+    if (!groupIds.length) return json({ ok: true, khatmas: [], total: 0, page, limit, pages: 1 });
+    const memberIds = await getSupervisorMemberIds(DB, check.user.id);
+    if (!memberIds.length) return json({ ok: true, khatmas: [], total: 0, page, limit, pages: 1 });
+    const idIn = memberIds.map(() => "?").join(",");
+    const gIn = groupIds.map(() => "?").join(",");
+    baseWhere += ` AND (mk.created_by_user_id IN (${idIn}) OR (mk.shared_creator_group_id IS NOT NULL AND mk.shared_creator_group_id IN (${gIn})))`;
+    params = [...memberIds, ...groupIds];
+  }
+  if (q) { baseWhere += " AND (mk.title LIKE ? OR mk.week_number LIKE ?)"; params.push(`%${q}%`, `%${q}%`); }
+
+  const countRow = await DB.prepare(`SELECT COUNT(*) AS total FROM managed_khatmas mk ${baseWhere}`).bind(...params).first();
+  const total = countRow?.total || 0;
+  const rows = (await DB.prepare(
+    `SELECT mk.id, mk.title, mk.week_number, mk.khatma_type, mk.division, mk.status, mk.created_at, mk.archived_at, mk.created_by_user_id, mk.khatma_serial_number
+     FROM managed_khatmas mk ${baseWhere} ORDER BY mk.created_at DESC LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all()).results || [];
+  if (!rows.length) return json({ ok: true, khatmas: [], total, page, limit, pages: Math.ceil(total / limit) || 1 });
+
+  const ids = rows.map(r => r.id);
+  const unitRows = (await DB.prepare(
+    `SELECT khatma_id, COUNT(*) AS total_units,
+     SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_units,
+     SUM(CASE WHEN status IN ('assigned','reading') THEN 1 ELSE 0 END) AS active_units,
+     SUM(CASE WHEN status='available' THEN 1 ELSE 0 END) AS available_units
+     FROM managed_khatma_units WHERE khatma_id IN (${ids.map(() => "?").join(",")}) GROUP BY khatma_id`
+  ).bind(...ids).all()).results || [];
+  const unitMap = new Map(unitRows.map(u => [u.khatma_id, u]));
+
+  return json({
+    ok: true, total, page, limit, pages: Math.ceil(total / limit) || 1,
+    khatmas: rows.map(row => {
+      const u = unitMap.get(row.id) || { total_units: 0, completed_units: 0, active_units: 0, available_units: 0 };
+      return { id: row.id, title: row.title, weekNumber: row.week_number || "", khatmaType: row.khatma_type, division: row.division, status: row.status, createdAt: row.created_at, archivedAt: row.archived_at || null, serialNumber: row.khatma_serial_number || "", totalUnits: u.total_units, completedUnits: u.completed_units, activeUnits: u.active_units, availableUnits: u.available_units };
+    })
+  });
+}
+
+async function supervisorGetKhatma(request, DB, khatmaId) {
+  const check = await requireSupervisor(request, DB);
+  if (!check.ok) return check.response;
+  if (check.user.role !== "owner" && !await supervisorCanAccessKhatma(DB, check.user.id, khatmaId)) {
+    return json({ ok: false, error: "لا تملك صلاحية الوصول لهذه الختمة" }, 403);
+  }
+  const khatma = await getManagedKhatma(DB, khatmaId, true);
+  if (!khatma) return json({ ok: false, error: "الختمة غير موجودة" }, 404);
+  return json({ ok: true, khatma });
+}
+
+async function supervisorListReaders(request, DB) {
+  const check = await requireSupervisor(request, DB);
+  if (!check.ok) return check.response;
+  await ensureManagedSchema(DB);
+  await ensureGroupSchema(DB);
+  await ensureCreatorGroupSchema(DB);
+  const url = new URL(request.url);
+  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
+  const limit = Math.min(25, Math.max(1, parseInt(url.searchParams.get("limit") || "25", 10)));
+  const offset = (page - 1) * limit;
+  const q = (url.searchParams.get("q") || "").trim();
+
+  let whereClause = "WHERE mrp.status != 'deleted'";
+  let params = [];
+  if (check.user.role !== "owner") {
+    const groupIds = await getSupervisorCreatorGroupIds(DB, check.user.id);
+    if (!groupIds.length) return json({ ok: true, readers: [], total: 0, page, limit, pages: 1 });
+    const memberIds = await getSupervisorMemberIds(DB, check.user.id);
+    if (!memberIds.length) return json({ ok: true, readers: [], total: 0, page, limit, pages: 1 });
+    const idIn = memberIds.map(() => "?").join(",");
+    const gIn = groupIds.map(() => "?").join(",");
+    whereClause += ` AND (mrp.created_by_user_id IN (${idIn}) OR (mrp.shared_creator_group_id IS NOT NULL AND mrp.shared_creator_group_id IN (${gIn})))`;
+    params = [...memberIds, ...groupIds];
+  }
+  if (q) { whereClause += " AND (mrp.reader_name LIKE ? OR mrp.access_code LIKE ?)"; params.push(`%${q}%`, `%${q}%`); }
+
+  const countRow = await DB.prepare(`SELECT COUNT(*) AS total FROM managed_reader_profiles mrp ${whereClause}`).bind(...params).first();
+  const total = countRow?.total || 0;
+  const rows = (await DB.prepare(
+    `SELECT mrp.id, mrp.reader_name, mrp.access_code, mrp.phone, mrp.notes, mrp.group_id, mrp.serial_code, mrg.name AS group_name
+     FROM managed_reader_profiles mrp
+     LEFT JOIN managed_reader_groups mrg ON mrg.id = mrp.group_id
+     ${whereClause} ORDER BY mrp.reader_name ASC LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all()).results || [];
+  return json({ ok: true, readers: rows, total, page, limit, pages: Math.ceil(total / limit) || 1 });
+}
+
+async function supervisorListReaderGroups(request, DB) {
+  const check = await requireSupervisor(request, DB);
+  if (!check.ok) return check.response;
+  await ensureGroupSchema(DB);
+  await ensureCreatorGroupSchema(DB);
+  const url = new URL(request.url);
+  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
+  const limit = Math.min(25, Math.max(1, parseInt(url.searchParams.get("limit") || "25", 10)));
+  const offset = (page - 1) * limit;
+  const q = (url.searchParams.get("q") || "").trim();
+
+  let whereClause = "WHERE mrg.status = 'active'";
+  let params = [];
+  if (check.user.role !== "owner") {
+    const groupIds = await getSupervisorCreatorGroupIds(DB, check.user.id);
+    if (!groupIds.length) return json({ ok: true, groups: [], total: 0, page, limit, pages: 1 });
+    const memberIds = await getSupervisorMemberIds(DB, check.user.id);
+    if (!memberIds.length) return json({ ok: true, groups: [], total: 0, page, limit, pages: 1 });
+    const idIn = memberIds.map(() => "?").join(",");
+    const gIn = groupIds.map(() => "?").join(",");
+    whereClause += ` AND (mrg.created_by_user_id IN (${idIn}) OR (mrg.shared_creator_group_id IS NOT NULL AND mrg.shared_creator_group_id IN (${gIn})))`;
+    params = [...memberIds, ...groupIds];
+  }
+  if (q) { whereClause += " AND mrg.name LIKE ?"; params.push(`%${q}%`); }
+
+  const countRow = await DB.prepare(`SELECT COUNT(*) AS total FROM managed_reader_groups mrg ${whereClause}`).bind(...params).first();
+  const total = countRow?.total || 0;
+  const rows = (await DB.prepare(
+    `SELECT mrg.id, mrg.name, mrg.notes, mrg.group_serial_number, mrg.rotation_type, mrg.created_at,
+     (SELECT COUNT(*) FROM managed_reader_profiles mrp2 WHERE mrp2.group_id = mrg.id AND mrp2.status != 'deleted') AS reader_count
+     FROM managed_reader_groups mrg ${whereClause} ORDER BY mrg.name ASC LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all()).results || [];
+  return json({ ok: true, groups: rows, total, page, limit, pages: Math.ceil(total / limit) || 1 });
+}
+
+async function supervisorChangeUnitStatus(request, DB, khatmaId, unitNum) {
+  const check = await requireSupervisor(request, DB);
+  if (!check.ok) return check.response;
+  if (check.user.role !== "owner" && !await supervisorCanAccessKhatma(DB, check.user.id, khatmaId)) {
+    return json({ ok: false, error: "لا تملك صلاحية الوصول لهذه الختمة" }, 403);
+  }
+  const body = await readJson(request);
+  const newStatus = String(body.status || "").trim();
+  if (!["available", "reading", "complete"].includes(newStatus)) {
+    return json({ ok: false, error: "حالة غير صحيحة — المسموح: available, reading, complete" }, 400);
+  }
+  const unit = await DB.prepare(
+    "SELECT id, status, participant_id FROM managed_khatma_units WHERE khatma_id = ? AND unit_number = ? LIMIT 1"
+  ).bind(khatmaId, Number(unitNum)).first();
+  if (!unit) return json({ ok: false, error: "الوحدة غير موجودة" }, 404);
+  const t = now();
+  let stmt;
+  if (newStatus === "available") {
+    stmt = DB.prepare("UPDATE managed_khatma_units SET status = 'available', participant_id = NULL, reading_at = NULL, completed_at = NULL, updated_at = ? WHERE id = ?").bind(t, unit.id);
+  } else if (newStatus === "reading") {
+    stmt = DB.prepare("UPDATE managed_khatma_units SET status = 'reading', reading_at = ?, completed_at = NULL, updated_at = ? WHERE id = ?").bind(t, t, unit.id);
+  } else {
+    stmt = DB.prepare("UPDATE managed_khatma_units SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?").bind(t, t, unit.id);
+  }
+  await stmt.run();
+  return json({ ok: true, unitNumber: Number(unitNum), status: newStatus });
+}
+
+async function supervisorReassignUnit(request, DB, khatmaId, unitNum) {
+  const check = await requireSupervisor(request, DB);
+  if (!check.ok) return check.response;
+  if (check.user.role !== "owner" && !await supervisorCanAccessKhatma(DB, check.user.id, khatmaId)) {
+    return json({ ok: false, error: "لا تملك صلاحية الوصول لهذه الختمة" }, 403);
+  }
+  const body = await readJson(request);
+  const participantId = String(body.participantId || "").trim();
+  if (!participantId) return json({ ok: false, error: "معرف المشارك مطلوب" }, 400);
+  const participant = await DB.prepare(
+    "SELECT id, participant_name FROM managed_khatma_participants WHERE id = ? AND khatma_id = ? LIMIT 1"
+  ).bind(participantId, khatmaId).first();
+  if (!participant) return json({ ok: false, error: "المشارك لا ينتمي لهذه الختمة" }, 403);
+  const unit = await DB.prepare(
+    "SELECT id FROM managed_khatma_units WHERE khatma_id = ? AND unit_number = ? LIMIT 1"
+  ).bind(khatmaId, Number(unitNum)).first();
+  if (!unit) return json({ ok: false, error: "الوحدة غير موجودة" }, 404);
+  await DB.prepare(
+    "UPDATE managed_khatma_units SET participant_id = ?, updated_at = ? WHERE id = ?"
+  ).bind(participantId, now(), unit.id).run();
+  return json({ ok: true, unitNumber: Number(unitNum), participantId, participantName: participant.participant_name });
+}
+
+async function supervisorMoveReader(request, DB, readerId) {
+  const check = await requireSupervisor(request, DB);
+  if (!check.ok) return check.response;
+  if (check.user.role !== "owner" && !await supervisorCanAccessReader(DB, check.user.id, readerId)) {
+    return json({ ok: false, error: "لا تملك صلاحية الوصول لهذا القارئ" }, 403);
+  }
+  const body = await readJson(request);
+  const targetGroupId = String(body.targetGroupId || "").trim();
+  if (!targetGroupId) return json({ ok: false, error: "معرف المجموعة الهدف مطلوب" }, 400);
+  if (check.user.role !== "owner" && !await supervisorCanAccessReaderGroup(DB, check.user.id, targetGroupId)) {
+    return json({ ok: false, error: "لا تملك صلاحية الوصول لهذه المجموعة" }, 403);
+  }
+  const groupExists = await DB.prepare("SELECT id FROM managed_reader_groups WHERE id = ? AND status = 'active' LIMIT 1").bind(targetGroupId).first();
+  if (!groupExists) return json({ ok: false, error: "المجموعة غير موجودة" }, 404);
+  await DB.prepare("UPDATE managed_reader_profiles SET group_id = ?, updated_at = ? WHERE id = ?").bind(targetGroupId, now(), readerId).run();
+  return json({ ok: true, readerId, targetGroupId });
+}
+
+async function supervisorUpdateReaderNotes(request, DB, readerId) {
+  const check = await requireSupervisor(request, DB);
+  if (!check.ok) return check.response;
+  if (check.user.role !== "owner" && !await supervisorCanAccessReader(DB, check.user.id, readerId)) {
+    return json({ ok: false, error: "لا تملك صلاحية الوصول لهذا القارئ" }, 403);
+  }
+  const body = await readJson(request);
+  const notes = String(body.notes || "").trim().slice(0, 2000);
+  await DB.prepare("UPDATE managed_reader_profiles SET notes = ?, updated_at = ? WHERE id = ? AND status != 'deleted'").bind(notes, now(), readerId).run();
+  return json({ ok: true, readerId, notes });
 }
 
 async function ensureManagedSchema(DB) {
@@ -654,6 +1096,110 @@ async function ensureCreatorGroupSchema(DB) {
   ]);
   _creatorGroupSchemaReady = true;
 }
+
+let _supervisorSchemaReady = false;
+async function ensureSupervisorSchema(DB) {
+  if (_supervisorSchemaReady) return;
+  await DB.prepare(`
+    CREATE TABLE IF NOT EXISTS supervisor_permissions (
+      user_id    TEXT PRIMARY KEY,
+      granted_by TEXT NOT NULL,
+      status     TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `).run();
+  await DB.prepare(`
+    CREATE TABLE IF NOT EXISTS supervisor_assignments (
+      id            TEXT PRIMARY KEY,
+      supervisor_id TEXT NOT NULL,
+      entity_type   TEXT NOT NULL DEFAULT 'creator_group',
+      entity_id     TEXT NOT NULL,
+      assigned_by   TEXT NOT NULL,
+      created_at    TEXT NOT NULL,
+      UNIQUE(supervisor_id, entity_type, entity_id)
+    )
+  `).run();
+  await DB.batch([
+    DB.prepare("CREATE INDEX IF NOT EXISTS idx_sup_perm_status ON supervisor_permissions(status)"),
+    DB.prepare("CREATE INDEX IF NOT EXISTS idx_sup_assign_supervisor ON supervisor_assignments(supervisor_id, entity_type)"),
+    DB.prepare("CREATE INDEX IF NOT EXISTS idx_sup_assign_entity ON supervisor_assignments(entity_type, entity_id)")
+  ]);
+  _supervisorSchemaReady = true;
+}
+
+async function hasSupervisorPermission(DB, user) {
+  if (!user) return false;
+  if (user.role === "owner") return true;
+  const row = await DB.prepare("SELECT status FROM supervisor_permissions WHERE user_id = ? LIMIT 1").bind(user.id).first();
+  return row?.status === "active";
+}
+
+async function requireSupervisor(request, DB) {
+  await ensureSupervisorSchema(DB);
+  const user = await currentUser(request, DB);
+  if (!user) return { ok: false, response: json({ ok: false, error: "تسجيل الدخول مطلوب" }, 401) };
+  if (!await hasSupervisorPermission(DB, user)) {
+    return { ok: false, response: json({ ok: false, error: "هذه الصفحة مخصصة للمشرفين فقط" }, 403) };
+  }
+  return { ok: true, user };
+}
+
+async function getSupervisorCreatorGroupIds(DB, userId) {
+  const rows = (await DB.prepare(
+    "SELECT entity_id FROM supervisor_assignments WHERE supervisor_id = ? AND entity_type = 'creator_group'"
+  ).bind(userId).all()).results || [];
+  return rows.map(r => r.entity_id);
+}
+
+async function getSupervisorMemberIds(DB, userId) {
+  const groupIds = await getSupervisorCreatorGroupIds(DB, userId);
+  if (!groupIds.length) return [];
+  const members = (await DB.prepare(
+    `SELECT DISTINCT user_id FROM managed_creator_group_members WHERE group_id IN (${groupIds.map(() => "?").join(",")})`
+  ).bind(...groupIds).all()).results || [];
+  return [...new Set(members.map(r => r.user_id))];
+}
+
+async function supervisorCanAccessKhatma(DB, userId, khatmaId) {
+  const groupIds = await getSupervisorCreatorGroupIds(DB, userId);
+  if (!groupIds.length) return false;
+  const memberIds = await getSupervisorMemberIds(DB, userId);
+  const khatma = await DB.prepare(
+    "SELECT created_by_user_id, shared_creator_group_id FROM managed_khatmas WHERE id = ? AND deleted_at IS NULL LIMIT 1"
+  ).bind(khatmaId).first();
+  if (!khatma) return false;
+  if (memberIds.includes(khatma.created_by_user_id)) return true;
+  if (khatma.shared_creator_group_id && groupIds.includes(khatma.shared_creator_group_id)) return true;
+  return false;
+}
+
+async function supervisorCanAccessReader(DB, userId, readerId) {
+  const groupIds = await getSupervisorCreatorGroupIds(DB, userId);
+  if (!groupIds.length) return false;
+  const memberIds = await getSupervisorMemberIds(DB, userId);
+  const reader = await DB.prepare(
+    "SELECT created_by_user_id, shared_creator_group_id FROM managed_reader_profiles WHERE id = ? AND status != 'deleted' LIMIT 1"
+  ).bind(readerId).first();
+  if (!reader) return false;
+  if (memberIds.includes(reader.created_by_user_id)) return true;
+  if (reader.shared_creator_group_id && groupIds.includes(reader.shared_creator_group_id)) return true;
+  return false;
+}
+
+async function supervisorCanAccessReaderGroup(DB, userId, readerGroupId) {
+  const groupIds = await getSupervisorCreatorGroupIds(DB, userId);
+  if (!groupIds.length) return false;
+  const memberIds = await getSupervisorMemberIds(DB, userId);
+  const rg = await DB.prepare(
+    "SELECT created_by_user_id, shared_creator_group_id FROM managed_reader_groups WHERE id = ? AND status = 'active' LIMIT 1"
+  ).bind(readerGroupId).first();
+  if (!rg) return false;
+  if (memberIds.includes(rg.created_by_user_id)) return true;
+  if (rg.shared_creator_group_id && groupIds.includes(rg.shared_creator_group_id)) return true;
+  return false;
+}
+
 async function getCreatorGroupMemberIds(DB, userId) {
   const groups = (await DB.prepare("SELECT group_id FROM managed_creator_group_members WHERE user_id = ?").bind(userId).all()).results || [];
   if (!groups.length) return [userId];
@@ -3775,6 +4321,27 @@ export async function onRequest(context) {
         if (parts[2] === "missing-contact") return ownerReportMissingContact(request, env.DB);
         if (parts[2] === "groups")          return ownerReportGroups(request, env.DB);
       }
+    }
+    // Supervisor management (owner + managed creator)
+    if (parts.length === 2 && parts[0] === "users" && parts[1] === "search" && method === "GET") return searchUsersForSupervisor(request, env.DB);
+    if (parts.length === 3 && parts[0] === "users" && parts[2] === "supervisor-permission" && method === "POST") return setSupervisorPermission(request, env.DB, parts[1]);
+    if (parts[0] === "supervisors") {
+      if (parts.length === 1 && method === "GET") return listSupervisors(request, env.DB);
+      if (parts.length === 2 && method === "GET") return getSupervisorAssignments(request, env.DB, parts[1]);
+      if (parts.length === 2 && method === "POST") return saveSupervisorAssignments(request, env.DB, parts[1]);
+    }
+    if (parts.length === 2 && parts[0] === "picker" && parts[1] === "creator-groups" && method === "GET") return pickerCreatorGroups(request, env.DB);
+    // Supervisor panel
+    if (parts[0] === "supervisor") {
+      if (parts.length === 2 && parts[1] === "stats" && method === "GET") return supervisorStats(request, env.DB);
+      if (parts.length === 2 && parts[1] === "khatmas" && method === "GET") return supervisorListKhatmas(request, env.DB);
+      if (parts.length === 3 && parts[1] === "khatmas" && method === "GET") return supervisorGetKhatma(request, env.DB, parts[2]);
+      if (parts.length === 2 && parts[1] === "readers" && method === "GET") return supervisorListReaders(request, env.DB);
+      if (parts.length === 2 && parts[1] === "reader-groups" && method === "GET") return supervisorListReaderGroups(request, env.DB);
+      if (parts.length === 6 && parts[1] === "khatmas" && parts[3] === "units" && parts[5] === "status" && method === "POST") return supervisorChangeUnitStatus(request, env.DB, parts[2], parts[4]);
+      if (parts.length === 6 && parts[1] === "khatmas" && parts[3] === "units" && parts[5] === "reassign" && method === "POST") return supervisorReassignUnit(request, env.DB, parts[2], parts[4]);
+      if (parts.length === 4 && parts[1] === "readers" && parts[3] === "move-group" && method === "POST") return supervisorMoveReader(request, env.DB, parts[2]);
+      if (parts.length === 3 && parts[1] === "readers" && method === "PATCH") return supervisorUpdateReaderNotes(request, env.DB, parts[2]);
     }
     return json({ ok: false, error: "Not found", path: parts }, 404);
   } catch (error) {
