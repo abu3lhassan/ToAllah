@@ -8,3 +8,15 @@ dist/
 Thumbs.db
 *.log
 *.lnk
+
+# Local database backups - never commit
+backups/
+*.sqlite
+*.db
+*.dump
+*.sql
+!migrations/*.sql
+
+# Local Claude workspace
+.claude/
+

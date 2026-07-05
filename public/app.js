@@ -223,8 +223,6 @@ function renderAuthLinks(){
 
   document.body.classList.toggle('is-authenticated', isLoggedIn);
 
-  const khatmasNavGroup = document.getElementById('khatmasNavGroup');
-  if(khatmasNavGroup) khatmasNavGroup.hidden = !isOwner;
   if(ownerNav) ownerNav.hidden = !isOwner;
   const ownerControlNav = document.getElementById('ownerControlNav');
   if(ownerControlNav) ownerControlNav.hidden = !isOwner;
@@ -235,8 +233,6 @@ function renderAuthLinks(){
   const isManagedNonOwner = canUseManagedKhatmas() && state.user?.role !== 'owner';
   if(managedSupervisorsNav) managedSupervisorsNav.hidden = !isManagedNonOwner;
   if(userMenuOwner) userMenuOwner.hidden = !isOwner;
-  const khatmasDropdownLink = document.getElementById('khatmasDropdownLink');
-  if(khatmasDropdownLink) khatmasDropdownLink.hidden = !isOwner;
   // Rename managed-nav labels: non-owners see clean generic labels, owners keep "مُدارة" labels
   const managedNavBtn = managedNavGroup?.querySelector('.nav-group-btn');
   const managedCreateNavLink = managedNavGroup?.querySelector('a[href="#/managed-create"]');
@@ -409,19 +405,17 @@ async function router(){
   if(hash.startsWith('#/supervisor-panel')) return renderTemplate('supervisorPanelTemplate', setupSupervisorPanel);
   if(hash.startsWith('#/managed-khatmas/archived')) return renderTemplate('managedKhatmasArchivedTemplate', setupManagedKhatmasArchived);
   if(hash.startsWith('#/managed-khatmas')) return renderTemplate('managedKhatmasTemplate', setupManagedKhatmas);
-  if(hash.startsWith('#/create')){
-    if(!state.user || state.user.role !== 'owner'){ location.hash = canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home'; return; }
-    return renderTemplate('createTemplate', setupCreate);
-  }
-  if(hash.startsWith('#/khatmas')){
-    if(!state.user || state.user.role !== 'owner'){ location.hash = canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home'; return; }
-    return renderTemplate('khatmasTemplate', setupKhatmas);
-  }
-  if(hash.startsWith('#/khatma/')){
-    if(!state.user || state.user.role !== 'owner'){ location.hash = canUseManagedKhatmas() ? '#/managed-khatmas' : '#/home'; return; }
-    return renderTemplate('khatmaTemplate', () => { const parts = hash.split('/'); setupKhatma(parts[2], parts[3] === 'manage'); });
+  if(hash.startsWith('#/create') || hash.startsWith('#/khatmas') || hash.startsWith('#/khatma/')){
+    return renderRetiredOrdinaryKhatmaPage();
   }
   renderTemplate('homeTemplate', setupHome);
+}
+function renderRetiredOrdinaryKhatmaPage(){
+  app.innerHTML = `<section class="page-head"><span class="eyebrow">الختمات</span><h1>غير متاح</h1></section>
+    <article class="feature-card empty-state">
+      <h3>الختمات العادية لم تعد متاحة في ToAllah. النظام يعمل الآن بالختمات المدارة فقط.</h3>
+      <a class="btn primary" href="#/managed-khatmas">الانتقال إلى الختمات المدارة</a>
+    </article>`;
 }
 function renderTemplate(id, setup){
   const tpl = document.getElementById(id);
@@ -2991,6 +2985,17 @@ function currentHijriPeriodLabel(rotationStartDate, rotationType){
   }
   return '';
 }
+// Rollover: prefers the server-computed period label (from managed_batch_rollover_events
+// via withManagedKhatmaAppliedHijriPeriod) over the client-side date estimate, so the
+// khatma/reader-facing views reflect the actual applied rollover cycle once one exists.
+function appliedHijriPeriodLabel(k, rotationStart){
+  if(k?.currentHijriPeriodLabel) return k.currentHijriPeriodLabel;
+  if(k?.khatmaType === 'monthly' && rotationStart && Number(k.periodNumber) > 0){
+    const hm = getHijriMonthAtOffset(rotationStart, Math.max(0, Number(k.periodNumber) - 1));
+    if(hm.name && hm.year) return `${hm.name} ${hm.year} هـ`;
+  }
+  return currentHijriPeriodLabel(rotationStart, k?.khatmaType) || '';
+}
 function csvRowsToManagedData(rows){
   const participants = [];
   const assignments = {};
@@ -3171,6 +3176,7 @@ async function setupManagedReaders(){
     tableEl.innerHTML = readers.length
       ? readers.map(r => readerRowHtml(r)).join('')
       : `<p style="opacity:0.5;text-align:center;padding:20px">${_readersQ ? 'لا توجد نتائج' : 'لا يوجد قراء بلا مجموعة'}</p>`;
+    readers.forEach(r => window.loadReaderGroupsBadge(r.id));
     if(!pagerEl) return;
     if(pages <= 1){ pagerEl.style.display = 'none'; return; }
     pagerEl.style.display = 'flex';
@@ -3307,8 +3313,73 @@ function readerRowHtml(r, groupId){
   const rData = escapeHtml(JSON.stringify({name:r.name||'',phone:r.phone||'',accessCode:r.accessCode||'',country:r.country||'',serialCode:r.serialCode||'',startJuz:r.startJuz||'',partsCount:r.partsCount||'',notes:r.notes||'',groupId:r.groupId||''}));
   const sharedBadge = r.sharedCreatorGroupId ? `<span class="mini-pill v32" style="background:rgba(15,95,69,.13);color:var(--primary);font-size:11px;margin-right:4px">مشارك</span>` : '';
   const shareBtn = state.user?.role === 'owner' ? `<button class="btn ghost compact-btn" onclick="window.openShareReader('${escapeJs(r.id)}')">مشاركة</button>` : '';
-  return `<div class="owner-row" data-reader-row-id="${escapeHtml(r.id)}" data-reader-data='${rData}'><div class="owner-row-main"><strong class="owner-row-title">${escapeHtml(r.name)}${sharedBadge}</strong><span class="owner-row-meta">${r.serialCode ? escapeHtml(r.serialCode) + ' · ' : ''}${escapeHtml(normalizeLocalPhone(r.phone||'')||'بلا جوال')} · كود: ${escapeHtml(r.accessCode)}${r.country ? ' · ' + escapeHtml(r.country) : ''}${r.startJuz ? ' · ج' + r.startJuz + '×' + r.partsCount : ''}${r.ownerName ? ' · ' + escapeHtml(r.ownerName) : ''}</span></div><div class="owner-row-actions"><button class="btn ghost compact-btn" onclick="${editCall}">تعديل</button>${shareBtn}<button class="btn ghost danger-btn compact-btn" onclick="deleteManagedReader('${escapeJs(r.id)}')">حذف</button></div></div>`;
+  const groupsBtn = `<button class="btn ghost compact-btn" onclick="window.openReaderGroups('${escapeJs(r.id)}')">المجموعات</button>`;
+  return `<div class="owner-row" data-reader-row-id="${escapeHtml(r.id)}" data-reader-data='${rData}'><div class="owner-row-main"><strong class="owner-row-title">${escapeHtml(r.name)}${sharedBadge}</strong><span class="owner-row-meta">${r.serialCode ? escapeHtml(r.serialCode) + ' · ' : ''}${escapeHtml(normalizeLocalPhone(r.phone||'')||'بلا جوال')} · كود: ${escapeHtml(r.accessCode)}${r.country ? ' · ' + escapeHtml(r.country) : ''}${r.startJuz ? ' · ج' + r.startJuz + '×' + r.partsCount : ''}${r.ownerName ? ' · ' + escapeHtml(r.ownerName) : ''}</span><span class="owner-row-groups" id="readerGroupsBadge_${escapeHtml(r.id)}" style="display:block;font-size:11px;color:var(--muted);margin-top:2px">جارٍ تحميل المجموعات…</span></div><div class="owner-row-actions"><button class="btn ghost compact-btn" onclick="${editCall}">تعديل</button>${groupsBtn}${shareBtn}<button class="btn ghost danger-btn compact-btn" onclick="deleteManagedReader('${escapeJs(r.id)}')">حذف</button></div></div>`;
 }
+// P0: Multi-Group Reader membership panel (read/add/remove group memberships
+// from the reader card, backed by managed_reader_group_memberships).
+window.loadReaderGroupsBadge = async function(readerId){
+  const badge = document.getElementById('readerGroupsBadge_' + readerId);
+  if(!badge) return;
+  try {
+    const res = await api('/managed-readers/' + encodeURIComponent(readerId) + '/groups');
+    const groups = res.groups || [];
+    badge.textContent = groups.length
+      ? 'المجموعات: ' + groups.map(g => g.groupName).join('، ')
+      : 'بلا مجموعات';
+  } catch { badge.textContent = ''; }
+};
+window.openReaderGroups = async function(readerId){
+  document.querySelectorAll('[id^="readerGroupsPanel_"]').forEach(el => el.remove());
+  const row = document.querySelector(`[data-reader-row-id="${CSS.escape(readerId)}"]`);
+  if(!row) return;
+  const container = document.createElement('div');
+  container.id = 'readerGroupsPanel_' + readerId;
+  row.after(container);
+  container.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:6px 0">جاري تحميل المجموعات…</p>';
+  const renderPanel = async () => {
+    let memberships = [];
+    try { memberships = (await api('/managed-readers/' + encodeURIComponent(readerId) + '/groups')).groups || []; }
+    catch(err){ container.innerHTML = `<p style="color:var(--danger);padding:6px 0">${escapeHtml(err.message || 'تعذر تحميل المجموعات')}</p>`; return; }
+    const memberIds = new Set(memberships.map(m => m.groupId));
+    const allGroups = state.managedReaderGroups || [];
+    const availableGroups = allGroups.filter(g => !memberIds.has(g.id));
+    const rowsHtml = memberships.length
+      ? memberships.map(m => `<div class="owner-row" style="padding:6px 8px"><span>${escapeHtml(m.groupName)}</span><button class="btn ghost danger-btn compact-btn" onclick="window.removeReaderFromGroupUi('${escapeJs(readerId)}','${escapeJs(m.groupId)}')">إزالة</button></div>`).join('')
+      : '<p style="color:var(--muted);font-size:13px">هذا القارئ ليس ضمن أي مجموعة</p>';
+    const opts = availableGroups.map(g => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.name)}</option>`).join('');
+    container.innerHTML = `<div class="inline-panel action-sheet" style="margin:4px 0 8px"><div class="sheet-head"><h4>مجموعات القارئ</h4><span>عضوية متعددة</span></div>
+      ${rowsHtml}
+      ${availableGroups.length ? `<label style="display:block;margin:10px 0 8px">إضافة إلى مجموعة<select id="addReaderGroupSelect_${escapeHtml(readerId)}" style="width:100%;margin-top:4px">${opts}</select></label>
+      <div class="compact-actions">
+        <button class="btn primary compact-btn" id="confirmAddReaderGroupBtn_${escapeHtml(readerId)}">إضافة</button>
+        <button class="btn ghost compact-btn" id="cancelReaderGroupsBtn_${escapeHtml(readerId)}">إغلاق</button>
+      </div>` : `<div class="compact-actions"><button class="btn ghost compact-btn" id="cancelReaderGroupsBtn_${escapeHtml(readerId)}">إغلاق</button></div>`}
+      </div>`;
+    document.getElementById(`cancelReaderGroupsBtn_${readerId}`)?.addEventListener('click', ()=>{ container.remove(); });
+    document.getElementById(`confirmAddReaderGroupBtn_${readerId}`)?.addEventListener('click', async ()=>{
+      const selGroupId = document.getElementById(`addReaderGroupSelect_${readerId}`)?.value || '';
+      if(!selGroupId) return;
+      try {
+        await api('/managed-reader-groups/' + encodeURIComponent(selGroupId) + '/members', {method:'POST', body:{readerProfileId: readerId}});
+        toast('تمت الإضافة إلى المجموعة');
+        window.loadReaderGroupsBadge(readerId);
+        await renderPanel();
+      } catch(err){ toast(err.message || 'تعذرت الإضافة'); }
+    });
+  };
+  await renderPanel();
+};
+window.removeReaderFromGroupUi = async function(readerId, groupId){
+  const ok = await showDeleteConfirmModal({title:'إزالة من المجموعة', message:'سيتم فك ارتباط القارئ بهذه المجموعة فقط، ولن يُحذف ملفه.'});
+  if(!ok) return;
+  try {
+    await api('/managed-reader-groups/' + encodeURIComponent(groupId) + '/members/' + encodeURIComponent(readerId), {method:'DELETE'});
+    toast('تمت الإزالة من المجموعة');
+    window.loadReaderGroupsBadge(readerId);
+    window.openReaderGroups(readerId);
+  } catch(err){ toast(err.message || 'تعذرت الإزالة'); }
+};
 window.openEditReaderInGroup = function(readerId){
   // Find reader data from DOM row
   const row = document.querySelector(`[data-reader-row-id="${CSS.escape(readerId)}"]`);
@@ -3696,13 +3767,13 @@ async function setupReaderLogin(){
         }
 
         const periodLabel = (k.khatmaType === 'monthly' || k.khatmaType === 'weekly')
-          ? (currentHijriPeriodLabel(rotationStart, k.khatmaType) || '')
+          ? appliedHijriPeriodLabel(k, rotationStart)
           : '';
         const status = managedKhatmaStatus(k);
         const done = displayUnits.filter(u=>u.status==='completed').length;
         const total = displayUnits.length;
         const allDone = total > 0 && done === total;
-        const periodEndStr = formatPeriodEnd(rotationStart, k.khatmaType);
+        const periodEndStr = k.currentHijriPeriodKey ? '' : formatPeriodEnd(rotationStart, k.khatmaType);
         return `
           <article class="form-card glass" style="margin-bottom:18px">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap;gap:8px">
@@ -3827,10 +3898,10 @@ async function setupReaderKhatma(khatmaId){
     } else {
       const displayUnits = khatma.units || [];
       const periodLabel = (khatma.khatmaType==='monthly'||khatma.khatmaType==='weekly')
-        ? (currentHijriPeriodLabel(rotationStart, khatma.khatmaType)||'') : '';
+        ? appliedHijriPeriodLabel(khatma, rotationStart) : '';
       const done = displayUnits.filter(u=>u.status==='completed').length;
       const total = displayUnits.length;
-      const periodEndStr = formatPeriodEnd(rotationStart, khatma.khatmaType);
+      const periodEndStr = khatma.currentHijriPeriodKey ? '' : formatPeriodEnd(rotationStart, khatma.khatmaType);
       unitsHtml = `
         <p style="color:var(--muted);font-size:13px;margin:0 0 12px">${periodLabel ? 'الفترة: '+escapeHtml(periodLabel)+' · ' : ''}${done}/${total} مكتمل${periodEndStr?' · ينتهي: '+escapeHtml(periodEndStr):''}</p>
         <div class="units-grid" style="grid-template-columns:repeat(auto-fill,minmax(105px,1fr));gap:8px">
@@ -4029,6 +4100,8 @@ async function setupReaderGroup(id){
           ${readers.map(r => readerRowHtml(r, id)).join('') || '<article class="feature-card empty-state"><h3>لا يوجد قراء</h3></article>'}
         </div>
       </section>`;
+
+    readers.forEach(r => window.loadReaderGroupsBadge(r.id));
 
     document.getElementById('editGroupMainForm')?.addEventListener('submit', async e => {
       e.preventDefault();
@@ -4735,6 +4808,1492 @@ function setupManagedKhatmas(){
   list.innerHTML = `<article class="feature-card empty-state"><h3>جاري التحميل...</h3></article>`;
   refreshManagedKhatmas({ page: state.managedKhatmasPage || 1, q: state.managedKhatmasSearch }).then(_renderMKListPage);
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ROLLOVER — Hijri Monthly Rollover Phase 2: Rollover Center + Rollover Plan modal
+// ══════════════════════════════════════════════════════════════════════════════
+
+function setupSafeBatchRolloverControls(cfg){
+  const monthEl = document.getElementById(cfg.monthId);
+  const dryEl = document.getElementById(cfg.dryRunId);
+  const resDiv = document.getElementById(cfg.resultId);
+  const runBtn = document.getElementById(cfg.runBtnId);
+  const pauseBtn = document.getElementById(cfg.pauseBtnId);
+  const resumeBtn = document.getElementById(cfg.resumeBtnId);
+  const scopeModeEl = document.getElementById('mkBatchScopeMode');
+  const groupWrapEl = document.getElementById('mkBatchGroupIdWrap');
+  const rangeWrapEl = document.getElementById('mkBatchRangeWrap');
+  const rangeCountEl = document.getElementById('mkBatchRangeCount');
+  if(!monthEl || !dryEl || !resDiv || !runBtn) return;
+
+  let running = false;
+  let paused = false;
+  let pauseRequested = false;
+  let errorStopped = false;
+  let lastMonth = '';
+  let lastDryRun = true;
+  let scopeLabel = 'كل المجموعات';
+
+  const applyScopeModeVisibility = () => {
+    const mode = scopeModeEl ? scopeModeEl.value : 'full';
+    if(groupWrapEl) groupWrapEl.style.display = mode === 'single' ? 'flex' : 'none';
+    if(rangeWrapEl) rangeWrapEl.style.display = mode === 'range' ? 'flex' : 'none';
+  };
+  if(scopeModeEl) scopeModeEl.addEventListener('change', applyScopeModeVisibility);
+  applyScopeModeVisibility();
+
+  // Reusable searchable group picker — queries ALL groups via /reader-global-search
+  // (not limited to any preloaded subset). Used for Single Group and both ends of Range.
+  function makeGroupPicker({inputId, hintId, resultsId, selectedWrapId, selectedId, clearBtnId, onChange}){
+    const inputEl = document.getElementById(inputId);
+    const hintEl = document.getElementById(hintId);
+    const resultsEl = document.getElementById(resultsId);
+    const selectedWrapEl = document.getElementById(selectedWrapId);
+    const selectedEl = document.getElementById(selectedId);
+    const clearBtnEl = document.getElementById(clearBtnId);
+    let picked = null; // {id, name, serialNumber, label}
+
+    const updateDisplay = () => {
+      if(!selectedWrapEl || !selectedEl) return;
+      if(picked){
+        selectedWrapEl.style.display = 'flex';
+        selectedEl.innerHTML = `${escapeHtml(picked.label)}<br><span style="font-size:12px;color:var(--muted);font-weight:400">${escapeHtml(picked.id)}</span>`;
+      } else {
+        selectedWrapEl.style.display = 'none';
+        selectedEl.textContent = '';
+      }
+    };
+    const clear = () => { picked = null; updateDisplay(); if(onChange) onChange(null); };
+    if(clearBtnEl) clearBtnEl.addEventListener('click', clear);
+
+    const renderResults = (groups) => {
+      if(!resultsEl) return;
+      if(!groups.length){
+        resultsEl.innerHTML = '<p style="color:var(--muted);font-size:12px;margin:4px 0">لم يتم العثور على مجموعة.</p>';
+        return;
+      }
+      resultsEl.innerHTML = groups.map(g => {
+        const label = g.serialNumber ? `${g.serialNumber} — ${g.name}` : (g.name || g.id);
+        const readersLine = g.readersCount !== undefined ? ` · القراء: ${g.readersCount}` : '';
+        return `<button type="button" class="btn ghost compact-btn" data-group-id="${escapeJs(g.id)}" data-group-name="${escapeJs(g.name||'')}" data-group-serial="${escapeJs(g.serialNumber||'')}" data-group-label="${escapeJs(label)}" style="text-align:right;justify-content:flex-start;flex-direction:column;align-items:flex-start">
+          <span>${escapeHtml(label)}</span><span style="font-size:11px;color:var(--muted)">${escapeHtml(g.id)}${readersLine}</span>
+        </button>`;
+      }).join('');
+      resultsEl.querySelectorAll('[data-group-id]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          picked = { id: btn.dataset.groupId, name: btn.dataset.groupName, serialNumber: btn.dataset.groupSerial, label: btn.dataset.groupLabel };
+          updateDisplay();
+          resultsEl.innerHTML = '';
+          if(inputEl) inputEl.value = '';
+          if(onChange) onChange(picked);
+        });
+      });
+    };
+    let debounce = null;
+    if(inputEl){
+      inputEl.addEventListener('input', () => {
+        clearTimeout(debounce);
+        const q = inputEl.value.trim();
+        if(resultsEl) resultsEl.innerHTML = '';
+        if(q.length < 2){
+          if(hintEl) hintEl.textContent = 'اكتب رقمين أو أكثر للبحث.';
+          return;
+        }
+        if(hintEl) hintEl.textContent = 'جاري البحث...';
+        debounce = setTimeout(async () => {
+          try{
+            const res = await api('/reader-global-search?q=' + encodeURIComponent(q) + '&type=group');
+            const groups = (res.groups || []).filter(g => g.type === 'group');
+            if(hintEl) hintEl.textContent = 'اكتب رقمين أو أكثر للبحث.';
+            renderResults(groups);
+          }catch(err){
+            if(resultsEl) resultsEl.innerHTML = '<p style="color:var(--danger);font-size:12px;margin:4px 0">تعذر البحث عن المجموعات.</p>';
+          }
+        }, 350);
+      });
+    }
+    return { get picked(){ return picked; }, clear };
+  }
+
+  const singlePicker = makeGroupPicker({
+    inputId:'mkBatchGroupSearchInput', hintId:'mkBatchGroupSearchHint', resultsId:'mkBatchGroupSearchResults',
+    selectedWrapId:'mkBatchGroupSelectedWrap', selectedId:'mkBatchGroupSelected', clearBtnId:'mkBatchGroupClearBtn'
+  });
+
+  // Range: two searchable pickers (from/to), then a reliable backend range fetch —
+  // never limited to a preloaded subset of groups.
+  let rangeGroups = [];
+  let rangeFetchState = 'idle'; // idle | loading | ok | empty | error
+  let rangeFetchPromise = null;
+  const parseGroupSerialInt = serial => {
+    const m = /(\d+)/.exec(String(serial || ''));
+    return m ? parseInt(m[1], 10) : null;
+  };
+  const renderRangeStatus = () => {
+    if(!rangeCountEl) return;
+    if(rangeFetchState === 'loading') rangeCountEl.textContent = 'جاري تحديد المجموعات ضمن النطاق...';
+    else if(rangeFetchState === 'ok') rangeCountEl.textContent = `عدد المجموعات ضمن النطاق: ${rangeGroups.length}`;
+    else if(rangeFetchState === 'empty') rangeCountEl.textContent = 'لم يتم العثور على مجموعات ضمن النطاق المحدد.';
+    else if(rangeFetchState === 'error') rangeCountEl.textContent = 'تعذر بناء نطاق المجموعات.';
+    else rangeCountEl.textContent = '';
+  };
+  const fetchRangeIfReady = () => {
+    const from = rangeFromPicker.picked, to = rangeToPicker.picked;
+    rangeGroups = [];
+    if(!from || !to){ rangeFetchState = 'idle'; renderRangeStatus(); rangeFetchPromise = null; return; }
+    const fromNum = parseGroupSerialInt(from.serialNumber);
+    const toNum = parseGroupSerialInt(to.serialNumber);
+    if(fromNum === null || toNum === null){ rangeFetchState = 'error'; renderRangeStatus(); rangeFetchPromise = null; return; }
+    rangeFetchState = 'loading'; renderRangeStatus();
+    rangeFetchPromise = (async () => {
+      try{
+        const res = await api(`/managed-reader-groups/range?from=${fromNum}&to=${toNum}`);
+        rangeGroups = res.groups || [];
+        rangeFetchState = rangeGroups.length ? 'ok' : 'empty';
+      }catch(err){
+        rangeFetchState = 'error';
+      }
+      renderRangeStatus();
+    })();
+  };
+  const rangeFromPicker = makeGroupPicker({
+    inputId:'mkBatchRangeFromInput', hintId:'mkBatchRangeFromHint', resultsId:'mkBatchRangeFromResults',
+    selectedWrapId:'mkBatchRangeFromSelectedWrap', selectedId:'mkBatchRangeFromSelected', clearBtnId:'mkBatchRangeFromClearBtn',
+    onChange: fetchRangeIfReady
+  });
+  const rangeToPicker = makeGroupPicker({
+    inputId:'mkBatchRangeToInput', hintId:'mkBatchRangeToHint', resultsId:'mkBatchRangeToResults',
+    selectedWrapId:'mkBatchRangeToSelectedWrap', selectedId:'mkBatchRangeToSelected', clearBtnId:'mkBatchRangeToClearBtn',
+    onChange: fetchRangeIfReady
+  });
+
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const setButtons = () => {
+    runBtn.disabled = running;
+    runBtn.textContent = running ? '⟳ جاري التدوير الآمن...' : '⟳ بدء التدوير الآمن';
+    if(pauseBtn) pauseBtn.disabled = !running || pauseRequested;
+    if(resumeBtn) resumeBtn.disabled = running || (!paused && !errorStopped);
+    if(monthEl) monthEl.disabled = running;
+    if(dryEl) dryEl.disabled = running;
+  };
+  const statusLabel = status => ({
+    running: 'قيد التشغيل',
+    paused: 'تم الإيقاف المؤقت',
+    error: 'متوقف بسبب خطأ',
+    completed: 'اكتمل التدوير',
+    preview: 'معاينة فقط'
+  }[status] || status);
+  const statusColor = status => status === 'error' ? 'var(--danger)' : status === 'completed' ? '#059669' : status === 'paused' ? '#b45309' : 'var(--primary)';
+  const itemRow = (item, type) => {
+    if(type==='rolled') return `<li><strong>${escapeHtml(item.khatma_name||item.khatma_id)}</strong> — ${escapeHtml(item.group_name||item.group_id)} — ${item.assignments_created} تكليف — ${item.period_number_before}→${item.period_number_after}${item.partial_recovery?' ⚠':''}</li>`;
+    if(type==='skipped') return `<li>${escapeHtml(item.khatma_name||item.khatma_id)} — <span style="color:var(--muted)">${escapeHtml(item.reason||'')}</span></li>`;
+    if(type==='failed') return `<li style="color:var(--danger)">${escapeHtml(item.khatma_name||item.khatma_id)} — ${escapeHtml(item.error||'')}</li>`;
+    if(type==='warning') return `<li style="color:var(--muted)">${escapeHtml(item.khatma_id||'')} — ${escapeHtml(item.code||'')}${item.reader_name?' — '+escapeHtml(item.reader_name):''}</li>`;
+    return '';
+  };
+  const detailSection = (arr, type, label, color) => !arr.length ? '' :
+    `<details ${type==='failed'?'open':''}><summary><strong style="color:${color}">${label} (${arr.length})</strong></summary><ul style="margin:6px 0 0;padding-inline-start:20px;font-size:13px;line-height:1.9">${arr.map(i=>itemRow(i,type)).join('')}</ul></details>`;
+  const render = (ctx) => {
+    const agg = ctx.agg || { rolled: [], skipped: [], failed: [], warnings: [] };
+    const diag = ctx.lastDiagnostics || {};
+    const diagVal = key => diag[key] === undefined || diag[key] === null ? '-' : escapeHtml(String(diag[key]));
+    const prCount = agg.warnings
+      .filter(w => w.code === 'partial_recovery_detected')
+      .reduce((sum, w) => sum + (Number(w.count) || 0), 0);
+    const s = { rolled: agg.rolled.length, skipped: agg.skipped.length, failed: agg.failed.length, warnings: agg.warnings.length };
+    const latest = ctx.latestBatch || { rolled: 0, skipped: 0, failed: 0, warnings: 0 };
+    resDiv.innerHTML = `
+      ${ctx.dryRun?`<p style="background:rgba(234,179,8,.12);border:1px solid rgba(234,179,8,.4);border-radius:10px;padding:10px 14px;font-size:13px;margin:0 0 12px"><strong>هذه معاينة فقط، لم يتم تطبيق أي تدوير.</strong></p>`:''}
+      <div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;background:var(--surface)">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px">
+          <strong style="color:${statusColor(ctx.status)}">${statusLabel(ctx.status)}</strong>
+          <span style="color:var(--muted)">الدفعة الداخلية: ${ctx.chunkLimit === 1 ? 'ختمة واحدة' : (ctx.chunkLimit || 1) + ' ختمات'}</span>
+          <span style="color:var(--muted)">دفعات منفذة: ${ctx.chunksRun || 0}</span>
+        </div>
+        ${ctx.message ? `<p style="margin:8px 0 0;color:${ctx.status==='error'?'var(--danger)':'var(--muted)'};font-size:13px">${escapeHtml(ctx.message)}</p>` : ''}
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px"><strong>النطاق:</strong> ${escapeHtml(scopeLabel)}</div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px;font-size:14px">
+        <span style="color:#059669">✓ مُدوَّرة: <strong>${s.rolled}</strong></span>
+        <span style="color:var(--muted)">تخطّت: <strong>${s.skipped}</strong></span>
+        <span style="color:var(--danger)">فشلت: <strong>${s.failed}</strong></span>
+        <span style="color:#b45309">تحذيرات: <strong>${s.warnings}</strong></span>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        المرشحون: ${ctx.candidatesFound || 0} — مُعالَج: ${ctx.totalProcessed || 0} — target_calendar: ${escapeHtml(ctx.targetCalendar || 'hijri')}${prCount > 0 ? ` — استكمال جزئي: ${prCount}` : ''}
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px;display:flex;gap:10px;flex-wrap:wrap">
+        <span>completed_before: ${diagVal('completed_before')}</span>
+        <span>completed_after: ${diagVal('completed_after')}</span>
+        <span>pending_after: ${diagVal('pending_after')}</span>
+        <span>processed_count: ${diagVal('processed_count')}</span>
+        <span>chunk_limit: ${diagVal('chunk_limit')}</span>
+        <span>has_more: ${diagVal('has_more')}</span>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px;display:flex;gap:10px;flex-wrap:wrap">
+        <span>آخر دفعة — مدوّرة: ${latest.rolled}</span>
+        <span>متخطاة: ${latest.skipped}</span>
+        <span>فاشلة: ${latest.failed}</span>
+        <span>تحذيرات: ${latest.warnings}</span>
+      </div>
+      ${ctx.status === 'completed' && !ctx.dryRun ? `<p style="color:#059669;font-weight:800;margin:10px 0">اكتمل التدوير</p>` : ''}
+      ${ctx.status === 'paused' ? `<p style="color:#b45309;font-weight:800;margin:10px 0">تم الإيقاف المؤقت</p>` : ''}
+      ${ctx.status === 'error' ? `<p style="color:var(--danger);font-weight:800;margin:10px 0">سيتوقف النظام تلقائيًا عند أي خطأ</p>` : ''}
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${detailSection(agg.rolled,'rolled','مُدوَّرة','#059669')}
+        ${detailSection(agg.skipped,'skipped','متخطاة','var(--muted)')}
+        ${detailSection(agg.failed,'failed','فشلت','var(--danger)')}
+        ${detailSection(agg.warnings,'warning','تحذيرات','#b45309')}
+      </div>`;
+  };
+
+  async function runAuto(skipConfirm=false){
+    if(running) return;
+    const month = (monthEl.value || '').trim();
+    const dryRun = dryEl.checked !== false;
+    const ym = /^(\d{4})-(\d{2})$/.exec(month);
+    const hy = ym ? Number(ym[1]) : 0, hm = ym ? Number(ym[2]) : 0;
+    if(!ym || hy < 1300 || hy > 1600 || hm < 1 || hm > 12){
+      resDiv.innerHTML = `<p style="color:var(--danger);margin:0">صيغة الشهر غير صحيحة. أدخل شهرًا هجريًا بصيغة YYYY-MM (مثال: 1448-02)</p>`;
+      return;
+    }
+    const scopeMode = scopeModeEl ? scopeModeEl.value : 'full';
+    let scopedGroupIds = [];
+    let singleLabel = '', fromLabel = '', toLabel = '';
+
+    if(scopeMode === 'single'){
+      const picked = singlePicker.picked;
+      if(!picked){
+        resDiv.innerHTML = `<p style="color:var(--danger);margin:0">اختر مجموعة أولًا.</p>`;
+        return;
+      }
+      scopedGroupIds = [picked.id];
+      singleLabel = `${picked.label} / ${picked.id}`;
+      scopeLabel = `المجموعة المحددة: ${singleLabel}`;
+    } else if(scopeMode === 'range'){
+      const from = rangeFromPicker.picked, to = rangeToPicker.picked;
+      if(!from || !to){
+        resDiv.innerHTML = `<p style="color:var(--danger);margin:0">اختر بداية ونهاية نطاق المجموعات.</p>`;
+        return;
+      }
+      if(rangeFetchPromise) await rangeFetchPromise;
+      if(rangeFetchState === 'error'){
+        resDiv.innerHTML = `<p style="color:var(--danger);margin:0">تعذر بناء نطاق المجموعات.</p>`;
+        return;
+      }
+      if(rangeFetchState !== 'ok' || !rangeGroups.length){
+        resDiv.innerHTML = `<p style="color:var(--danger);margin:0">لم يتم العثور على مجموعات ضمن النطاق المحدد.</p>`;
+        return;
+      }
+      scopedGroupIds = rangeGroups.map(g => g.id);
+      fromLabel = from.serialNumber || from.label;
+      toLabel = to.serialNumber || to.label;
+      scopeLabel = `من ${fromLabel} إلى ${toLabel} — عدد المجموعات: ${rangeGroups.length}`;
+    } else {
+      scopedGroupIds = [];
+      scopeLabel = 'كل المجموعات';
+    }
+
+    if(!dryRun && !skipConfirm){
+      const confirmMsg = scopeMode === 'single'
+        ? `سيتم تشغيل التدوير الحقيقي على المجموعة المحددة فقط: ${singleLabel}
+الشهر المستهدف: ${month}
+سيتم التدوير تلقائيًا على دفعات صغيرة جدًا.
+الدفعة الداخلية: ختمة واحدة.
+سيتوقف النظام تلقائيًا عند أي خطأ.
+يمكن الاستئناف من آخر نقطة مكتملة.`
+        : scopeMode === 'range'
+        ? `سيتم تشغيل التدوير الحقيقي على نطاق المجموعات من ${fromLabel} إلى ${toLabel}، عدد المجموعات: ${scopedGroupIds.length}
+الشهر المستهدف: ${month}
+سيتم التدوير تلقائيًا على دفعات صغيرة جدًا.
+الدفعة الداخلية: ختمة واحدة.
+سيتوقف النظام تلقائيًا عند أي خطأ.
+يمكن الاستئناف من آخر نقطة مكتملة.`
+        : `تحذير: سيتم تشغيل التدوير الحقيقي على كل المجموعات / كل الختمات المرشحة.
+الشهر المستهدف: ${month}
+سيتم التدوير تلقائيًا على دفعات صغيرة جدًا.
+الدفعة الداخلية: ختمة واحدة.
+سيتوقف النظام تلقائيًا عند أي خطأ.
+يمكن الاستئناف من آخر نقطة مكتملة.`;
+      if(!confirm(confirmMsg)) return;
+    }
+
+    running = true;
+    paused = false;
+    pauseRequested = false;
+    errorStopped = false;
+    lastMonth = month;
+    lastDryRun = dryRun;
+    setButtons();
+
+    const chunkLimit = dryRun ? 99 : 1;
+    const agg = { rolled: [], skipped: [], failed: [], warnings: [] };
+    let candidatesFound = 0, totalProcessed = 0, chunksRun = 0, targetCalendar = 'hijri';
+    let lastDiagnostics = {};
+    let latestBatch = { rolled: 0, skipped: 0, failed: 0, warnings: 0 };
+    let curOffset = 0, hasMore = true;
+    render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: dryRun ? 'preview' : 'running', message: dryRun ? 'جاري المعاينة الآمنة...' : 'يتم التدوير تلقائيًا على دفعات صغيرة جدًا' });
+
+    try {
+      while(hasMore){
+        const body = dryRun
+          ? { target_year_month:month, dry_run:true, algorithm:'period_shift_v1', offset:curOffset, limit:chunkLimit }
+          : { target_year_month:month, dry_run:false, algorithm:'period_shift_v1', mode:'next_pending_chunk', limit:chunkLimit };
+        if(scopedGroupIds.length) body.group_ids = scopedGroupIds;
+        const data = await api('/managed-rollover/batch-monthly', { method:'POST', body });
+        const diag = data.diagnostics || {};
+        lastDiagnostics = diag;
+        candidatesFound = diag.candidates_found ?? candidatesFound;
+        totalProcessed += diag.processed_count ?? 0;
+        targetCalendar = diag.target_calendar || targetCalendar;
+        chunksRun++;
+        const rolled = data.rolled || [], skipped = data.skipped || [], failed = data.failed || [], warnings = data.warnings || [];
+        latestBatch = { rolled: rolled.length, skipped: skipped.length, failed: failed.length, warnings: warnings.length };
+        agg.rolled.push(...rolled);
+        agg.skipped.push(...skipped);
+        agg.failed.push(...failed);
+        agg.warnings.push(...warnings);
+
+        if(failed.length > 0 || Number(data.summary?.failed || 0) > 0){
+          hasMore = false;
+          render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: 'error', message: 'توقف النظام تلقائيًا عند وجود فشل في الدفعة.' });
+          break;
+        }
+        hasMore = diag.has_more === true;
+        curOffset = dryRun ? (diag.next_offset ?? 0) : 0;
+        if(!hasMore){
+          render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: 'completed', message: dryRun ? 'انتهت المعاينة.' : 'اكتمل التدوير' });
+          break;
+        }
+        if(pauseRequested){
+          paused = true;
+          hasMore = false;
+          render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: 'paused', message: 'تم الإيقاف المؤقت بعد اكتمال الدفعة الحالية.' });
+          break;
+        }
+        render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: dryRun ? 'preview' : 'running', message: dryRun ? 'جاري المعاينة الآمنة...' : 'يتم التدوير تلقائيًا على دفعات صغيرة جدًا' });
+        await sleep(500);
+      }
+    } catch(err){
+      errorStopped = true;
+      const periodNotFinished = err.message === 'period_not_finished';
+      const errMsg = periodNotFinished
+        ? 'لا يمكن تنفيذ التدوير الحقيقي قبل انتهاء الشهر الحالي. المعاينة فقط مسموحة الآن.'
+        : (err.message || 'تعذر الاتصال');
+      render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: 'error', message: errMsg });
+    } finally {
+      running = false;
+      setButtons();
+    }
+  }
+
+  runBtn.addEventListener('click', () => runAuto(false));
+  pauseBtn?.addEventListener('click', () => {
+    if(!running) return;
+    pauseRequested = true;
+    setButtons();
+  });
+  resumeBtn?.addEventListener('click', () => {
+    if(running || (!paused && !errorStopped)) return;
+    if(lastMonth && monthEl) monthEl.value = lastMonth;
+    if(dryEl) dryEl.checked = lastDryRun;
+    runAuto(true);
+  });
+  setButtons();
+}
+
+
+const rpState = {
+  khatmaId: '', groupId: '', khatmaSerial: '',
+  plans: [], selectedPlanId: '', preview: null,
+  selectedCycle: 1, loadingPlans: false, loadingPreview: false
+};
+
+// ===========================================================================
+// ROLLOVER CENTER MODAL
+// ===========================================================================
+let rcState = { tab:'generate', mode:'single', khatmas:[], serialFrom:'', serialTo:'', groups:[], planGroupId:'', plans:[], scanResults:[], forecastKhatmaId:'', forecastHorizon:'1y', forecastResults:null };
+
+function openRolloverCenter(){
+  rcState = { tab:'generate', mode:'single', khatmas:[], serialFrom:'', serialTo:'', groups:[], planGroupId:'', plans:[], scanResults:[], forecastKhatmaId:'', forecastHorizon:'1y', forecastResults:null };
+  renderRolloverCenter();
+  api('/managed-khatmas?mode=dropdown&limit=200').then(res => {
+    rcState.khatmas = (res.khatmas||[]).filter(k => !k.archivedAt);
+    ['rcKhatmaSelect','rcForecastKhatma'].forEach(id => {
+      const sel = document.getElementById(id);
+      if(sel) _rcPopulateKhatmaSelect(sel);
+    });
+  }).catch(()=>{});
+}
+
+function _rcPopulateKhatmaSelect(sel){
+  sel.innerHTML = '<option value="">— اختر الختمة —</option>' + rcState.khatmas.map(k =>
+    `<option value="${escapeHtml(k.id)}" data-group="${escapeHtml(k.groupId||'')}" data-type="${escapeHtml(k.khatmaType||'monthly')}">${escapeHtml(k.khatmaSerialNumber||k.id)} — ${escapeHtml(k.title||'')} (${escapeHtml(k.khatmaType||'')})</option>`
+  ).join('');
+}
+
+function closeRolloverCenter(){ document.getElementById('rcModal')?.remove(); }
+
+function renderRolloverCenter(){
+  document.getElementById('rcModal')?.remove();
+  const el = document.createElement('div');
+  el.id = 'rcModal';
+  el.className = 'modal-backdrop';
+  el.innerHTML = buildRcModalHtml();
+  document.body.appendChild(el);
+  bindRcModal(el);
+  if(rcState.mode === 'single' && rcState.khatmas.length){
+    const sel = document.getElementById('rcKhatmaSelect');
+    if(sel) _rcPopulateKhatmaSelect(sel);
+  }
+}
+
+function buildRcModalHtml(){
+  const tabs = [{id:'generate',label:'إنشاء / معاينة'},{id:'plans',label:'الخطط'},{id:'forecast',label:'التوقعات'}];
+  const tabNav = tabs.map(t => {
+    const active = rcState.tab === t.id;
+    return `<button class="rc-tab-btn" style="padding:10px 18px;border:none;background:${active?'var(--primary)':'transparent'};color:${active?'#fff':'var(--text)'};font-size:13px;font-weight:700;cursor:pointer;border-bottom:2px solid ${active?'var(--primary)':'transparent'};transition:all .15s" data-rc-tab="${t.id}">${t.label}</button>`;
+  }).join('');
+  let content = '';
+  if(rcState.tab === 'generate') content = buildRcGenerateHtml();
+  else if(rcState.tab === 'plans') content = buildRcPlansHtml();
+  else content = buildRcForecastHtml();
+  return `<div class="modal-card rp-card" role="dialog" aria-modal="true" dir="rtl" style="max-width:900px;width:96%;max-height:90vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
+    <div style="padding:14px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;background:var(--card-solid)">
+      <h3 style="margin:0;font-size:16px">⟳ إدارة التدوير</h3>
+      <button class="btn ghost compact-btn" id="rcClose">✕ إغلاق</button>
+    </div>
+    <div style="display:flex;border-bottom:1px solid var(--line);flex-shrink:0;background:var(--card-solid)">${tabNav}</div>
+    <div style="padding:20px;overflow-y:auto;flex:1">${content}</div>
+  </div>`;
+}
+
+function buildRcGenerateHtml(){
+  const modes = [
+    {id:'single',label:'ختمة واحدة'},{id:'range',label:'نطاق Serial'},
+    {id:'weekly',label:'أسبوعية مستحقة'},{id:'monthly',label:'شهرية مستحقة'},{id:'yearly',label:'سنوية مستحقة'},
+  ];
+  const modeHtml = modes.map(m => {
+    const active = rcState.mode === m.id;
+    return `<button class="mini-pill v32" data-rc-mode="${m.id}" style="padding:6px 12px;cursor:pointer;border:1px solid ${active?'var(--primary)':'var(--line)'};background:${active?'var(--primary)':'transparent'};color:${active?'#fff':'var(--text)'};border-radius:999px;font-size:13px;font-weight:700">${m.label}</button>`;
+  }).join('');
+  let fields = '';
+  if(rcState.mode === 'single'){
+    fields = `<div style="margin-top:12px"><label style="font-size:13px;font-weight:700;display:block;margin-bottom:4px">الختمة</label>
+      <select id="rcKhatmaSelect" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card-solid);color:var(--text);font-size:13px">
+        <option value="">${rcState.khatmas.length?'— اختر الختمة —':'— جاري التحميل —'}</option>
+      </select></div>`;
+  } else if(rcState.mode === 'range'){
+    fields = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+      <div><label style="font-size:13px;font-weight:700;display:block;margin-bottom:4px">من Serial</label>
+        <input id="rcSerialFrom" type="text" placeholder="K-000001" value="${escapeHtml(rcState.serialFrom)}" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card-solid);color:var(--text);font-size:13px"/></div>
+      <div><label style="font-size:13px;font-weight:700;display:block;margin-bottom:4px">إلى Serial</label>
+        <input id="rcSerialTo" type="text" placeholder="K-000050" value="${escapeHtml(rcState.serialTo)}" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card-solid);color:var(--text);font-size:13px"/></div>
+    </div>`;
+  } else {
+    const typeName = rcState.mode === 'weekly'?'الأسبوعية':rcState.mode === 'monthly'?'الشهرية':'السنوية';
+    fields = `<p style="color:var(--muted);font-size:13px;margin-top:10px">سيتم مسح جميع الختمات ${typeName} وإنشاء مسودات للمستحقة. (حتى 200 ختمة)</p>`;
+  }
+  let resultsHtml = '';
+  if(rcState.scanResults.length){
+    if(rcState.mode === 'single'){
+      const item = rcState.scanResults[0];
+      const khatma = rcState.khatmas.find(k => k.id === item.khatma_id) || {};
+      resultsHtml = `<div class="admin-panel premium-admin-panel" style="border-right:3px solid var(--primary);margin-top:14px">
+        <div class="sheet-head"><h4>الختمة المحددة جاهزة للمعالجة</h4></div>
+        <p style="font-size:13px;margin:4px 0;line-height:1.9">
+          <strong>Serial:</strong> ${escapeHtml(khatma.khatmaSerialNumber||item.khatma_id)}<br>
+          <strong>النوع:</strong> ${escapeHtml(item.khatma_type||'monthly')}<br>
+          <strong>المجموعة:</strong> ${escapeHtml(khatma.groupId||item.group_id||'—')}
+        </p>
+        <p style="color:var(--muted);font-size:12px;margin-top:6px">اضغط "حفظ كمسودة" لإنشاء مسودة خطة التدوير، أو افتح نافذة المراجعة الكاملة.</p>
+        <button class="btn ghost compact-btn" style="margin-top:10px" id="rcOpenRpBtn">🔍 فتح في نافذة المراجعة الكاملة</button>
+      </div>`;
+    } else {
+      const available = rcState.scanResults.filter(i => i.can_generate).length;
+      const blocked = rcState.scanResults.filter(i => !i.can_generate).length;
+      const rows = rcState.scanResults.map((item, idx) => `<tr style="border-bottom:1px solid var(--line)">
+        <td style="padding:6px;text-align:center"><input type="checkbox" class="rc-chk" data-rc-idx="${idx}" ${item.can_generate?'checked':'disabled title="لديها خطة نشطة"'}></td>
+        <td style="padding:6px;font-family:monospace;font-size:12px">${escapeHtml(item.khatma_serial||'—')}</td>
+        <td style="padding:6px;font-size:12px">${escapeHtml(item.khatma_type||'—')}</td>
+        <td style="padding:6px;font-size:12px">${escapeHtml(item.group_name||'—')}</td>
+        <td style="padding:6px;font-size:11px">${item.has_blocking_plan
+          ?`<span style="color:var(--danger)">⛔ ${escapeHtml((item.blocking_plan_id||'').slice(-10))}</span>`
+          :'<span style="color:var(--primary)">✓ متاح</span>'}</td>
+        <td class="rc-draft-cell-${idx}" style="padding:6px;font-size:11px;font-family:monospace">—</td>
+      </tr>`).join('');
+      resultsHtml = `<div style="margin-top:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <strong style="font-size:13px">نتائج المسح: ${rcState.scanResults.length} ختمة · <span style="color:var(--primary)">${available} متاح</span> · ${blocked} محظور</strong>
+          <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="rcCheckAll" checked style="margin-left:4px"> تحديد الكل المتاح</label>
+        </div>
+        <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted);font-size:12px">
+            <th style="padding:6px;width:32px"></th><th style="padding:6px;text-align:right">Serial</th>
+            <th style="padding:6px;text-align:right">النوع</th><th style="padding:6px;text-align:right">المجموعة</th>
+            <th style="padding:6px;text-align:right">الحالة</th><th style="padding:6px;text-align:right">Draft</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </div>`;
+    }
+  }
+  const showSave = rcState.scanResults.length > 0;
+  const saveLabel = rcState.mode === 'single' ? '💾 حفظ كمسودة' : '💾 حفظ المحددة كمسودات';
+  return `<div class="admin-panel premium-admin-panel" style="border-right:3px solid var(--primary);margin-bottom:16px">
+    <div class="sheet-head"><h4>وضع العملية</h4></div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">${modeHtml}</div>
+  </div>
+  <div class="form-card glass">
+    ${fields}
+    <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <button class="btn primary compact-btn" id="rcScanBtn">🔍 معاينة / مسح</button>
+      <span id="rcScanStatus" style="color:var(--muted);font-size:13px"></span>
+    </div>
+  </div>
+  ${resultsHtml}
+  ${showSave?`<div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <button class="btn primary compact-btn" id="rcSaveDraftsBtn">${saveLabel}</button>
+    <button class="btn ghost compact-btn" disabled style="opacity:.4;cursor:not-allowed">▶ تطبيق — معطل في هذه المرحلة</button>
+    <span id="rcSaveStatus" style="color:var(--muted);font-size:13px"></span>
+  </div>`:''}`;
+}
+
+function buildRcForecastHtml(){
+  const khatmaOpts = '<option value="">— اختر الختمة —</option>' + rcState.khatmas.map(k =>
+    `<option value="${escapeHtml(k.id)}" data-group="${escapeHtml(k.groupId||'')}" data-type="${escapeHtml(k.khatmaType||'monthly')}" ${rcState.forecastKhatmaId===k.id?'selected':''}>${escapeHtml(k.khatmaSerialNumber||k.id)} — ${escapeHtml(k.title||'')} (${escapeHtml(k.khatmaType||'')})</option>`
+  ).join('');
+  const horizonOpts = [
+    {id:'1y',label:'سنة واحدة'},{id:'5y',label:'5 سنوات'},{id:'15y',label:'15 سنة'}
+  ].map(h=>`<option value="${h.id}" ${rcState.forecastHorizon===h.id?'selected':''}>${h.label}</option>`).join('');
+
+  let resultsHtml = '';
+  if(rcState.forecastResults){
+    const { cycles, group_name, khatma_type, current_khatma_serial, periods_count } = rcState.forecastResults;
+    const typeLabel = khatma_type==='weekly'?'أسبوعية':khatma_type==='monthly'?'شهرية':khatma_type==='yearly'?'سنوية':escapeHtml(khatma_type||'');
+    const rows = [];
+    for(const cycle of cycles){
+      const hasWarn = cycle.warnings.length > 0;
+      const warnText = cycle.warnings.map(w => w.code==='cycle_missing_unit'?`مفقود ج${w.unit_number}`:w.code==='multi_reader_unit'?`ج${w.unit_number} مشترك`:escapeHtml(w.code)).join('، ');
+      for(let ri=0; ri<cycle.assignments.length; ri++){
+        const a = cycle.assignments[ri];
+        const isFirst = ri===0;
+        const rowspan = cycle.assignments.length;
+        rows.push(`<tr style="border-bottom:1px solid var(--line);${hasWarn&&isFirst?'background:rgba(201,154,62,.05)':''}">
+          ${isFirst?`<td rowspan="${rowspan}" style="padding:6px;text-align:center;font-weight:800;font-size:12px;border-left:1px solid var(--line);vertical-align:middle;color:var(--primary)">${escapeHtml(cycle.period_label)}</td>`:''}
+          <td style="padding:5px 6px;font-size:12px">${escapeHtml(a.reader_name||a.reader_profile_id)}</td>
+          <td style="padding:5px 6px;text-align:center;font-size:12px;color:var(--muted)">${a.parts_count}</td>
+          <td style="padding:5px 6px;font-size:12px;direction:ltr;text-align:left">${a.units.map(u=>`ج${u}`).join(' ')}</td>
+          ${isFirst?`<td rowspan="${rowspan}" style="padding:5px 6px;font-size:11px;vertical-align:middle">${hasWarn?`<span style="color:var(--gold)">⚠ ${escapeHtml(warnText)}</span>`:'<span style="color:var(--primary)">✓</span>'}</td>`:''}
+        </tr>`);
+      }
+    }
+    resultsHtml = `<div style="margin-top:16px">
+      <div class="admin-panel premium-admin-panel" style="border-right:3px solid var(--primary);margin-bottom:12px;padding:10px 14px">
+        <strong style="font-size:13px">${escapeHtml(group_name||'')} · ${typeLabel} · ${periods_count} دورة${current_khatma_serial?' · من '+escapeHtml(current_khatma_serial):''}</strong>
+        <span style="font-size:11px;color:var(--muted);margin-right:8px">قراءة فقط — لا كتابة في قاعدة البيانات</span>
+      </div>
+      <div style="overflow:auto;max-height:520px;border:1px solid var(--line);border-radius:8px">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead style="position:sticky;top:0;background:var(--card-solid);z-index:1">
+            <tr style="border-bottom:2px solid var(--line);font-size:12px;color:var(--muted)">
+              <th style="padding:7px 6px;text-align:center;border-left:1px solid var(--line)">الدورة</th>
+              <th style="padding:7px 6px;text-align:right">القارئ</th>
+              <th style="padding:7px 6px;text-align:center">الأجزاء</th>
+              <th style="padding:7px 6px;text-align:right">الوحدات (ج=جزء)</th>
+              <th style="padding:7px 6px;text-align:right">ملاحظات</th>
+            </tr>
+          </thead>
+          <tbody>${rows.join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
+  }
+
+  return `<div class="form-card glass" style="margin-bottom:0">
+    <div style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end">
+      <div>
+        <label style="font-size:13px;font-weight:700;display:block;margin-bottom:4px">الختمة (لتحديد نقطة البداية)</label>
+        <select id="rcForecastKhatma" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card-solid);color:var(--text);font-size:13px">${khatmaOpts}</select>
+      </div>
+      <div>
+        <label style="font-size:13px;font-weight:700;display:block;margin-bottom:4px">الأفق الزمني</label>
+        <select id="rcForecastHorizon" style="padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card-solid);color:var(--text);font-size:13px">${horizonOpts}</select>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin:8px 0 0">قراءة فقط — لا ينشئ خططاً ولا مسودات ولا يكتب في قاعدة البيانات.</p>
+    <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+      <button class="btn primary compact-btn" id="rcForecastBtn">📅 توليد جدول التوقعات</button>
+      <span id="rcForecastStatus" style="color:var(--muted);font-size:13px"></span>
+    </div>
+  </div>
+  ${resultsHtml}`;
+}
+
+function buildRcPlansHtml(){
+  const groupOpts = '<option value="">— اختر المجموعة —</option>' + rcState.groups.map(g =>
+    `<option value="${escapeHtml(g.id)}" ${rcState.planGroupId===g.id?'selected':''}>${escapeHtml(g.name)}</option>`
+  ).join('');
+  let plansHtml = '';
+  if(rcState.planGroupId && !rcState.plans.length){
+    plansHtml = '<p style="color:var(--muted);font-size:13px;margin-top:10px" id="rcPlanStatus">لا توجد خطط لهذه المجموعة.</p>';
+  } else if(rcState.plans.length){
+    const rows = rcState.plans.map(p => `<tr style="border-bottom:1px solid var(--line)">
+      <td style="padding:6px;font-family:monospace;font-size:11px;direction:ltr;text-align:left">${escapeHtml(p.id||'')}</td>
+      <td style="padding:6px;font-size:12px">${escapeHtml(p.khatma_type||'—')}</td>
+      <td style="padding:6px"><span class="badge ${rpStatusClass(p.status||'')}" style="font-size:10px;padding:2px 7px">${rpStatusLabel(p.status||'')}</span></td>
+      <td style="padding:6px;font-size:12px;color:var(--muted)">${(p.created_at||'').slice(0,10)}</td>
+      <td style="padding:6px;white-space:nowrap">
+        <button class="btn ghost compact-btn" style="font-size:11px;padding:3px 8px" data-rc-open-plan="${escapeHtml(p.id||'')}" data-rc-plan-khatma="${escapeHtml(p.khatma_id||'')}">فتح</button>
+        ${p.status==='draft'?`<button class="btn danger-btn compact-btn" style="font-size:11px;padding:3px 8px;margin-right:4px" data-rc-delete-draft="${escapeHtml(p.id||'')}">🗑 حذف المسودة</button>`:''}
+      </td>
+    </tr>`).join('');
+    plansHtml = `<div style="overflow-x:auto;margin-top:12px"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="border-bottom:2px solid var(--line);font-size:12px;color:var(--muted)">
+        <th style="padding:6px;text-align:right">المعرّف</th><th style="padding:6px;text-align:right">النوع</th>
+        <th style="padding:6px;text-align:right">الحالة</th><th style="padding:6px;text-align:right">التاريخ</th>
+        <th style="padding:6px;text-align:right">إجراءات</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+  }
+  return `<div class="form-card glass">
+    <label style="font-size:13px;font-weight:700;display:block;margin-bottom:4px">المجموعة</label>
+    <select id="rcPlanGroupSelect" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card-solid);color:var(--text);font-size:13px">${groupOpts}</select>
+    <span id="rcPlanStatus" style="font-size:13px;color:var(--muted);margin-top:6px;display:block"></span>
+  </div>${plansHtml}`;
+}
+
+function bindRcModal(el){
+  el.querySelector('#rcClose')?.addEventListener('click', closeRolloverCenter);
+  el.addEventListener('click', e => { if(e.target === el) closeRolloverCenter(); });
+
+  el.querySelectorAll('[data-rc-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      rcState.tab = btn.dataset.rcTab;
+      if(rcState.tab === 'plans' && !rcState.groups.length){
+        api('/managed-reader-groups').then(res => {
+          rcState.groups = res.groups || [];
+          renderRolloverCenter();
+        }).catch(()=>{ renderRolloverCenter(); });
+      } else {
+        renderRolloverCenter();
+      }
+    });
+  });
+
+  el.querySelectorAll('[data-rc-mode]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      rcState.mode = btn.dataset.rcMode;
+      rcState.scanResults = [];
+      renderRolloverCenter();
+      if(rcState.mode === 'single' && !rcState.khatmas.length){
+        api('/managed-khatmas?mode=dropdown&limit=200').then(res => {
+          rcState.khatmas = (res.khatmas||[]).filter(k => !k.archivedAt);
+          const sel = document.getElementById('rcKhatmaSelect');
+          if(sel) _rcPopulateKhatmaSelect(sel);
+        }).catch(()=>{});
+      }
+    });
+  });
+
+  el.querySelector('#rcScanBtn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('rcScanBtn');
+    const statusEl = document.getElementById('rcScanStatus');
+    if(btn) btn.disabled = true;
+    if(statusEl) statusEl.textContent = 'جارٍ المسح…';
+    try {
+      if(rcState.mode === 'single'){
+        const sel = document.getElementById('rcKhatmaSelect');
+        const khatmaId = sel?.value;
+        if(!khatmaId){ if(statusEl) statusEl.textContent = 'اختر الختمة أولاً'; if(btn) btn.disabled=false; return; }
+        const opt = sel.options[sel.selectedIndex];
+        const groupId = opt?.dataset?.group || '';
+        const khatmaType = opt?.dataset?.type || 'monthly';
+        rcState.scanResults = [{ khatma_id:khatmaId, group_id:groupId, khatma_type:khatmaType }];
+        if(statusEl) statusEl.textContent = 'تم تحديد الختمة.';
+        renderRolloverCenter();
+      } else {
+        const body = {};
+        if(rcState.mode === 'range'){
+          const from = document.getElementById('rcSerialFrom')?.value?.trim() || '';
+          const to = document.getElementById('rcSerialTo')?.value?.trim() || '';
+          rcState.serialFrom = from; rcState.serialTo = to;
+          if(from) body.serial_from = from;
+          if(to) body.serial_to = to;
+        } else {
+          body.khatma_type = rcState.mode;
+        }
+        const res = await api('/managed-rollover-plans/batch-scan', { method:'POST', body });
+        rcState.scanResults = res.items || [];
+        if(statusEl) statusEl.textContent = `${rcState.scanResults.length} ختمة`;
+        renderRolloverCenter();
+      }
+    } catch(err){
+      if(statusEl) statusEl.textContent = 'خطأ: ' + escapeHtml(err.message||'');
+    } finally {
+      const b = document.getElementById('rcScanBtn');
+      if(b) b.disabled = false;
+    }
+  });
+
+  el.querySelector('#rcCheckAll')?.addEventListener('change', e => {
+    document.querySelectorAll('.rc-chk:not([disabled])').forEach(cb => { cb.checked = e.target.checked; });
+  });
+
+  el.querySelector('#rcOpenRpBtn')?.addEventListener('click', () => {
+    const item = rcState.scanResults[0];
+    if(!item) return;
+    const khatma = rcState.khatmas.find(k => k.id === item.khatma_id) || {};
+    closeRolloverCenter();
+    openRolloverPlanModal(item.khatma_id, item.group_id, khatma.khatmaSerialNumber || '');
+  });
+
+  el.querySelector('#rcSaveDraftsBtn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('rcSaveDraftsBtn');
+    const statusEl = document.getElementById('rcSaveStatus');
+    if(btn) btn.disabled = true;
+    if(statusEl) statusEl.textContent = 'جارٍ الحفظ…';
+    try {
+      if(rcState.mode === 'single'){
+        const item = rcState.scanResults[0];
+        if(!item){ if(statusEl) statusEl.textContent = 'لا يوجد شيء للحفظ'; return; }
+        const res = await api('/managed-rollover-plans/generate-preview', {
+          method:'POST',
+          body:{ group_id:item.group_id, current_khatma_id:item.khatma_id, algorithm:'period_shift_v1', khatma_type:item.khatma_type, save_as_draft:true }
+        });
+        if(res.draft_plan_id){
+          if(statusEl) statusEl.innerHTML = `<span style="color:var(--primary)">✓ مسودة: ${escapeHtml(res.draft_plan_id)}</span>`;
+          toast('✓ تم حفظ المسودة');
+        } else {
+          if(statusEl) statusEl.innerHTML = `<span style="color:var(--danger)">❌ ${escapeHtml(res.error||'فشل الحفظ')}</span>`;
+        }
+      } else {
+        const checked = [];
+        document.querySelectorAll('.rc-chk:checked').forEach(cb => {
+          const idx = Number(cb.dataset.rcIdx);
+          const item = rcState.scanResults[idx];
+          if(item) checked.push({ khatma_id:item.khatma_id, group_id:item.group_id, khatma_type:item.khatma_type, khatma_serial:item.khatma_serial });
+        });
+        if(!checked.length){ if(statusEl) statusEl.textContent = 'لم يتم تحديد أي ختمة'; if(btn) btn.disabled=false; return; }
+        const res = await api('/managed-rollover-plans/batch-save-drafts', { method:'POST', body:{ items:checked } });
+        const s = res.summary || {};
+        if(statusEl) statusEl.innerHTML = `<span style="color:var(--primary)">✓ منشأ: ${s.created||0}</span> · فاشل: ${s.failed||0} · متخطى: ${s.skipped||0}`;
+        (res.results||[]).forEach(r => {
+          const idx = rcState.scanResults.findIndex(i => i.khatma_id === r.khatma_id);
+          if(idx < 0) return;
+          const cell = document.querySelector(`.rc-draft-cell-${idx}`);
+          if(!cell) return;
+          if(r.status==='created') cell.innerHTML = `<span style="color:var(--primary)">✓ ${escapeHtml((r.draft_plan_id||'').slice(-12))}</span>`;
+          else if(r.status==='skipped') cell.innerHTML = `<span style="color:var(--muted)">⏭ ${escapeHtml(r.reason||'skipped')}</span>`;
+          else cell.innerHTML = `<span style="color:var(--danger)">❌ ${escapeHtml(r.reason||'خطأ')}</span>`;
+        });
+      }
+    } catch(err){
+      if(statusEl) statusEl.textContent = 'خطأ: ' + escapeHtml(err.message||'');
+    } finally {
+      const b = document.getElementById('rcSaveDraftsBtn');
+      if(b) b.disabled = false;
+    }
+  });
+
+  el.querySelector('#rcPlanGroupSelect')?.addEventListener('change', async e => {
+    rcState.planGroupId = e.target.value;
+    rcState.plans = [];
+    if(!rcState.planGroupId){ renderRolloverCenter(); return; }
+    const statusEl = document.getElementById('rcPlanStatus');
+    if(statusEl) statusEl.textContent = 'جارٍ التحميل…';
+    try {
+      const res = await api(`/managed-rollover-plans?group_id=${encodeURIComponent(rcState.planGroupId)}&limit=50`);
+      rcState.plans = res.plans || [];
+      renderRolloverCenter();
+    } catch(err){
+      if(statusEl) statusEl.textContent = 'خطأ: ' + escapeHtml(err.message||'');
+    }
+  });
+
+  el.querySelectorAll('[data-rc-open-plan]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const planId = btn.dataset.rcOpenPlan;
+      const khatmaId = btn.dataset.rcPlanKhatma || '';
+      const plan = rcState.plans.find(p => p.id === planId);
+      closeRolloverCenter();
+      openRolloverPlanModal(plan?.khatma_id || khatmaId, plan?.group_id || rcState.planGroupId, '');
+    });
+  });
+
+  el.querySelector('#rcForecastBtn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('rcForecastBtn');
+    const statusEl = document.getElementById('rcForecastStatus');
+    const khatmaSel = document.getElementById('rcForecastKhatma');
+    const horizonSel = document.getElementById('rcForecastHorizon');
+    if(btn) btn.disabled = true;
+    if(statusEl) statusEl.textContent = 'جارٍ التوليد…';
+    try {
+      const khatmaId = khatmaSel?.value || '';
+      const horizon = horizonSel?.value || '1y';
+      rcState.forecastKhatmaId = khatmaId;
+      rcState.forecastHorizon = horizon;
+      if(!khatmaId){ if(statusEl) statusEl.textContent = 'اختر الختمة أولاً'; if(btn) btn.disabled=false; return; }
+      const khatma = rcState.khatmas.find(k => k.id === khatmaId) || {};
+      const groupId = khatma.groupId || '';
+      if(!groupId){ if(statusEl) statusEl.textContent = 'لا يوجد group_id للختمة المحددة'; if(btn) btn.disabled=false; return; }
+      const khatmaType = khatma.khatmaType || 'monthly';
+      const perYear = khatmaType==='weekly'?52:khatmaType==='monthly'?12:1;
+      const years = horizon==='1y'?1:horizon==='5y'?5:15;
+      const periods = perYear * years;
+      const res = await api('/managed-rollover-plans/forecast', { method:'POST', body:{ group_id:groupId, khatma_id:khatmaId, periods } });
+      if(!res.ok) throw new Error(res.error || 'forecast_failed');
+      rcState.forecastResults = res;
+      if(statusEl) statusEl.textContent = `${res.cycles?.length||0} دورة مولّدة`;
+      renderRolloverCenter();
+    } catch(err){
+      if(statusEl) statusEl.textContent = 'خطأ: ' + escapeHtml(err.message||'');
+    } finally {
+      const b = document.getElementById('rcForecastBtn');
+      if(b) b.disabled = false;
+    }
+  });
+
+  el.querySelectorAll('[data-rc-delete-draft]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const planId = btn.dataset.rcDeleteDraft;
+      if(!planId) return;
+      if(!confirm(`تأكيد حذف المسودة:\n${planId}\n\nسيُحذف نهائيًا مع جميع التعيينات والبيانات التابعة له.\nلا يمكن التراجع.`)) return;
+      btn.disabled = true;
+      btn.textContent = '…';
+      try {
+        await api(`/managed-rollover-plans/${encodeURIComponent(planId)}/delete-draft`, { method:'DELETE' });
+        toast('✓ تم حذف المسودة');
+        rcState.plans = rcState.plans.filter(p => p.id !== planId);
+        renderRolloverCenter();
+      } catch(err){
+        btn.disabled = false;
+        btn.textContent = '🗑 حذف المسودة';
+        const errMsg = err.message || 'تعذر الحذف';
+        alert('خطأ: ' + errMsg);
+      }
+    });
+  });
+}
+
+// ===========================================================================
+
+async function rvOpenAndSelectDraft(groupId, khatmaId, khatmaSerial, planId) {
+  rpState.khatmaId = khatmaId;
+  rpState.groupId = groupId;
+  rpState.khatmaSerial = khatmaSerial || khatmaId.slice(-8);
+  rpState.plans = [];
+  rpState.selectedPlanId = '';
+  rpState.preview = null;
+  rpState.selectedCycle = 1;
+  rpState.loadingPlans = false;
+  rpState.loadingPreview = false;
+  renderRpModal();
+  await loadRpPlans();
+  if (planId) {
+    rpState.selectedPlanId = planId;
+    rpState.selectedCycle = 1;
+    rpState.preview = null;
+    renderRpModal();
+    loadRpPreview(planId);
+  }
+}
+
+window.openRolloverPlanModal = function(khatmaId, groupId, khatmaSerial) {
+  rpState.khatmaId = khatmaId;
+  rpState.groupId = groupId || '';
+  rpState.khatmaSerial = khatmaSerial || khatmaId.slice(-8);
+  rpState.plans = [];
+  rpState.selectedPlanId = '';
+  rpState.preview = null;
+  rpState.selectedCycle = 1;
+  rpState.loadingPlans = false;
+  rpState.loadingPreview = false;
+  renderRpModal();
+  loadRpPlans();
+};
+
+function closeRpModal() {
+  document.getElementById('rpModal')?.remove();
+}
+
+function renderRpModal() {
+  const existing = document.getElementById('rpModal');
+  const scrollMain = existing?.querySelector('.rp-main')?.scrollTop || 0;
+  existing?.remove();
+  const el = document.createElement('div');
+  el.id = 'rpModal';
+  el.className = 'modal-backdrop';
+  el.innerHTML = buildRpModalHtml();
+  document.body.appendChild(el);
+  const main = el.querySelector('.rp-main');
+  if (main && scrollMain) main.scrollTop = scrollMain;
+  bindRpModal(el);
+}
+
+function rpStatusLabel(s) {
+  return { draft: 'مسودة', approved: 'معتمدة', active: 'نشطة', completed: 'مكتملة', invalidated: 'ملغاة' }[s] || s;
+}
+function rpStatusClass(s) {
+  return { approved: 'done', active: 'done', invalidated: 'closed' }[s] || '';
+}
+
+function buildRpModalHtml() {
+  const { plans, selectedPlanId, preview, selectedCycle, loadingPlans, loadingPreview } = rpState;
+  let plansHtml;
+  if (loadingPlans) {
+    plansHtml = '<p class="rp-muted">جار التحميل…</p>';
+  } else if (!plans.length) {
+    plansHtml = '<p class="rp-muted">لا توجد خطط بعد.</p>';
+  } else {
+    plansHtml = plans.map(p => `
+      <div class="rp-plan-item${selectedPlanId === p.id ? ' rp-selected' : ''}" data-rp-select="${escapeHtml(p.id)}">
+        <span class="rp-plan-id">${escapeHtml(p.id)}</span>
+        <span class="rp-plan-meta">
+          <span class="badge ${rpStatusClass(p.status)}" style="font-size:10px;padding:2px 7px">${rpStatusLabel(p.status)}</span>
+          <span style="font-size:11px;color:var(--muted)">${escapeHtml(p.khatma_type || '')} · ${(p.created_at || '').slice(0, 10)}</span>
+        </span>
+      </div>`).join('');
+  }
+  let mainHtml = '';
+  if (!selectedPlanId) {
+    mainHtml = '<div class="rp-empty-hint"><p>اختر خطة من القائمة للمراجعة.</p></div>';
+  } else if (loadingPreview) {
+    mainHtml = '<p class="rp-muted" style="padding:24px">جار تحميل المعاينة…</p>';
+  } else if (preview) {
+    mainHtml = buildRpPreviewHtml(preview, selectedCycle);
+  } else {
+    mainHtml = '<p class="rp-muted" style="padding:24px">اضغط على خطة لتحميل معاينتها.</p>';
+  }
+  return `<div class="modal-card rp-card" role="dialog" aria-modal="true" dir="rtl">
+    <div class="sheet-head" style="margin-bottom:10px">
+      <h3 style="margin:0;font-size:16px">إدارة خطة التدوير</h3>
+      <button class="btn ghost compact-btn" id="rpCloseBtn" type="button">✕ إغلاق</button>
+    </div>
+    <div class="rp-bar">
+      <button class="btn ghost compact-btn" id="rpExportBtn" type="button">⇩ تصدير قالب JSON</button>
+      <button class="btn ghost compact-btn" id="rpRefreshBtn" type="button">↻ تحديث القائمة</button>
+    </div>
+    <div class="rp-layout">
+      <div class="rp-sidebar">
+        <div class="sheet-head" style="margin-bottom:8px"><h4 style="margin:0;font-size:13px">الخطط (${plans.length})</h4></div>
+        <div>${plansHtml}</div>
+      </div>
+      <div class="rp-main">${mainHtml}</div>
+    </div>
+    <details class="rp-import-details">
+      <summary class="rp-import-summary">📥 استيراد خطة JSON</summary>
+      <div class="inline-panel action-sheet" style="margin-top:8px">
+        <p style="color:var(--muted);font-size:12px;margin:0 0 8px">الصق JSON الناتج عن الخوارزمية الخارجية أو اختر ملفاً.</p>
+        <textarea id="rpJsonTA" rows="5" style="width:100%;box-sizing:border-box;font-size:11px;font-family:monospace;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--card-solid);color:var(--text)" placeholder='{"plan":{...},"readers":[...],"assignments":[]}'></textarea>
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn primary compact-btn" id="rpImportBtn" type="button">استيراد</button>
+          <button class="btn ghost compact-btn" id="rpImportFileBtn" type="button">اختيار ملف</button>
+          <input type="file" id="rpImportFile" accept=".json" style="display:none"/>
+        </div>
+        <div id="rpImportMsg" style="margin-top:6px;font-size:12px"></div>
+      </div>
+    </details>
+  </div>`;
+}
+
+function buildRpPreviewHtml(preview, selectedCycle) {
+  const pm = preview.plan || {};
+  const v = preview.validation || {};
+  const errors = v.errors || [];
+  const warnings = v.warnings || [];
+  const readers = preview.readers || [];
+  const cycles = preview.cycles || [];
+  const isDraft = pm.status === 'draft';
+  const totalCycles = pm.total_cycles || 30;
+  let validStrip = '';
+  if (errors.length) {
+    const activePlanErr = errors.find(e => e.code === 'active_plan_exists');
+    if (activePlanErr) validStrip += `<div class="rp-strip rp-strip-err">🚫 توجد خطة نشطة حالية (${escapeHtml(activePlanErr.plan_id || '')}). يجب إبطالها قبل اعتماد خطة جديدة.</div>`;
+    const otherErrs = errors.filter(e => e.code !== 'active_plan_exists');
+    if (otherErrs.length) validStrip += `<div class="rp-strip rp-strip-err">❌ ${otherErrs.length} خطأ: ${otherErrs.slice(0, 3).map(e => escapeHtml(e.code || String(e))).join(' · ')}${otherErrs.length > 3 ? '…' : ''}</div>`;
+  }
+  if (warnings.length) validStrip += `<div class="rp-strip rp-strip-warn">⚠️ ${warnings.length} تنبيه: ${warnings.slice(0, 3).map(w => escapeHtml(w.code || String(w))).join(' · ')}${warnings.length > 3 ? '…' : ''}</div>`;
+  if (v.valid) validStrip += '<div class="rp-strip rp-strip-ok">✅ الخطة صحيحة — جاهزة للاعتماد</div>';
+  const metaHtml = `<div class="rp-meta">
+    <span><b>الحالة:</b> <span class="badge ${rpStatusClass(pm.status)}" style="font-size:11px;padding:2px 8px">${rpStatusLabel(pm.status)}</span></span>
+    <span><b>الدورات:</b> ${totalCycles}</span>
+    <span><b>القراء:</b> ${readers.length}</span>
+    <span style="font-size:11px;color:var(--muted)">${escapeHtml(pm.algorithm || '')} v${escapeHtml(String(pm.algorithm_version || ''))}</span>
+  </div>`;
+  const readersChips = readers.length
+    ? `<div class="rp-chips">${readers.map(r => `<span class="rp-chip">${escapeHtml(r.reader_name_snapshot || '')} (${r.parts_count_snapshot || 0}ج · ✓${r.history_unique_count || 0})</span>`).join('')}</div>`
+    : '';
+  const cycleOpts = Array.from({ length: totalCycles }, (_, i) => i + 1)
+    .map(n => `<option value="${n}"${n === selectedCycle ? ' selected' : ''}>الدورة ${n}</option>`).join('');
+  const cycleSel = `<div class="rp-cycle-bar"><label style="font-size:13px">الدورة: <select id="rpCycleSel" style="font-size:13px;border:1px solid var(--line);border-radius:8px;padding:3px 8px;background:var(--card-solid)">${cycleOpts}</select></label></div>`;
+  const cycleData = cycles.find(c => c.cycle_number === selectedCycle);
+  const assignments = cycleData?.assignments || [];
+  const readerById = new Map(readers.map(r => [r.reader_profile_id, r.reader_name_snapshot || r.reader_profile_id]));
+  let tableHtml = '';
+  if (!assignments.length) {
+    tableHtml = '<p class="rp-muted">لا تعيينات في هذه الدورة.</p>';
+  } else {
+    const rows = assignments.map(a => {
+      const aId = escapeHtml(a.id || '');
+      if (isDraft && a.id) {
+        const readerOpts = `<option value="">— —</option>` + readers.map(r =>
+          `<option value="${escapeHtml(r.reader_profile_id)}"${r.reader_profile_id === a.reader_profile_id ? ' selected' : ''}>${escapeHtml(r.reader_name_snapshot || '')}</option>`
+        ).join('');
+        return `<tr>
+          <td style="text-align:center">${a.unit_number}</td>
+          <td><select class="rp-sel" data-aid="${aId}" data-f="reader_profile_id">${readerOpts}</select></td>
+          <td><input class="rp-num" type="number" min="1" max="30" data-aid="${aId}" data-f="unit_number" value="${a.unit_number}"/></td>
+          <td><input class="rp-num" type="number" min="1" data-aid="${aId}" data-f="slot_index" value="${a.slot_index || ''}"/></td>
+          <td style="font-size:11px;color:var(--muted)">${escapeHtml(a.status || 'planned')}</td>
+          <td style="display:flex;gap:3px"><button class="btn ghost compact-btn rp-save-btn" data-aid="${aId}" type="button" style="font-size:11px;padding:3px 8px">حفظ</button><button class="btn ghost danger-btn compact-btn rp-del-btn" data-aid="${aId}" type="button" style="font-size:11px;padding:3px 6px" title="حذف هذا التعيين">✕</button></td>
+        </tr>`;
+      }
+      return `<tr>
+        <td style="text-align:center">${a.unit_number}</td>
+        <td>${escapeHtml(readerById.get(a.reader_profile_id) || '—')}</td>
+        <td style="text-align:center">${a.unit_number}</td>
+        <td style="text-align:center">${a.slot_index || '—'}</td>
+        <td style="font-size:11px;color:var(--muted)">${escapeHtml(a.status || 'planned')}</td>
+        <td>—</td>
+      </tr>`;
+    });
+    const addRowHtml = isDraft ? (() => {
+      const newReaderOpts = `<option value="">— اختر قارئاً —</option>` + readers.map(r =>
+        `<option value="${escapeHtml(r.reader_profile_id)}">${escapeHtml(r.reader_name_snapshot || '')}</option>`
+      ).join('');
+      return `<tr id="rpAddRow">
+        <td style="text-align:center;color:var(--muted)">—</td>
+        <td><select class="rp-sel" data-aid="__new__" data-f="reader_profile_id">${newReaderOpts}</select></td>
+        <td><input class="rp-num" type="number" min="1" max="30" data-aid="__new__" data-f="unit_number" placeholder="1–30"/></td>
+        <td><input class="rp-num" type="number" min="1" data-aid="__new__" data-f="slot_index" placeholder="موضع"/></td>
+        <td></td>
+        <td><button class="btn primary compact-btn" id="rpAddBtn" type="button" style="font-size:11px;padding:3px 10px">＋ إضافة</button></td>
+      </tr>`;
+    })() : '';
+    tableHtml = `<div class="rp-tbl-wrap"><table class="rp-tbl">
+      <thead><tr><th>ج</th><th>القارئ</th><th>رقم الوحدة</th><th>الموضع</th><th>الحالة</th><th>${isDraft ? 'إجراء' : ''}</th></tr></thead>
+      <tbody>${rows.join('')}${addRowHtml}</tbody>
+    </table></div>`;
+  }
+  const canApprove = isDraft && v.valid && !errors.length;
+  const approveBlockReason = errors.find(e => e.code === 'active_plan_exists')
+    ? 'توجد خطة نشطة — أبطلها أولاً'
+    : errors.length ? 'أصلح الأخطاء أولاً' : '';
+  const canInvalidate = ['draft', 'approved', 'active'].includes(pm.status);
+  const isAppliableStatus = ['approved', 'active'].includes(pm.status);
+  const lastAppliedCycle = cycles.reduce((max, c) => {
+    const allApplied = c.assignments.length === 30 && c.assignments.every(a => a.status === 'applied');
+    return allApplied ? Math.max(max, c.cycle_number) : max;
+  }, 0);
+  const expectedNextCycle = lastAppliedCycle + 1;
+  const cycleAlreadyApplied = assignments.length === 30 && assignments.every(a => a.status === 'applied');
+  const canApply = isAppliableStatus && v.valid && !errors.length && !cycleAlreadyApplied && selectedCycle === expectedNextCycle;
+  let applyBtnHtml = '';
+  if (isAppliableStatus) {
+    const applyTitle = cycleAlreadyApplied ? 'هذه الدورة مطبقة بالفعل'
+      : selectedCycle !== expectedNextCycle ? `يجب تطبيق الدورة ${expectedNextCycle} أولاً`
+      : 'الخطة تحتوي على أخطاء — أصلحها أولاً';
+    applyBtnHtml = canApply
+      ? `<button class="btn primary compact-btn" id="rpApplyBtn" type="button" style="background:var(--danger);border-color:var(--danger)">▶ تطبيق الدورة ${selectedCycle}</button>`
+      : `<button class="btn ghost compact-btn" disabled style="opacity:.45;cursor:not-allowed" title="${escapeHtml(applyTitle)}">▶ تطبيق الدورة ${selectedCycle}</button>`;
+  }
+  const applyWarningHtml = isAppliableStatus
+    ? `<div class="rp-strip rp-strip-warn" style="margin-top:8px;line-height:1.5">⚠️ تنبيه: تطبيق الخطة سينشئ ختمة جديدة، ويربط القراء بالأجزاء حسب الخطة، ثم يؤرشف الختمة الحالية. هذا الإجراء لا يُستخدم إلا بعد مراجعة الخطة واعتمادها.</div>`
+    : '';
+  const actionHtml = `<div class="rp-actions">
+    <button class="btn primary compact-btn" id="rpApproveBtn" ${canApprove ? '' : 'disabled'} title="${canApprove ? 'اعتماد الخطة' : approveBlockReason}">✓ اعتماد</button>
+    ${canInvalidate ? `<button class="btn ghost danger-btn compact-btn" id="rpInvalidateBtn">✗ إلغاء الخطة</button>` : ''}
+    <button class="btn ghost compact-btn" id="rpReloadPreviewBtn" type="button" title="إعادة تحميل المعاينة">↻</button>
+    ${applyBtnHtml}
+  </div>`;
+  return validStrip + metaHtml + readersChips + cycleSel + tableHtml + applyWarningHtml + actionHtml;
+}
+
+function bindRpModal(el) {
+  el.querySelector('#rpCloseBtn')?.addEventListener('click', closeRpModal);
+  el.addEventListener('click', e => { if (e.target === el) closeRpModal(); });
+  el.querySelector('#rpExportBtn')?.addEventListener('click', rpExport);
+  el.querySelector('#rpRefreshBtn')?.addEventListener('click', loadRpPlans);
+  el.querySelector('#rpCycleSel')?.addEventListener('change', e => {
+    rpState.selectedCycle = Number(e.target.value) || 1;
+    renderRpModal();
+  });
+  el.querySelectorAll('[data-rp-select]').forEach(row => {
+    row.addEventListener('click', () => {
+      rpState.selectedPlanId = row.dataset.rpSelect;
+      rpState.selectedCycle = 1;
+      rpState.preview = null;
+      renderRpModal();
+      loadRpPreview(rpState.selectedPlanId);
+    });
+  });
+  el.querySelectorAll('.rp-save-btn').forEach(btn => {
+    btn.addEventListener('click', () => rpSaveAssignment(btn.dataset.aid, btn));
+  });
+  el.querySelectorAll('.rp-del-btn').forEach(btn => {
+    btn.addEventListener('click', () => rpDeleteAssignment(btn.dataset.aid, btn));
+  });
+  el.querySelector('#rpAddBtn')?.addEventListener('click', e => rpAddAssignment(e.currentTarget));
+  el.querySelector('#rpApproveBtn')?.addEventListener('click', rpApprove);
+  el.querySelector('#rpInvalidateBtn')?.addEventListener('click', rpInvalidate);
+  el.querySelector('#rpReloadPreviewBtn')?.addEventListener('click', () => {
+    if (rpState.selectedPlanId) loadRpPreview(rpState.selectedPlanId);
+  });
+  el.querySelector('#rpApplyBtn')?.addEventListener('click', rpApply);
+  el.querySelector('#rpImportBtn')?.addEventListener('click', rpImport);
+  el.querySelector('#rpImportFileBtn')?.addEventListener('click', () => el.querySelector('#rpImportFile')?.click());
+  el.querySelector('#rpImportFile')?.addEventListener('change', e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const fr = new FileReader();
+    fr.onload = ev => { const ta = el.querySelector('#rpJsonTA'); if (ta) ta.value = ev.target?.result || ''; };
+    fr.readAsText(file);
+  });
+}
+
+async function loadRpPlans() {
+  if (!rpState.groupId) { toast('لا يوجد معرّف مجموعة'); return; }
+  rpState.loadingPlans = true;
+  renderRpModal();
+  try {
+    const d = await api('/managed-rollover-plans?group_id=' + encodeURIComponent(rpState.groupId));
+    rpState.plans = d.plans || [];
+  } catch (e) {
+    toast('خطأ في تحميل الخطط: ' + e.message);
+    rpState.plans = [];
+  }
+  rpState.loadingPlans = false;
+  renderRpModal();
+}
+
+async function loadRpPreview(planId) {
+  rpState.loadingPreview = true;
+  renderRpModal();
+  try {
+    rpState.preview = await api('/managed-rollover-plans/' + encodeURIComponent(planId) + '/preview');
+  } catch (e) {
+    toast('خطأ في المعاينة: ' + e.message);
+    rpState.preview = null;
+  }
+  rpState.loadingPreview = false;
+  renderRpModal();
+}
+
+async function rpExport() {
+  if (!rpState.khatmaId) { toast('لا يوجد معرّف الختمة'); return; }
+  try {
+    const d = await api('/managed-rollover-plans/export-template?khatma_id=' + encodeURIComponent(rpState.khatmaId));
+    const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'rollover-template-' + (rpState.khatmaSerial || rpState.khatmaId.slice(-8)) + '.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('تم التصدير بنجاح');
+  } catch (e) { toast('خطأ في التصدير: ' + e.message); }
+}
+
+async function rpSaveAssignment(assignmentId, btn) {
+  if (!assignmentId || !rpState.selectedPlanId) return;
+  const el = document.getElementById('rpModal');
+  const sel = el?.querySelector(`.rp-sel[data-aid="${assignmentId}"]`);
+  const unitIn = el?.querySelector(`.rp-num[data-f="unit_number"][data-aid="${assignmentId}"]`);
+  const slotIn = el?.querySelector(`.rp-num[data-f="slot_index"][data-aid="${assignmentId}"]`);
+  const body = {};
+  if (sel) body.reader_profile_id = sel.value || null;
+  if (unitIn?.value) body.unit_number = Number(unitIn.value);
+  if (slotIn?.value) body.slot_index = Number(slotIn.value);
+  if (!Object.keys(body).length) { toast('لا تغييرات'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    await api('/managed-rollover-plans/' + encodeURIComponent(rpState.selectedPlanId) + '/assignments/' + encodeURIComponent(assignmentId), { method: 'PATCH', body });
+    toast('✓ تم الحفظ');
+    await loadRpPreview(rpState.selectedPlanId);
+  } catch (e) {
+    toast('خطأ: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'حفظ'; }
+  }
+}
+
+async function rpAddAssignment(btn) {
+  if (!rpState.selectedPlanId) return;
+  const el = document.getElementById('rpModal');
+  const sel = el?.querySelector('.rp-sel[data-aid="__new__"]');
+  const unitIn = el?.querySelector('.rp-num[data-f="unit_number"][data-aid="__new__"]');
+  const slotIn = el?.querySelector('.rp-num[data-f="slot_index"][data-aid="__new__"]');
+  const readerProfileId = sel?.value || '';
+  const unitNumber = Number(unitIn?.value);
+  const slotIndex = Number(slotIn?.value);
+  if (!readerProfileId) { toast('اختر قارئاً'); return; }
+  if (!unitNumber || unitNumber < 1 || unitNumber > 30) { toast('رقم الوحدة يجب أن يكون بين 1 و 30'); return; }
+  if (!slotIndex || slotIndex < 1) { toast('الموضع يجب أن يكون أكبر من 0'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    await api('/managed-rollover-plans/' + encodeURIComponent(rpState.selectedPlanId) + '/assignments', {
+      method: 'POST',
+      body: { reader_profile_id: readerProfileId, unit_number: unitNumber, slot_index: slotIndex, cycle_number: rpState.selectedCycle || 1 }
+    });
+    toast('✓ تم الإضافة');
+    await loadRpPreview(rpState.selectedPlanId);
+  } catch (e) {
+    toast('خطأ في الإضافة: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = '＋ إضافة'; }
+  }
+}
+
+async function rpDeleteAssignment(assignmentId, btn) {
+  if (!assignmentId || !rpState.selectedPlanId) return;
+  const ok = await showConfirmModal({ title: 'حذف التعيين', message: 'هل أنت متأكد من حذف هذا التعيين؟', confirmText: 'حذف', danger: true });
+  if (!ok) return;
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    await api('/managed-rollover-plans/' + encodeURIComponent(rpState.selectedPlanId) + '/assignments/' + encodeURIComponent(assignmentId), { method: 'DELETE' });
+    toast('✓ تم الحذف');
+    await loadRpPreview(rpState.selectedPlanId);
+  } catch (e) {
+    toast('خطأ في الحذف: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = '✕'; }
+  }
+}
+
+function rpEventData(event) {
+  if (!event) return {};
+  if (event.event_data && typeof event.event_data === 'object') return event.event_data;
+  if (event.payload && typeof event.payload === 'object') return event.payload;
+  if (event.event_payload_json) {
+    try { return JSON.parse(event.event_payload_json); } catch {}
+  }
+  return {};
+}
+
+function rpAssignmentsById(preview) {
+  const rows = [];
+  (preview?.cycles || []).forEach(c => rows.push(...(c.assignments || [])));
+  return new Map(rows.filter(a => a?.id).map(a => [a.id, a]));
+}
+
+function rpReaderNamesById(preview) {
+  return new Map((preview?.readers || []).map(r => [r.reader_profile_id, r.reader_name_snapshot || r.reader_profile_id]));
+}
+
+function rpReaderNameForAssignment(row, readerNames) {
+  const id = row?.reader_profile_id || '';
+  return readerNames.get(id) || id || 'قارئ غير معروف';
+}
+
+function rpAssignmentValueText(row) {
+  const unit = Number(row?.unit_number);
+  const slot = Number(row?.slot_index);
+  const hasUnit = Number.isInteger(unit) && unit >= 1 && unit <= 30;
+  const hasSlot = Number.isInteger(slot) && slot > 0;
+  if (hasUnit && hasSlot) return `الجزء ${unit} (الموضع ${slot})`;
+  if (hasUnit) return `الجزء ${unit}`;
+  if (hasSlot) return `الموضع ${slot}`;
+  return 'تعيين غير مكتمل';
+}
+
+function rpFormatAssignmentEditEvent(event, preview) {
+  const data = rpEventData(event);
+  const assignmentId = data.assignment_id || data.assignmentId || '';
+  const current = rpAssignmentsById(preview).get(assignmentId) || {};
+  const before = { ...current, ...(data.before || {}) };
+  const after = { ...current, ...(data.after || {}) };
+  const readerNames = rpReaderNamesById(preview);
+  const beforeReader = rpReaderNameForAssignment(before, readerNames);
+  const afterReader = rpReaderNameForAssignment(after, readerNames);
+  const readerLabel = beforeReader === afterReader ? afterReader : `${beforeReader} ← ${afterReader}`;
+  return `- ${readerLabel}: من ${rpAssignmentValueText(before)} إلى ${rpAssignmentValueText(after)}`;
+}
+
+function rpIsContiguousOrWrap(units) {
+  if (!units || units.length <= 1) return true;
+  const sorted = [...units].sort((a, b) => a - b);
+  const k = sorted.length;
+  let unitGaps = 0;
+  for (let i = 1; i < k; i++) { if (sorted[i] - sorted[i-1] === 1) unitGaps++; }
+  const wrapGap = 30 - sorted[k-1] + sorted[0];
+  if (wrapGap === 1) unitGaps++;
+  return unitGaps === k - 1;
+}
+
+function rpApproveConfirmContent() {
+  const events = rpState.preview?.events || [];
+  const edits = events.filter(e => e?.event_type === 'assignment_edited');
+  const added = events.filter(e => e?.event_type === 'assignment_added');
+  const deleted = events.filter(e => e?.event_type === 'assignment_deleted');
+  const readerNames = rpReaderNamesById(rpState.preview);
+
+  const lines = [];
+  if (edits.length) {
+    lines.push('── تعديلات ──');
+    edits.forEach(e => {
+      const data = rpEventData(e);
+      const before = data.before || {};
+      const after = data.after || {};
+      const current = rpAssignmentsById(rpState.preview).get(data.assignment_id || '') || {};
+      const mergedBefore = { ...current, ...before };
+      const mergedAfter = { ...current, ...after };
+      const readerName = readerNames.get(mergedAfter.reader_profile_id || mergedBefore.reader_profile_id) || 'قارئ';
+      if (before.unit_number !== undefined && after.unit_number !== undefined) {
+        lines.push(`- ${readerName}: من الجزء ${before.unit_number} إلى الجزء ${after.unit_number}`);
+      } else if (before.slot_index !== undefined && after.slot_index !== undefined) {
+        lines.push(`- ${readerName}: تغيّر الموضع داخل الجزء من ${before.slot_index} إلى ${after.slot_index}`);
+      } else {
+        lines.push(`- ${readerName}: ${JSON.stringify(after)}`);
+      }
+    });
+  }
+  if (added.length) {
+    lines.push('── إضافات ──');
+    added.forEach(e => {
+      const data = rpEventData(e);
+      const a = data.after || {};
+      const name = readerNames.get(a.reader_profile_id) || a.reader_profile_id || 'قارئ';
+      lines.push(`- إضافة: ${name} — الجزء ${a.unit_number || '?'} (الموضع ${a.slot_index || '?'})`);
+    });
+  }
+  if (deleted.length) {
+    lines.push('── حذف ──');
+    deleted.forEach(e => {
+      const data = rpEventData(e);
+      const b = data.before || {};
+      const name = readerNames.get(b.reader_profile_id) || b.reader_profile_id || 'قارئ';
+      lines.push(`- حذف: ${name} — الجزء ${b.unit_number || '?'} (الموضع ${b.slot_index || '?'})`);
+    });
+  }
+
+  // Non-contiguous unit warning
+  const unitsByReader = new Map();
+  (rpState.preview?.cycles || []).forEach(c => {
+    (c.assignments || []).forEach(a => {
+      if (!a.reader_profile_id || !a.unit_number) return;
+      if (!unitsByReader.has(a.reader_profile_id)) unitsByReader.set(a.reader_profile_id, []);
+      unitsByReader.get(a.reader_profile_id).push(Number(a.unit_number));
+    });
+  });
+  const nonContiguous = [];
+  unitsByReader.forEach((units, rid) => {
+    if (units.length > 1 && !rpIsContiguousOrWrap(units)) {
+      const name = readerNames.get(rid) || rid;
+      const sorted = [...units].sort((a, b) => a - b);
+      nonContiguous.push(`- ${name}: أجزاء غير متجاورة [${sorted.join('، ')}]`);
+    }
+  });
+  if (nonContiguous.length) {
+    lines.push('── تحذير: أجزاء غير متجاورة ──');
+    nonContiguous.forEach(w => lines.push(w));
+  }
+
+  if (!lines.length) {
+    return {
+      title: 'اعتماد الخطة',
+      message: 'هل أنت متأكد من اعتماد هذه الخطة؟\nبعد الاعتماد لا يمكن تعديل تفاصيل الخطة.'
+    };
+  }
+  return {
+    title: 'اعتماد الخطة',
+    message: [
+      'ملاحظة: تم إجراء التعديلات التالية على الخطة:',
+      ...lines,
+      '\nهل أنت متأكد من اعتماد هذه الخطة؟'
+    ].join('\n')
+  };
+}
+
+async function rpApprove() {
+  if (!rpState.selectedPlanId) return;
+  const confirmContent = rpApproveConfirmContent();
+  const ok = await showConfirmModal({ ...confirmContent, confirmText: 'اعتماد' });
+  if (!ok) return;
+  try {
+    await api('/managed-rollover-plans/' + encodeURIComponent(rpState.selectedPlanId) + '/approve', { method: 'POST' });
+    toast('✓ تم الاعتماد');
+    await loadRpPlans();
+    await loadRpPreview(rpState.selectedPlanId);
+  } catch (e) { toast('خطأ في الاعتماد: ' + e.message); }
+}
+
+async function rpInvalidate() {
+  if (!rpState.selectedPlanId) return;
+  const reason = await showInputModal({ title: 'إلغاء الخطة', message: 'أدخل سبب الإلغاء:', label: 'السبب', placeholder: 'مثال: تغيّرت بيانات القراء' });
+  if (!reason) return;
+  try {
+    await api('/managed-rollover-plans/' + encodeURIComponent(rpState.selectedPlanId) + '/invalidate', { method: 'POST', body: { reason } });
+    toast('✓ تم إلغاء الخطة');
+    await loadRpPlans();
+    await loadRpPreview(rpState.selectedPlanId);
+  } catch (e) { toast('خطأ في الإلغاء: ' + e.message); }
+}
+
+async function rpImport() {
+  const el = document.getElementById('rpModal');
+  const ta = el?.querySelector('#rpJsonTA');
+  const msgEl = el?.querySelector('#rpImportMsg');
+  if (!ta || !msgEl) return;
+  let payload;
+  try { payload = JSON.parse(ta.value.trim()); }
+  catch { msgEl.innerHTML = '<span style="color:var(--danger)">JSON غير صالح</span>'; return; }
+  payload.current_khatma_id = rpState.khatmaId;
+  payload.group_id = rpState.groupId;
+  if (payload.metadata && typeof payload.metadata === 'object') {
+    payload.metadata.group_id = rpState.groupId;
+    payload.metadata.current_khatma_id = rpState.khatmaId;
+    if ('khatma_id' in payload.metadata) payload.metadata.khatma_id = rpState.khatmaId;
+  }
+  msgEl.textContent = 'جار الاستيراد…';
+  try {
+    const d = await api('/managed-rollover-plans/import', { method: 'POST', body: payload });
+    msgEl.innerHTML = '<span style="color:var(--primary)">✓ تم الاستيراد</span>';
+    toast('✓ تم الاستيراد');
+    ta.value = '';
+    await loadRpPlans();
+    const newId = d.plan?.plan?.id || d.plan?.id;
+    if (newId) { rpState.selectedPlanId = newId; rpState.selectedCycle = 1; await loadRpPreview(newId); }
+  } catch (e) { msgEl.innerHTML = `<span style="color:var(--danger)">خطأ: ${escapeHtml(e.message)}</span>`; }
+}
+
+async function rpApply() {
+  if (!rpState.selectedPlanId || !rpState.selectedCycle) return;
+  const cycle = rpState.selectedCycle;
+  // Option A wording: same khatma rotates to the next cycle, no new khatma or
+  // K serial is created. Corrected from a stale "new khatma / archive" message.
+  const ok1 = await showConfirmModal({
+    title: 'تطبيق الدورة ' + cycle,
+    message: 'سيتم تدوير نفس الختمة إلى الدورة التالية رقم ' + cycle + '. لن يتم إنشاء ختمة جديدة ولا رقم تسلسلي جديد. سيتم حفظ لقطة تاريخية للدورة الحالية قبل التعديل، ثم استبدال تعيينات الدورة الحالية بتعيينات الدورة الجديدة. بعد التطبيق ستظهر الدورة والأجزاء الجديدة في بوابة القارئ. هذه عملية حساسة ولا تتم إلا بموافقة مالك النظام. هل أنت متأكد؟',
+    confirmText: 'متأكد',
+    danger: true
+  });
+  if (!ok1) return;
+  const keyword = await showInputModal({
+    title: 'تأكيد التطبيق',
+    message: 'اكتب كلمة "تدوير" للتأكيد:',
+    label: 'كلمة التأكيد',
+    placeholder: 'تدوير',
+    confirmText: 'تطبيق'
+  });
+  if (keyword !== 'تدوير') {
+    if (keyword !== '') toast('لم يتم تنفيذ التطبيق.');
+    return;
+  }
+  const btn = document.getElementById('rpApplyBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'جار التطبيق…'; }
+  try {
+    const d = await api('/managed-rollover-plans/' + encodeURIComponent(rpState.selectedPlanId) + '/apply', {
+      method: 'POST', body: { cycle_number: cycle }
+    });
+    // Option A: same khatma_id, no new khatma/serial — reflect that in the toast.
+    const serial = d.khatma_serial_number || '';
+    toast('✓ تم تطبيق الدورة ' + cycle + ' على نفس الختمة' + (serial ? ' (' + serial + ')' : '') + ' — لم يتم إنشاء ختمة جديدة.');
+    await loadRpPlans();
+    await loadRpPreview(rpState.selectedPlanId);
+    refreshManagedKhatmas().catch(() => {});
+  } catch (e) {
+    toast('خطأ في التطبيق: ' + e.message);
+    await loadRpPreview(rpState.selectedPlanId);
+  }
+}
 function _renderMKListPage(){
   const list = document.getElementById('managedKhatmaList');
   if(!list) return;
@@ -4761,22 +6320,112 @@ function _renderMKListPage(){
     <div class="khatma-list-toolbar-title"><h3>${listTitle}</h3><p>${total} ختمة محفوظة</p></div>
     <div class="icon-action-group v32">
       <a class="icon-action v32" href="#/managed-create" title="${createTitle}"><span aria-hidden="true">+</span><strong>إنشاء</strong></a>
+      <button class="icon-action v32" type="button" id="mkRolloverToggleBtn" title="إدارة التدوير الشهري"><span aria-hidden="true">⟳</span><strong>التدوير</strong></button>
       <button class="icon-action v32" type="button" onclick="exportManagedKhatmasCsv()" title="تصدير ملف CSV"><span aria-hidden="true">⇩</span><strong>CSV / Excel</strong></button>
       <button class="icon-action v32" type="button" onclick="printManagedKhatmasList()" title="طباعة أو حفظ PDF"><span aria-hidden="true">⎙</span><strong>طباعة / PDF</strong></button>
     </div>
   </div>`;
+  // Rollover: Hijri Monthly Rollover Phase 2 — target_hijri_month + Preview Mode + Run panel
+  const rolloverPanelHtml = `<div id="mkRolloverPanel" style="display:none;margin:0 0 14px;border-radius:12px;border:1.5px solid #059669;background:var(--card-solid);padding:16px 18px">
+  <div class="sheet-head" style="margin-bottom:10px"><h3 style="color:#059669">⟳ التدوير الشهري الجماعي</h3><span style="font-size:13px">المسار الأصلي لـ ToAllah</span></div>
+  <p style="color:var(--muted);font-size:13px;margin:0 0 12px;line-height:1.8">يتم التدوير تلقائيًا على دفعات صغيرة جدًا، مع طلب واحد فقط في كل مرة.</p>
+  <p style="background:rgba(37,99,235,.1);border:1px solid rgba(37,99,235,.35);border-radius:10px;padding:8px 12px;font-size:13px;margin:0 0 12px;line-height:1.8">المعاينة مسموحة قبل نهاية الشهر، أما التدوير الحقيقي فلا يُنفذ إلا بعد انتهاء الفترة الحالية.</p>
+  <div style="display:flex;flex-direction:column;gap:10px;max-width:360px">
+    <label style="font-size:13px;color:var(--text)">الشهر الهجري المستهدف (YYYY-MM)
+      <input id="mkBatchMonth" type="text" inputmode="numeric" placeholder="1448-02" value=""
+        style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px"/>
+      <small style="color:var(--muted);margin-top:4px;display:block">أدخل الشهر الهجري للتدوير، مثال: 1448-02</small>
+    </label>
+    <label style="font-size:13px;color:var(--text)">نوع النطاق
+      <select id="mkBatchScopeMode" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px">
+        <option value="full">كل المجموعات</option>
+        <option value="single">مجموعة واحدة</option>
+        <option value="range">نطاق مجموعات من/إلى</option>
+      </select>
+      <small style="color:var(--muted);margin-top:4px;display:block">اختر نطاق التشغيل قبل بدء المعاينة أو التدوير.</small>
+    </label>
+    <div id="mkBatchGroupIdWrap" style="display:none;flex-direction:column;gap:6px">
+      <label style="font-size:13px;color:var(--text)">ابحث عن المجموعة
+        <input id="mkBatchGroupSearchInput" type="text" placeholder="اكتب رقم المجموعة أو الاسم أو serial"
+          style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px"/>
+      </label>
+      <small id="mkBatchGroupSearchHint" style="color:var(--muted);display:block">اكتب رقمين أو أكثر للبحث.</small>
+      <div id="mkBatchGroupSearchResults" style="display:flex;flex-direction:column;gap:4px"></div>
+      <div id="mkBatchGroupSelectedWrap" style="display:none;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);font-size:13px">
+        <strong style="font-size:12px;color:var(--muted)">المجموعة المحددة:</strong>
+        <span id="mkBatchGroupSelected" style="font-weight:700"></span>
+        <button type="button" id="mkBatchGroupClearBtn" class="btn ghost compact-btn" style="align-self:flex-start">إلغاء الاختيار</button>
+      </div>
+    </div>
+    <div id="mkBatchRangeWrap" style="display:none;flex-direction:column;gap:10px">
+      <small style="color:var(--muted);display:block">ابحث عن بداية ونهاية النطاق، وسيتم تحديد كل المجموعات بينهما تلقائيًا.</small>
+      <label style="font-size:13px;color:var(--text)">من مجموعة
+        <input id="mkBatchRangeFromInput" type="text" placeholder="اكتب رقم المجموعة أو الاسم أو serial"
+          style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px"/>
+      </label>
+      <small id="mkBatchRangeFromHint" style="color:var(--muted);display:block">اكتب رقمين أو أكثر للبحث.</small>
+      <div id="mkBatchRangeFromResults" style="display:flex;flex-direction:column;gap:4px"></div>
+      <div id="mkBatchRangeFromSelectedWrap" style="display:none;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);font-size:13px">
+        <strong style="font-size:12px;color:var(--muted)">من:</strong>
+        <span id="mkBatchRangeFromSelected" style="font-weight:700"></span>
+        <button type="button" id="mkBatchRangeFromClearBtn" class="btn ghost compact-btn" style="align-self:flex-start">إلغاء الاختيار</button>
+      </div>
+      <label style="font-size:13px;color:var(--text)">إلى مجموعة
+        <input id="mkBatchRangeToInput" type="text" placeholder="اكتب رقم المجموعة أو الاسم أو serial"
+          style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px"/>
+      </label>
+      <small id="mkBatchRangeToHint" style="color:var(--muted);display:block">اكتب رقمين أو أكثر للبحث.</small>
+      <div id="mkBatchRangeToResults" style="display:flex;flex-direction:column;gap:4px"></div>
+      <div id="mkBatchRangeToSelectedWrap" style="display:none;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);font-size:13px">
+        <strong style="font-size:12px;color:var(--muted)">إلى:</strong>
+        <span id="mkBatchRangeToSelected" style="font-weight:700"></span>
+        <button type="button" id="mkBatchRangeToClearBtn" class="btn ghost compact-btn" style="align-self:flex-start">إلغاء الاختيار</button>
+      </div>
+      <small id="mkBatchRangeCount" style="color:var(--muted);display:block"></small>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
+      <input id="mkBatchDryRun" type="checkbox" checked style="width:16px;height:16px;cursor:pointer"/>
+      <span>معاينة فقط بدون تطبيق</span>
+    </label>
+    <div style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);line-height:1.6">
+      <span>يتم التدوير تلقائيًا على دفعات صغيرة جدًا</span>
+      <span>الدفعة الداخلية: ختمة واحدة</span>
+      <span>يعالج فقط الختمات غير المدوّرة لهذا الشهر</span>
+      <span>سيتوقف النظام تلقائيًا عند أي خطأ</span>
+      <span>يمكن الاستئناف من آخر نقطة مكتملة</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button id="mkBatchRunBtn" class="btn primary compact-btn" type="button">⟳ بدء التدوير الآمن</button>
+      <button id="mkBatchPauseBtn" class="btn ghost compact-btn" type="button" disabled>إيقاف مؤقت</button>
+      <button id="mkBatchResumeBtn" class="btn ghost compact-btn" type="button" disabled>استئناف التدوير</button>
+    </div>
+  </div>
+  <div id="mkBatchResult" style="margin-top:14px"></div>
+</div>`;
   if(!khatmas.length){
     list.classList.remove('khatma-rows-list', 'khatma-rows-list-v3', 'khatma-rows-list-v32');
     const emptyTitle = q ? 'لا توجد نتائج' : (isOwner ? 'لا توجد ختمات مُدارة بعد' : 'لا توجد ختمات بعد');
     const emptyBody  = q ? 'جرّب مصطلح بحث مختلف.' : (isOwner ? 'ابدأ بإنشاء ختمة مُدارة وتعيين القراء على الأجزاء.' : 'ابدأ بإنشاء ختمة وتعيين القراء على الأجزاء.');
     const emptyBtn   = isOwner ? 'إنشاء ختمة مُدارة' : 'إنشاء ختمة';
-    list.innerHTML = toolbar + searchBar + `<article class="feature-card empty-state"><h3>${emptyTitle}</h3><p>${emptyBody}</p>${!q ? `<a class="btn primary" href="#/managed-create">${emptyBtn}</a>` : ''}</article>`;
+    list.innerHTML = toolbar + rolloverPanelHtml + searchBar + `<article class="feature-card empty-state"><h3>${emptyTitle}</h3><p>${emptyBody}</p>${!q ? `<a class="btn primary" href="#/managed-create">${emptyBtn}</a>` : ''}</article>`;
   } else {
     list.classList.add('khatma-rows-list', 'khatma-rows-list-v3', 'khatma-rows-list-v32');
-    list.innerHTML = toolbar + searchBar + pagination + khatmas.map(managedKhatmaListRowHtml).join('') + pagination;
+    list.innerHTML = toolbar + rolloverPanelHtml + searchBar + pagination + khatmas.map(managedKhatmaListRowHtml).join('') + pagination;
   }
   const inp = document.getElementById('mkSearchInput');
   if(inp) inp.addEventListener('keydown', e => { if(e.key==='Enter'){ e.preventDefault(); mkSearchGo(); } });
+  document.getElementById('mkRolloverToggleBtn')?.addEventListener('click', () => {
+    const panel = document.getElementById('mkRolloverPanel');
+    if(panel) panel.style.display = panel.style.display === 'none' ? '' : 'none';
+  });
+  setupSafeBatchRolloverControls({
+    monthId: 'mkBatchMonth',
+    dryRunId: 'mkBatchDryRun',
+    resultId: 'mkBatchResult',
+    runBtnId: 'mkBatchRunBtn',
+    pauseBtnId: 'mkBatchPauseBtn',
+    resumeBtnId: 'mkBatchResumeBtn'
+  });
 }
 window.mkGoPage = function(pg){
   if(pg < 1 || pg > state.managedKhatmasPages) return;
@@ -5094,23 +6743,26 @@ function managedUnitCardHtml(k, unitOrRows, isAdmin){
   if(allAvailable) return `<article class="unit available" data-unit="${unitNum}">${title}<small>يتم تعيين القارئ من صفحة الإدارة.</small></article>`;
 
   if(isAdmin){
+    // Managed khatma model: readers are pre-assigned to fixed units; there is no
+    // reserve/reading workflow. Admin monitors status and only has one corrective
+    // action — clearly labeled as administrative, not a reader-facing "release" action.
     const perReader = rows.filter(r => r.status !== 'available').map(r => {
       const pid = escapeHtml(r.participantId || '');
       const name = escapeHtml(r.participantName || '...');
       const icon = statusIcon(r.status);
       const canAct = r.status === 'assigned' || r.status === 'reading';
       const uid = escapeHtml(r.id || '');
-      const readBtn = canAct ? `<button class="btn ghost managed-reader-action" data-managed-action="reading" data-unit="${unitNum}" data-participant-id="${pid}" data-unit-id="${uid}" title="جاري القراءة">📖</button>` : '';
       const doneBtn = canAct ? `<button class="btn primary managed-reader-action" data-managed-action="complete" data-unit="${unitNum}" data-participant-id="${pid}" data-unit-id="${uid}" title="تمت القراءة">✅</button>` : '';
-      const resetBtn = `<button class="btn ghost managed-reader-action" data-managed-action="available" data-unit="${unitNum}" data-participant-id="${pid}" data-unit-id="${uid}" title="إعادة إتاحة">↩</button>`;
-      return `<div class="managed-unit-reader-row"><span>${icon} ${name}</span>${readBtn}${doneBtn}${resetBtn}</div>`;
+      const resetBtn = `<button class="btn ghost danger-btn managed-reader-action" data-managed-action="available" data-unit="${unitNum}" data-participant-id="${pid}" data-unit-id="${uid}" title="إعادة فتح الجزء إداريًا (تصحيح خطأ فقط)">↩ إداري</button>`;
+      return `<div class="managed-unit-reader-row"><span>${icon} ${name}</span>${doneBtn}${resetBtn}</div>`;
     }).join('');
     return `<article class="unit ${cardStatus}" data-unit="${unitNum}">${title}${perReader}${identityPanel}</article>`;
   }
 
-  const reading = `<button class="btn ghost" data-managed-action="reading-open" data-unit="${unitNum}" data-unit-id="${unitIdAttr}" data-participant-id="${participantIdAttr}">جاري القراءة</button>`;
+  // Reader Portal: the only action a reader ever performs is "تمت القراءة" —
+  // units are pre-assigned, never reserved/released by the reader themselves.
   const complete = `<button class="btn primary" data-managed-action="complete-open" data-unit="${unitNum}" data-unit-id="${unitIdAttr}" data-participant-id="${participantIdAttr}">تمت القراءة</button>`;
-  return `<article class="unit ${cardStatus}" data-unit="${unitNum}">${title}<div class="unit-actions two">${reading}${complete}</div>${identityPanel}</article>`;
+  return `<article class="unit ${cardStatus}" data-unit="${unitNum}">${title}<div class="unit-actions two">${complete}</div>${identityPanel}</article>`;
 }
 function canManageManagedKhatma(k){ return !!(state.user && (state.user.role === 'owner' || state.user.managedKhatmaCreator)); }
 async function handleManagedUnitAction(khatmaId, num, action, isAdmin, participantId='', unitId=''){
@@ -5140,7 +6792,7 @@ async function handleManagedUnitAction(khatmaId, num, action, isAdmin, participa
     const res = await api(`/managed-khatmas/${encodeURIComponent(khatmaId)}/units/${num}/${apiAction}`, {method:'POST', body});
     if(res.khatma) upsertManagedKhatma(res.khatma);
     state.activeManagedUnitKey = '';
-    toast(action === 'reading' ? 'تم تحديث الحالة إلى جاري القراءة' : action === 'complete' ? 'تم تسجيل القراءة' : 'تمت إعادة إتاحة الجزء');
+    toast(action === 'reading' ? 'تم تحديث الحالة إلى جاري القراءة' : action === 'complete' ? 'تم تسجيل القراءة' : 'تمت إعادة فتح الجزء إداريًا');
     if(isAdmin || !res.khatma) await refreshManagedOne(khatmaId, state.currentManagedManageMode && canUseManagedKhatmas());
     setupManagedKhatma(khatmaId, state.currentManagedManageMode);
   }catch(err){ toast(err.message || 'تعذر تنفيذ الإجراء'); }
@@ -5192,7 +6844,7 @@ function managedAdminPanelHtml(k){
   const updateForm = state.activeUpdateManagedKhatmaId === k.id ? managedUpdateFormHtml(k) : '';
   const duplicateConfirm = state.activeDuplicateManagedKhatmaId === k.id ? `<div class="inline-panel action-sheet"><div class="sheet-head"><h4>نسخ الختمة المُدارة</h4><span>اختر الخيار</span></div><p>هل تريد نسخ القراء أيضًا إلى الختمة الجديدة؟</p><div class="compact-actions"><button class="btn primary compact-btn" id="confirmDuplicateManagedWithReaders">نسخ مع القراء</button><button class="btn ghost compact-btn" id="confirmDuplicateManagedWithoutReaders">نسخ بدون قراء</button><button class="btn ghost compact-btn" id="cancelDuplicateManagedKhatma">إلغاء</button></div></div>` : '';
   const shareKhatmaBtn = state.user?.role === 'owner' ? `<button class="btn ghost compact-btn" id="shareManagedKhatmaBtn">مشاركة مع مجموعة${k.sharedCreatorGroupId ? ' ✓' : ''}</button>` : '';
-  return `<div class="admin-panel premium-admin-panel compact-khatma-admin"><div class="sheet-head"><h3>إدارة الختمة المُدارة</h3><span>حساب مصرح</span></div><p>يمكنك تعديل المشاركين، الأكواد، وربط القراء بالأجزاء من هذه اللوحة.</p><div class="admin-actions tidy-admin-actions khatma-admin-actions"><button class="btn ghost compact-btn" id="copyManagedPublicLink">نسخ رابط المشاركة</button><button class="btn ghost compact-btn" id="openUpdateManagedKhatma">تحديث الختمة</button><button class="btn ghost compact-btn" id="toggleCloseManagedKhatma">${k.status === 'closed' ? 'إعادة فتح الختمة' : 'إنهاء / إغلاق الختمة'}</button><button class="btn ghost compact-btn" id="archiveManagedKhatmaBtn">${k.archivedAt ? 'إلغاء الأرشفة' : 'أرشفة الختمة'}</button><button class="btn ghost compact-btn" id="duplicateManagedKhatmaBtn">نسخ الختمة</button>${shareKhatmaBtn}<button class="btn ghost danger-btn compact-btn" id="deleteManagedKhatmaAdmin">حذف الختمة</button></div><div id="shareManagedKhatmaPanel"></div>${rotationMonitorHtml(k)}${updateForm}${duplicateConfirm}${deleteConfirm}</div>`;
+  return `<div class="admin-panel premium-admin-panel compact-khatma-admin"><div class="sheet-head"><h3>إدارة الختمة المُدارة</h3><span>حساب مصرح</span></div><p>يمكنك تعديل المشاركين، الأكواد، وربط القراء بالأجزاء من هذه اللوحة.</p><div class="admin-actions tidy-admin-actions khatma-admin-actions"><button class="btn ghost compact-btn" id="copyManagedPublicLink">نسخ رابط المشاركة</button><button class="btn ghost compact-btn" id="openUpdateManagedKhatma">تحديث الختمة</button><button class="btn ghost compact-btn" id="toggleCloseManagedKhatma">${k.status === 'closed' ? 'إعادة فتح الختمة' : 'إنهاء / إغلاق الختمة'}</button><button class="btn ghost compact-btn" id="archiveManagedKhatmaBtn">${k.archivedAt ? 'إلغاء الأرشفة' : 'أرشفة الختمة'}</button><button class="btn ghost compact-btn" id="duplicateManagedKhatmaBtn">نسخ الختمة</button>${shareKhatmaBtn}<button class="btn ghost compact-btn" id="rolloverManagedKhatmaBtn">⟳ خطة التدوير</button><button class="btn ghost danger-btn compact-btn" id="deleteManagedKhatmaAdmin">حذف الختمة</button></div><div id="shareManagedKhatmaPanel"></div>${rotationMonitorHtml(k)}${updateForm}${duplicateConfirm}${deleteConfirm}</div>`;
 }
 function managedUpdateFormHtml(k){
   const phoneFields = coordinatorPhoneFieldsHtml(k.coordinatorWhatsapp || '');
@@ -5241,6 +6893,7 @@ function bindManagedAdminActions(k){
   document.getElementById('toggleCloseManagedKhatma')?.addEventListener('click', ()=>toggleCloseManagedKhatma(k.id));
   document.getElementById('archiveManagedKhatmaBtn')?.addEventListener('click', ()=>archiveManagedKhatmaAction(k.id, !k.archivedAt));
   document.getElementById('duplicateManagedKhatmaBtn')?.addEventListener('click', ()=>{ state.activeDuplicateManagedKhatmaId = k.id; state.activeDeleteManagedKhatmaId = ''; state.activeUpdateManagedKhatmaId = ''; setupManagedKhatma(k.id, true); });
+  document.getElementById('rolloverManagedKhatmaBtn')?.addEventListener('click', ()=>window.openRolloverPlanModal(k.id, k.groupId || '', k.khatmaSerialNumber || ''));
   document.getElementById('cancelDuplicateManagedKhatma')?.addEventListener('click', ()=>{ state.activeDuplicateManagedKhatmaId = ''; setupManagedKhatma(k.id, true); });
   document.getElementById('confirmDuplicateManagedWithReaders')?.addEventListener('click', ()=>executeDuplicateManagedKhatma(k.id, true));
   document.getElementById('confirmDuplicateManagedWithoutReaders')?.addEventListener('click', ()=>executeDuplicateManagedKhatma(k.id, false));
