@@ -4255,10 +4255,15 @@ async function setupManagedProgress(){
   if(!root) return;
   if(!canUseManagedKhatmas()){ root.innerHTML = `<article class="feature-card empty-state"><h3>غير مصرح</h3></article>`; return; }
 
-  if(!state.mpUI) state.mpUI = { tab: 'summary', q: '', status: '', sort: '', dir: 'desc', offset: 0, limit: 25 };
+  if(!state.mpUI) state.mpUI = { tab: 'summary', q: '', status: '', bucket: '', sort: '', dir: 'desc', offset: 0, limit: 25 };
   const ui = state.mpUI;
 
   root.innerHTML = `
+    <div id="mpQuickFilters" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <button type="button" class="btn ghost compact-btn" id="mpQuickLowest">الأقل إنجازًا</button>
+      <button type="button" class="btn ghost compact-btn" id="mpQuickNotStarted">القراء الذين لم ينجزوا</button>
+      <button type="button" class="btn ghost compact-btn" id="mpQuickLow50">الختمات أقل من 50%</button>
+    </div>
     <div id="mpTabBar" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
       ${mpTabs.map(t => `<button type="button" class="btn ${ui.tab===t.key?'primary':'ghost'} compact-btn" data-mp-tab="${t.key}">${t.label}</button>`).join('')}
     </div>
@@ -4268,9 +4273,21 @@ async function setupManagedProgress(){
   root.querySelectorAll('[data-mp-tab]').forEach(btn => {
     btn.addEventListener('click', () => {
       if(ui.tab === btn.dataset.mpTab) return;
-      ui.tab = btn.dataset.mpTab; ui.offset = 0; ui.q = ''; ui.status = ''; ui.sort = ''; ui.dir = 'desc';
+      ui.tab = btn.dataset.mpTab; ui.offset = 0; ui.q = ''; ui.status = ''; ui.bucket = ''; ui.sort = ''; ui.dir = 'desc';
       setupManagedProgress();
     });
+  });
+  document.getElementById('mpQuickLowest')?.addEventListener('click', () => {
+    ui.tab = 'khatmas'; ui.offset = 0; ui.q = ''; ui.status = ''; ui.bucket = ''; ui.sort = 'completion_pct'; ui.dir = 'asc';
+    setupManagedProgress();
+  });
+  document.getElementById('mpQuickNotStarted')?.addEventListener('click', () => {
+    ui.tab = 'readers'; ui.offset = 0; ui.q = ''; ui.status = 'not_started'; ui.bucket = ''; ui.sort = ''; ui.dir = 'desc';
+    setupManagedProgress();
+  });
+  document.getElementById('mpQuickLow50')?.addEventListener('click', () => {
+    ui.tab = 'khatmas'; ui.offset = 0; ui.q = ''; ui.status = ''; ui.bucket = 'lt50'; ui.sort = ''; ui.dir = 'desc';
+    setupManagedProgress();
   });
 
   renderMpFilters(ui);
@@ -4280,14 +4297,19 @@ function renderMpFilters(ui){
   const el = document.getElementById('mpFilters');
   if(!el) return;
   if(ui.tab === 'summary'){ el.innerHTML = ''; return; }
+  const bucketOptionsHtml = (ui.tab === 'khatmas' || ui.tab === 'groups')
+    ? `<option value="">كل نسب الإنجاز</option><option value="lt50">أقل من 50%</option><option value="50to100">50% إلى أقل من 100%</option><option value="complete100">مكتملة 100%</option>`
+    : '';
   const statusOptionsHtml = ui.tab === 'readers'
-    ? `<option value="">كل الحالات</option><option value="completed">مكتمل</option><option value="partial">جزئي</option><option value="not_started">لم ينجز</option>`
+    ? `<option value="">الكل</option><option value="not_started">القراء الذين لم ينجزوا</option><option value="has_progress">القراء الذين لديهم إنجاز</option><option value="completed">القراء المكتملون</option>`
     : ui.tab === 'assignments'
-    ? `<option value="">كل الحالات</option><option value="available">متاح</option><option value="assigned">غير مقروء</option><option value="reading">جاري القراءة</option><option value="completed">مقروء</option>`
+    ? `<option value="">الكل</option><option value="completed">مقروء</option><option value="unread">غير مقروء</option>`
     : '';
   el.innerHTML = `
     <input id="mpSearchInput" type="search" placeholder="بحث..." value="${escapeHtml(ui.q)}" style="flex:1;min-width:160px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px"/>
+    ${bucketOptionsHtml ? `<select id="mpBucketSelect" style="padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px">${bucketOptionsHtml}</select>` : ''}
     ${statusOptionsHtml ? `<select id="mpStatusSelect" style="padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px">${statusOptionsHtml}</select>` : ''}
+    <button type="button" class="btn ghost compact-btn" id="mpExportCsvBtn">تصدير CSV</button>
   `;
   const inp = document.getElementById('mpSearchInput');
   if(inp){
@@ -4297,11 +4319,23 @@ function renderMpFilters(ui){
       deb = setTimeout(() => { ui.q = inp.value.trim(); ui.offset = 0; loadMpTab(ui); }, 350);
     });
   }
+  const bucketSel = document.getElementById('mpBucketSelect');
+  if(bucketSel){
+    bucketSel.value = ui.bucket || '';
+    bucketSel.addEventListener('change', () => { ui.bucket = bucketSel.value; ui.offset = 0; loadMpTab(ui); });
+  }
   const sel = document.getElementById('mpStatusSelect');
   if(sel){
     sel.value = ui.status || '';
     sel.addEventListener('change', () => { ui.status = sel.value; ui.offset = 0; loadMpTab(ui); });
   }
+  document.getElementById('mpExportCsvBtn')?.addEventListener('click', () => exportMpCsv(ui));
+}
+function mpBucketParams(bucket){
+  if(bucket === 'lt50') return { max_completion: 49 };
+  if(bucket === '50to100') return { min_completion: 50, max_completion: 99 };
+  if(bucket === 'complete100') return { min_completion: 100, max_completion: 100 };
+  return {};
 }
 async function loadMpTab(ui){
   const content = document.getElementById('mpContent');
@@ -4312,6 +4346,7 @@ async function loadMpTab(ui){
   if(ui.status) params.status = ui.status;
   if(ui.sort) params.sort = ui.sort;
   if(ui.dir) params.dir = ui.dir;
+  if((ui.tab === 'khatmas' || ui.tab === 'groups') && ui.bucket) Object.assign(params, mpBucketParams(ui.bucket));
   if(ui.tab !== 'summary'){ params.limit = ui.limit; params.offset = ui.offset; }
   let data;
   try{
@@ -4363,6 +4398,72 @@ function bindMpPagination(ui){
   document.getElementById('mpPrevBtn')?.addEventListener('click', () => { ui.offset = Math.max(0, ui.offset - ui.limit); loadMpTab(ui); });
   document.getElementById('mpNextBtn')?.addEventListener('click', () => { ui.offset = ui.offset + ui.limit; loadMpTab(ui); });
 }
+function mpSortTh(label, key, ui){
+  const active = ui.sort === key;
+  const arrow = active ? (ui.dir === 'asc' ? ' ▲' : ' ▼') : '';
+  return `<th data-sort-key="${key}" style="padding:6px;text-align:right;cursor:pointer;user-select:none">${escapeHtml(label)}${arrow}</th>`;
+}
+function bindMpSortHeaders(content, ui){
+  content.querySelectorAll('[data-sort-key]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sortKey;
+      if(ui.sort === key){ ui.dir = ui.dir === 'asc' ? 'desc' : 'asc'; }
+      else { ui.sort = key; ui.dir = 'desc'; }
+      ui.offset = 0;
+      loadMpTab(ui);
+    });
+  });
+}
+async function exportMpCsv(ui){
+  const btn = document.getElementById('mpExportCsvBtn');
+  if(btn){ btn.disabled = true; btn.textContent = 'جارٍ التصدير...'; }
+  try{
+    const baseParams = {};
+    if(ui.q) baseParams.q = ui.q;
+    if(ui.status) baseParams.status = ui.status;
+    if(ui.sort) baseParams.sort = ui.sort;
+    if(ui.dir) baseParams.dir = ui.dir;
+    if((ui.tab === 'khatmas' || ui.tab === 'groups') && ui.bucket) Object.assign(baseParams, mpBucketParams(ui.bucket));
+    const items = [];
+    let offset = 0;
+    const pageLimit = 100;
+    const maxPages = 30;
+    for(let page = 0; page < maxPages; page++){
+      const data = await fetchManagedProgress(ui.tab, {...baseParams, limit: pageLimit, offset});
+      if(!data || !data.ok || !Array.isArray(data.items)) break;
+      items.push(...data.items);
+      if(!data.pagination || !data.pagination.has_more) break;
+      offset += pageLimit;
+    }
+    if(!items.length){ toast('لا توجد بيانات للتصدير'); return; }
+    const rows = mpExportRows(ui.tab, items);
+    const filename = `managed-progress-${ui.tab}-${new Date().toISOString().slice(0,10)}.csv`;
+    downloadTextFile(filename, rowsToCsv(rows), 'text/csv;charset=utf-8');
+  }catch(err){
+    toast('تعذر تصدير CSV');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = 'تصدير CSV'; }
+  }
+}
+function mpExportRows(tab, items){
+  if(tab === 'khatmas') return items.map(k => ({
+    'التسلسل': k.khatmaSerialNumber||'', 'اسم الختمة': k.title||'', 'المجموعة': k.groupName||'', 'الفترة': k.periodNumber||1,
+    'التكليفات': k.totalUnits, 'المكتمل': k.completed, 'المتبقي': k.pending, 'القراء': k.readersCount, 'نسبة الإنجاز': k.completionPct
+  }));
+  if(tab === 'groups') return items.map(g => ({
+    'تسلسل المجموعة': g.groupSerialNumber||'', 'اسم المجموعة': g.name||'', 'عدد الختمات': g.khatmasCount, 'عدد القراء': g.readersCount,
+    'التكليفات': g.totalUnits, 'المكتمل': g.completed, 'المتبقي': g.pending, 'نسبة الإنجاز': g.completionPct
+  }));
+  if(tab === 'readers') return items.map(r => ({
+    'تسلسل القارئ': r.serialCode||'', 'اسم القارئ': r.readerName||'', 'الجوال': r.phone||'', 'التكليفات': r.assignedTotal,
+    'المكتمل': r.completed, 'المتبقي': r.pending, 'نسبة الإنجاز': r.completionPct,
+    'آخر إنجاز': r.lastCompletedAt ? String(r.lastCompletedAt).slice(0,10) : '', 'الحالة': r.statusLabel||''
+  }));
+  return items.map(u => ({
+    'الختمة': u.khatmaTitle||'', 'رقم الختمة': u.khatmaSerialNumber||'', 'المجموعة': u.groupName||'', 'الجزء': u.label||String(u.unitNumber),
+    'القارئ': u.readerName||'', 'الحالة': mpAssignmentStatusLabels[u.status] || u.status || '', 'تاريخ الإنجاز': u.completedAt ? String(u.completedAt).slice(0,10) : ''
+  }));
+}
 function mpEmptyOrError(data){
   if(!data || !data.ok) return `<article class="feature-card empty-state"><h3>تعذر تحميل بيانات متابعة الإنجاز.</h3></article>`;
   if(!data.items || !data.items.length) return `<article class="feature-card empty-state"><h3>لا توجد بيانات للعرض.</h3></article>`;
@@ -4373,11 +4474,11 @@ function renderMpKhatmas(content, data, ui){
   if(empty){ content.innerHTML = empty; return; }
   content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
     <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
-      <th style="padding:6px;text-align:right">التسلسل</th><th style="padding:6px;text-align:right">اسم الختمة</th>
+      <th style="padding:6px;text-align:right">التسلسل</th>${mpSortTh('اسم الختمة','title',ui)}
       <th style="padding:6px;text-align:right">المجموعة</th><th style="padding:6px;text-align:right">الفترة</th>
-      <th style="padding:6px;text-align:right">التكليفات</th><th style="padding:6px;text-align:right">المكتمل</th>
+      ${mpSortTh('التكليفات','total_units',ui)}${mpSortTh('المكتمل','completed_count',ui)}
       <th style="padding:6px;text-align:right">المتبقي</th><th style="padding:6px;text-align:right">القراء</th>
-      <th style="padding:6px;text-align:right">نسبة الإنجاز</th><th style="padding:6px;text-align:right">إجراء</th>
+      ${mpSortTh('نسبة الإنجاز','completion_pct',ui)}<th style="padding:6px;text-align:right">إجراء</th>
     </tr></thead>
     <tbody>${data.items.map(k => `<tr style="border-bottom:1px solid var(--line)">
       <td style="padding:6px;font-family:monospace">${escapeHtml(k.khatmaSerialNumber||'—')}</td>
@@ -4390,6 +4491,7 @@ function renderMpKhatmas(content, data, ui){
       <td style="padding:6px"><a class="mini-icon-btn v32" href="#/managed-khatma/${escapeHtml(k.id)}/manage">فتح</a></td>
     </tr>`).join('')}</tbody>
   </table>${mpPaginationHtml(ui, data.pagination)}`;
+  bindMpSortHeaders(content, ui);
   bindMpPagination(ui);
 }
 function renderMpGroups(content, data, ui){
@@ -4397,10 +4499,10 @@ function renderMpGroups(content, data, ui){
   if(empty){ content.innerHTML = empty; return; }
   content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
     <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
-      <th style="padding:6px;text-align:right">تسلسل المجموعة</th><th style="padding:6px;text-align:right">اسم المجموعة</th>
+      <th style="padding:6px;text-align:right">تسلسل المجموعة</th>${mpSortTh('اسم المجموعة','name',ui)}
       <th style="padding:6px;text-align:right">عدد الختمات</th><th style="padding:6px;text-align:right">عدد القراء</th>
-      <th style="padding:6px;text-align:right">التكليفات</th><th style="padding:6px;text-align:right">المكتمل</th>
-      <th style="padding:6px;text-align:right">المتبقي</th><th style="padding:6px;text-align:right">نسبة الإنجاز</th>
+      ${mpSortTh('التكليفات','total_units',ui)}${mpSortTh('المكتمل','completed_count',ui)}
+      <th style="padding:6px;text-align:right">المتبقي</th>${mpSortTh('نسبة الإنجاز','completion_pct',ui)}
     </tr></thead>
     <tbody>${data.items.map(g => `<tr style="border-bottom:1px solid var(--line)">
       <td style="padding:6px;font-family:monospace">${escapeHtml(g.groupSerialNumber||'—')}</td>
@@ -4410,6 +4512,7 @@ function renderMpGroups(content, data, ui){
       <td style="padding:6px">${g.pending}</td><td style="padding:6px">${g.completionPct}%</td>
     </tr>`).join('')}</tbody>
   </table>${mpPaginationHtml(ui, data.pagination)}`;
+  bindMpSortHeaders(content, ui);
   bindMpPagination(ui);
 }
 function renderMpReaders(content, data, ui){
@@ -4417,10 +4520,10 @@ function renderMpReaders(content, data, ui){
   if(empty){ content.innerHTML = empty; return; }
   content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
     <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
-      <th style="padding:6px;text-align:right">تسلسل القارئ</th><th style="padding:6px;text-align:right">اسم القارئ</th>
-      <th style="padding:6px;text-align:right">الجوال</th><th style="padding:6px;text-align:right">التكليفات</th>
-      <th style="padding:6px;text-align:right">المكتمل</th><th style="padding:6px;text-align:right">المتبقي</th>
-      <th style="padding:6px;text-align:right">نسبة الإنجاز</th><th style="padding:6px;text-align:right">آخر إنجاز</th>
+      <th style="padding:6px;text-align:right">تسلسل القارئ</th>${mpSortTh('اسم القارئ','reader_name',ui)}
+      <th style="padding:6px;text-align:right">الجوال</th>${mpSortTh('التكليفات','assigned_total',ui)}
+      ${mpSortTh('المكتمل','completed_count',ui)}<th style="padding:6px;text-align:right">المتبقي</th>
+      ${mpSortTh('نسبة الإنجاز','completion_pct',ui)}<th style="padding:6px;text-align:right">آخر إنجاز</th>
       <th style="padding:6px;text-align:right">الحالة</th>
     </tr></thead>
     <tbody>${data.items.map(r => `<tr style="border-bottom:1px solid var(--line)">
@@ -4433,6 +4536,7 @@ function renderMpReaders(content, data, ui){
       <td style="padding:6px">${escapeHtml(r.statusLabel||'')}</td>
     </tr>`).join('')}</tbody>
   </table>${mpPaginationHtml(ui, data.pagination)}`;
+  bindMpSortHeaders(content, ui);
   bindMpPagination(ui);
 }
 const mpAssignmentStatusLabels = { available: 'متاح', assigned: 'غير مقروء', reading: 'جاري القراءة', completed: 'مقروء' };
@@ -4443,7 +4547,7 @@ function renderMpAssignments(content, data, ui){
     <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
       <th style="padding:6px;text-align:right">الختمة</th><th style="padding:6px;text-align:right">المجموعة</th>
       <th style="padding:6px;text-align:right">الجزء</th><th style="padding:6px;text-align:right">القارئ</th>
-      <th style="padding:6px;text-align:right">الحالة</th><th style="padding:6px;text-align:right">تاريخ الإنجاز</th>
+      ${mpSortTh('الحالة','status',ui)}${mpSortTh('تاريخ الإنجاز','completed_at',ui)}
     </tr></thead>
     <tbody>${data.items.map(u => `<tr style="border-bottom:1px solid var(--line)">
       <td style="padding:6px">${escapeHtml(u.khatmaTitle||'')} <span style="color:var(--muted);font-size:11px">${escapeHtml(u.khatmaSerialNumber||'')}</span></td>
@@ -4454,6 +4558,7 @@ function renderMpAssignments(content, data, ui){
       <td style="padding:6px">${u.completedAt ? escapeHtml(String(u.completedAt).slice(0,10)) : '—'}</td>
     </tr>`).join('')}</tbody>
   </table>${mpPaginationHtml(ui, data.pagination)}`;
+  bindMpSortHeaders(content, ui);
   bindMpPagination(ui);
 }
 

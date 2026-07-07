@@ -6159,7 +6159,7 @@ async function managedProgress(request, DB) {
     if (minCompletion !== null) { havingParts.push("completion_pct >= ?"); havingParams.push(minCompletion); }
     if (maxCompletion !== null) { havingParts.push("completion_pct <= ?"); havingParams.push(maxCompletion); }
     const havingClause = havingParts.length ? `HAVING ${havingParts.join(" AND ")}` : "";
-    const sortMap = { completion_pct: "completion_pct", pending_count: "pending", completed_count: "completed", khatma_serial: "mk.khatma_serial_number", group_serial: "mrg.group_serial_number" };
+    const sortMap = { completion_pct: "completion_pct", pending_count: "pending", completed_count: "completed", khatma_serial: "mk.khatma_serial_number", group_serial: "mrg.group_serial_number", title: "mk.title", total_units: "total_units" };
     const sortKeyReq = url.searchParams.get("sort");
     const sortCol = sortMap[sortKeyReq] || "mk.created_at";
     const sortKeyUsed = sortMap[sortKeyReq] ? sortKeyReq : "created_at";
@@ -6219,7 +6219,7 @@ async function managedProgress(request, DB) {
     if (minCompletion !== null) { havingParts.push("completion_pct >= ?"); havingParams.push(minCompletion); }
     if (maxCompletion !== null) { havingParts.push("completion_pct <= ?"); havingParams.push(maxCompletion); }
     const havingClause = havingParts.length ? `HAVING ${havingParts.join(" AND ")}` : "";
-    const sortMap = { completion_pct: "completion_pct", pending_count: "pending", completed_count: "completed", group_serial: "mrg.group_serial_number" };
+    const sortMap = { completion_pct: "completion_pct", pending_count: "pending", completed_count: "completed", group_serial: "mrg.group_serial_number", name: "mrg.name", total_units: "total_units" };
     const sortKeyReq = url.searchParams.get("sort");
     const sortCol = sortMap[sortKeyReq] || "mrg.created_at";
     const sortKeyUsed = sortMap[sortKeyReq] ? sortKeyReq : "created_at";
@@ -6292,9 +6292,10 @@ async function managedProgress(request, DB) {
     const havingParts = [];
     if (statusFilter === "completed") havingParts.push("pending = 0 AND assigned_total > 0");
     else if (statusFilter === "partial") havingParts.push("completed_count > 0 AND pending > 0");
+    else if (statusFilter === "has_progress") havingParts.push("completed_count > 0");
     else if (statusFilter === "not_started") havingParts.push("completed_count = 0");
     const havingClause = havingParts.length ? `HAVING ${havingParts.join(" AND ")}` : "";
-    const sortMap = { completion_pct: "completion_pct", pending_count: "pending", completed_count: "completed_count", reader_name: "mrp.reader_name" };
+    const sortMap = { completion_pct: "completion_pct", pending_count: "pending", completed_count: "completed_count", reader_name: "mrp.reader_name", assigned_total: "assigned_total" };
     const sortKeyReq = url.searchParams.get("sort");
     const sortCol = sortMap[sortKeyReq] || "mrp.reader_name";
     const sortKeyUsed = sortMap[sortKeyReq] ? sortKeyReq : "reader_name";
@@ -6358,9 +6359,10 @@ async function managedProgress(request, DB) {
   if (khatmaIdFilter) { where += " AND mk.id = ?"; params.push(khatmaIdFilter); }
   if (groupIdFilter) { where += " AND mk.group_id = ?"; params.push(groupIdFilter); }
   if (readerIdFilter) { where += " AND mrp.id = ?"; params.push(readerIdFilter); }
-  if (statusFilter) { where += " AND u.status = ?"; params.push(statusFilter); }
+  if (statusFilter === "unread") { where += " AND u.status != 'completed'"; }
+  else if (statusFilter) { where += " AND u.status = ?"; params.push(statusFilter); }
   if (q) { where += " AND (mk.title LIKE ? OR mrp.reader_name LIKE ? OR u.label LIKE ?)"; params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
-  const sortMap = { khatma_serial: "mk.khatma_serial_number", group_serial: "mrg.group_serial_number", reader_name: "mrp.reader_name" };
+  const sortMap = { khatma_serial: "mk.khatma_serial_number", group_serial: "mrg.group_serial_number", reader_name: "mrp.reader_name", completed_at: "u.completed_at", status: "u.status" };
   const sortKeyReq = url.searchParams.get("sort");
   const sortCol = sortMap[sortKeyReq] || "mk.khatma_serial_number";
   const sortKeyUsed = sortMap[sortKeyReq] ? sortKeyReq : "khatma_serial";
