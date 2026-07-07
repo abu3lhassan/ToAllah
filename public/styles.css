@@ -1511,6 +1511,101 @@ input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--mute
 .managed-table-row label { margin: 0 }
 .managed-table-row .btn  { min-height: 48px }
 
+
+/* ─── 15b. Admin / Monitoring Pages (managed-progress and future admin views) ─── */
+.page-head.admin-hero { padding: 20px 0 12px }
+.page-head.admin-hero .eyebrow { font-size: 12px; padding: 6px 12px }
+.page-head.admin-hero h1 { font-size: 26px; margin: 8px 0 6px; letter-spacing: -.02em }
+.page-head.admin-hero p { font-size: 14px; line-height: 1.6; margin: 0; max-width: none }
+
+.admin-page-body { display: flex; flex-direction: column; gap: 12px }
+
+.admin-quick-actions,
+.admin-tabs,
+.admin-filters-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+.admin-quick-actions .btn,
+.admin-tabs .btn {
+  min-height: 38px;
+  padding: 8px 14px;
+  font-size: 13px;
+  box-shadow: none;
+}
+.admin-tabs .btn.primary { box-shadow: 0 8px 20px rgba(15,95,69,.18) }
+
+.admin-search-input, .admin-select {
+  margin-top: 0;
+  padding: 9px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+}
+.admin-search-input { flex: 1 1 200px; min-width: 160px }
+.admin-select { flex: 0 0 auto; width: auto; min-width: 150px }
+
+.admin-card {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+.admin-table-card { overflow-x: auto }
+
+.admin-summary-grid { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px }
+
+.admin-empty { padding: 34px 16px; text-align: center }
+.admin-empty h3 { margin: 0 0 4px; font-size: 16px; color: var(--text) }
+.admin-empty p  { margin: 0; color: var(--muted) }
+
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px }
+.data-table thead th {
+  padding: 11px 12px;
+  text-align: right;
+  color: var(--muted);
+  font-weight: 900;
+  background: var(--primary-soft);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.data-table thead th[data-sort-key] { cursor: pointer; user-select: none }
+.data-table thead th[data-sort-key]:hover { color: var(--primary) }
+.data-table tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  line-height: 1.7;
+}
+.data-table tbody tr:last-child td { border-bottom: 0 }
+.data-table tbody tr:hover td { background: var(--primary-soft) }
+
+.admin-pagination {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 640px) {
+  .page-head.admin-hero { padding: 16px 0 10px }
+  .page-head.admin-hero h1 { font-size: 22px }
+  .admin-filters-toolbar { flex-direction: column; align-items: stretch }
+  .admin-search-input, .admin-select { width: 100%; flex: none }
+  .admin-filters-toolbar .btn { width: 100% }
+  .admin-quick-actions .btn, .admin-tabs .btn { flex: 1 1 auto; text-align: center }
+  .data-table { font-size: 12px }
+  .data-table thead th, .data-table tbody td { padding: 8px }
+}
+
 .managed-assignments-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));

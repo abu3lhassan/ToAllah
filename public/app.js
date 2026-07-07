@@ -4255,20 +4255,24 @@ async function setupManagedProgress(){
   if(!root) return;
   if(!canUseManagedKhatmas()){ root.innerHTML = `<article class="feature-card empty-state"><h3>غير مصرح</h3></article>`; return; }
 
+  document.querySelector('.page-head')?.classList.add('admin-hero');
+
   if(!state.mpUI) state.mpUI = { tab: 'summary', q: '', status: '', bucket: '', sort: '', dir: 'desc', offset: 0, limit: 25 };
   const ui = state.mpUI;
 
   root.innerHTML = `
-    <div id="mpQuickFilters" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-      <button type="button" class="btn ghost compact-btn" id="mpQuickLowest">الأقل إنجازًا</button>
-      <button type="button" class="btn ghost compact-btn" id="mpQuickNotStarted">القراء الذين لم ينجزوا</button>
-      <button type="button" class="btn ghost compact-btn" id="mpQuickLow50">الختمات أقل من 50%</button>
+    <div class="admin-page-body">
+      <div class="admin-quick-actions" id="mpQuickFilters">
+        <button type="button" class="btn ghost compact-btn" id="mpQuickLowest">الأقل إنجازًا</button>
+        <button type="button" class="btn ghost compact-btn" id="mpQuickNotStarted">القراء الذين لم ينجزوا</button>
+        <button type="button" class="btn ghost compact-btn" id="mpQuickLow50">الختمات أقل من 50%</button>
+      </div>
+      <div class="admin-tabs" id="mpTabBar">
+        ${mpTabs.map(t => `<button type="button" class="btn ${ui.tab===t.key?'primary':'ghost'} compact-btn" data-mp-tab="${t.key}">${t.label}</button>`).join('')}
+      </div>
+      <div class="admin-filters-toolbar" id="mpFilters"></div>
+      <div class="admin-card admin-table-card" id="mpContent"><div class="admin-empty"><p>جاري التحميل...</p></div></div>
     </div>
-    <div id="mpTabBar" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
-      ${mpTabs.map(t => `<button type="button" class="btn ${ui.tab===t.key?'primary':'ghost'} compact-btn" data-mp-tab="${t.key}">${t.label}</button>`).join('')}
-    </div>
-    <div id="mpFilters" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
-    <div id="mpContent" style="overflow-x:auto"><p style="color:var(--muted)">جاري التحميل...</p></div>
   `;
   root.querySelectorAll('[data-mp-tab]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -4306,9 +4310,9 @@ function renderMpFilters(ui){
     ? `<option value="">الكل</option><option value="completed">مقروء</option><option value="unread">غير مقروء</option>`
     : '';
   el.innerHTML = `
-    <input id="mpSearchInput" type="search" placeholder="بحث..." value="${escapeHtml(ui.q)}" style="flex:1;min-width:160px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px"/>
-    ${bucketOptionsHtml ? `<select id="mpBucketSelect" style="padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px">${bucketOptionsHtml}</select>` : ''}
-    ${statusOptionsHtml ? `<select id="mpStatusSelect" style="padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px">${statusOptionsHtml}</select>` : ''}
+    <input id="mpSearchInput" class="admin-search-input" type="search" placeholder="بحث..." value="${escapeHtml(ui.q)}"/>
+    ${bucketOptionsHtml ? `<select id="mpBucketSelect" class="admin-select">${bucketOptionsHtml}</select>` : ''}
+    ${statusOptionsHtml ? `<select id="mpStatusSelect" class="admin-select">${statusOptionsHtml}</select>` : ''}
     <button type="button" class="btn ghost compact-btn" id="mpExportCsvBtn">تصدير CSV</button>
   `;
   const inp = document.getElementById('mpSearchInput');
@@ -4340,7 +4344,7 @@ function mpBucketParams(bucket){
 async function loadMpTab(ui){
   const content = document.getElementById('mpContent');
   if(!content) return;
-  content.innerHTML = `<p style="color:var(--muted)">جاري التحميل...</p>`;
+  content.innerHTML = `<div class="admin-empty"><p>جاري التحميل...</p></div>`;
   const params = {};
   if(ui.q) params.q = ui.q;
   if(ui.status) params.status = ui.status;
@@ -4352,7 +4356,7 @@ async function loadMpTab(ui){
   try{
     data = await fetchManagedProgress(ui.tab, params);
   }catch(err){
-    content.innerHTML = `<article class="feature-card empty-state"><h3>${escapeHtml(mpErrorMessage(err))}</h3></article>`;
+    content.innerHTML = `<div class="admin-empty"><h3>${escapeHtml(mpErrorMessage(err))}</h3></div>`;
     return;
   }
   if(ui.tab === 'summary') return renderMpSummary(content, data);
@@ -4368,9 +4372,9 @@ function mpCard(label, value){
   </div>`;
 }
 function renderMpSummary(content, data){
-  if(!data || !data.ok){ content.innerHTML = `<article class="feature-card empty-state"><h3>تعذر تحميل بيانات متابعة الإنجاز.</h3></article>`; return; }
+  if(!data || !data.ok){ content.innerHTML = `<div class="admin-empty"><h3>تعذر تحميل بيانات متابعة الإنجاز.</h3></div>`; return; }
   const a = data.assignments || {};
-  content.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:10px">
+  content.innerHTML = `<div class="admin-summary-grid">
     ${mpCard('إجمالي الختمات', data.khatmas?.total ?? 0)}
     ${mpCard('إجمالي المجموعات', data.groups?.total ?? 0)}
     ${mpCard('إجمالي القراء', data.readers?.total ?? 0)}
@@ -4388,7 +4392,7 @@ function mpPaginationHtml(ui, pagination){
   if(!pagination) return '';
   const page = Math.floor(ui.offset / ui.limit) + 1;
   const pages = Math.max(1, Math.ceil((pagination.total || 0) / ui.limit));
-  return `<div style="display:flex;align-items:center;gap:10px;margin-top:12px;font-size:13px">
+  return `<div class="admin-pagination">
     <button class="btn ghost compact-btn" type="button" id="mpPrevBtn" ${ui.offset <= 0 ? 'disabled' : ''}>السابق</button>
     <span style="color:var(--muted)">صفحة ${page} من ${pages} · ${pagination.total} نتيجة</span>
     <button class="btn ghost compact-btn" type="button" id="mpNextBtn" ${!pagination.has_more ? 'disabled' : ''}>التالي</button>
@@ -4401,7 +4405,7 @@ function bindMpPagination(ui){
 function mpSortTh(label, key, ui){
   const active = ui.sort === key;
   const arrow = active ? (ui.dir === 'asc' ? ' ▲' : ' ▼') : '';
-  return `<th data-sort-key="${key}" style="padding:6px;text-align:right;cursor:pointer;user-select:none">${escapeHtml(label)}${arrow}</th>`;
+  return `<th data-sort-key="${key}">${escapeHtml(label)}${arrow}</th>`;
 }
 function bindMpSortHeaders(content, ui){
   content.querySelectorAll('[data-sort-key]').forEach(th => {
@@ -4465,30 +4469,30 @@ function mpExportRows(tab, items){
   }));
 }
 function mpEmptyOrError(data){
-  if(!data || !data.ok) return `<article class="feature-card empty-state"><h3>تعذر تحميل بيانات متابعة الإنجاز.</h3></article>`;
-  if(!data.items || !data.items.length) return `<article class="feature-card empty-state"><h3>لا توجد بيانات للعرض.</h3></article>`;
+  if(!data || !data.ok) return `<div class="admin-empty"><h3>تعذر تحميل بيانات متابعة الإنجاز.</h3></div>`;
+  if(!data.items || !data.items.length) return `<div class="admin-empty"><h3>لا توجد بيانات للعرض.</h3></div>`;
   return null;
 }
 function renderMpKhatmas(content, data, ui){
   const empty = mpEmptyOrError(data);
   if(empty){ content.innerHTML = empty; return; }
-  content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
-    <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
-      <th style="padding:6px;text-align:right">التسلسل</th>${mpSortTh('اسم الختمة','title',ui)}
-      <th style="padding:6px;text-align:right">المجموعة</th><th style="padding:6px;text-align:right">الفترة</th>
+  content.innerHTML = `<table class="data-table">
+    <thead><tr>
+      <th>التسلسل</th>${mpSortTh('اسم الختمة','title',ui)}
+      <th>المجموعة</th><th>الفترة</th>
       ${mpSortTh('التكليفات','total_units',ui)}${mpSortTh('المكتمل','completed_count',ui)}
-      <th style="padding:6px;text-align:right">المتبقي</th><th style="padding:6px;text-align:right">القراء</th>
-      ${mpSortTh('نسبة الإنجاز','completion_pct',ui)}<th style="padding:6px;text-align:right">إجراء</th>
+      <th>المتبقي</th><th>القراء</th>
+      ${mpSortTh('نسبة الإنجاز','completion_pct',ui)}<th>إجراء</th>
     </tr></thead>
-    <tbody>${data.items.map(k => `<tr style="border-bottom:1px solid var(--line)">
-      <td style="padding:6px;font-family:monospace">${escapeHtml(k.khatmaSerialNumber||'—')}</td>
-      <td style="padding:6px">${escapeHtml(k.title||'')}</td>
-      <td style="padding:6px">${escapeHtml(k.groupName||'—')}</td>
-      <td style="padding:6px">${escapeHtml(String(k.periodNumber||1))}</td>
-      <td style="padding:6px">${k.totalUnits}</td><td style="padding:6px">${k.completed}</td>
-      <td style="padding:6px">${k.pending}</td><td style="padding:6px">${k.readersCount}</td>
-      <td style="padding:6px">${k.completionPct}%</td>
-      <td style="padding:6px"><a class="mini-icon-btn v32" href="#/managed-khatma/${escapeHtml(k.id)}/manage">فتح</a></td>
+    <tbody>${data.items.map(k => `<tr>
+      <td style="font-family:monospace">${escapeHtml(k.khatmaSerialNumber||'—')}</td>
+      <td>${escapeHtml(k.title||'')}</td>
+      <td>${escapeHtml(k.groupName||'—')}</td>
+      <td>${escapeHtml(String(k.periodNumber||1))}</td>
+      <td>${k.totalUnits}</td><td>${k.completed}</td>
+      <td>${k.pending}</td><td>${k.readersCount}</td>
+      <td>${k.completionPct}%</td>
+      <td><a class="mini-icon-btn v32" href="#/managed-khatma/${escapeHtml(k.id)}/manage">فتح</a></td>
     </tr>`).join('')}</tbody>
   </table>${mpPaginationHtml(ui, data.pagination)}`;
   bindMpSortHeaders(content, ui);
@@ -4497,19 +4501,19 @@ function renderMpKhatmas(content, data, ui){
 function renderMpGroups(content, data, ui){
   const empty = mpEmptyOrError(data);
   if(empty){ content.innerHTML = empty; return; }
-  content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
-    <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
-      <th style="padding:6px;text-align:right">تسلسل المجموعة</th>${mpSortTh('اسم المجموعة','name',ui)}
-      <th style="padding:6px;text-align:right">عدد الختمات</th><th style="padding:6px;text-align:right">عدد القراء</th>
+  content.innerHTML = `<table class="data-table">
+    <thead><tr>
+      <th>تسلسل المجموعة</th>${mpSortTh('اسم المجموعة','name',ui)}
+      <th>عدد الختمات</th><th>عدد القراء</th>
       ${mpSortTh('التكليفات','total_units',ui)}${mpSortTh('المكتمل','completed_count',ui)}
-      <th style="padding:6px;text-align:right">المتبقي</th>${mpSortTh('نسبة الإنجاز','completion_pct',ui)}
+      <th>المتبقي</th>${mpSortTh('نسبة الإنجاز','completion_pct',ui)}
     </tr></thead>
-    <tbody>${data.items.map(g => `<tr style="border-bottom:1px solid var(--line)">
-      <td style="padding:6px;font-family:monospace">${escapeHtml(g.groupSerialNumber||'—')}</td>
-      <td style="padding:6px">${escapeHtml(g.name||'')}</td>
-      <td style="padding:6px">${g.khatmasCount}</td><td style="padding:6px">${g.readersCount}</td>
-      <td style="padding:6px">${g.totalUnits}</td><td style="padding:6px">${g.completed}</td>
-      <td style="padding:6px">${g.pending}</td><td style="padding:6px">${g.completionPct}%</td>
+    <tbody>${data.items.map(g => `<tr>
+      <td style="font-family:monospace">${escapeHtml(g.groupSerialNumber||'—')}</td>
+      <td>${escapeHtml(g.name||'')}</td>
+      <td>${g.khatmasCount}</td><td>${g.readersCount}</td>
+      <td>${g.totalUnits}</td><td>${g.completed}</td>
+      <td>${g.pending}</td><td>${g.completionPct}%</td>
     </tr>`).join('')}</tbody>
   </table>${mpPaginationHtml(ui, data.pagination)}`;
   bindMpSortHeaders(content, ui);
@@ -4518,22 +4522,22 @@ function renderMpGroups(content, data, ui){
 function renderMpReaders(content, data, ui){
   const empty = mpEmptyOrError(data);
   if(empty){ content.innerHTML = empty; return; }
-  content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
-    <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
-      <th style="padding:6px;text-align:right">تسلسل القارئ</th>${mpSortTh('اسم القارئ','reader_name',ui)}
-      <th style="padding:6px;text-align:right">الجوال</th>${mpSortTh('التكليفات','assigned_total',ui)}
-      ${mpSortTh('المكتمل','completed_count',ui)}<th style="padding:6px;text-align:right">المتبقي</th>
-      ${mpSortTh('نسبة الإنجاز','completion_pct',ui)}<th style="padding:6px;text-align:right">آخر إنجاز</th>
-      <th style="padding:6px;text-align:right">الحالة</th>
+  content.innerHTML = `<table class="data-table">
+    <thead><tr>
+      <th>تسلسل القارئ</th>${mpSortTh('اسم القارئ','reader_name',ui)}
+      <th>الجوال</th>${mpSortTh('التكليفات','assigned_total',ui)}
+      ${mpSortTh('المكتمل','completed_count',ui)}<th>المتبقي</th>
+      ${mpSortTh('نسبة الإنجاز','completion_pct',ui)}<th>آخر إنجاز</th>
+      <th>الحالة</th>
     </tr></thead>
-    <tbody>${data.items.map(r => `<tr style="border-bottom:1px solid var(--line)">
-      <td style="padding:6px;font-family:monospace">${escapeHtml(r.serialCode||'—')}</td>
-      <td style="padding:6px">${escapeHtml(r.readerName||'')}</td>
-      <td style="padding:6px;font-family:monospace">${escapeHtml(r.phone||'')}</td>
-      <td style="padding:6px">${r.assignedTotal}</td><td style="padding:6px">${r.completed}</td>
-      <td style="padding:6px">${r.pending}</td><td style="padding:6px">${r.completionPct}%</td>
-      <td style="padding:6px">${r.lastCompletedAt ? escapeHtml(String(r.lastCompletedAt).slice(0,10)) : '—'}</td>
-      <td style="padding:6px">${escapeHtml(r.statusLabel||'')}</td>
+    <tbody>${data.items.map(r => `<tr>
+      <td style="font-family:monospace">${escapeHtml(r.serialCode||'—')}</td>
+      <td>${escapeHtml(r.readerName||'')}</td>
+      <td style="font-family:monospace">${escapeHtml(r.phone||'')}</td>
+      <td>${r.assignedTotal}</td><td>${r.completed}</td>
+      <td>${r.pending}</td><td>${r.completionPct}%</td>
+      <td>${r.lastCompletedAt ? escapeHtml(String(r.lastCompletedAt).slice(0,10)) : '—'}</td>
+      <td>${escapeHtml(r.statusLabel||'')}</td>
     </tr>`).join('')}</tbody>
   </table>${mpPaginationHtml(ui, data.pagination)}`;
   bindMpSortHeaders(content, ui);
@@ -4543,19 +4547,19 @@ const mpAssignmentStatusLabels = { available: 'متاح', assigned: 'غير مق
 function renderMpAssignments(content, data, ui){
   const empty = mpEmptyOrError(data);
   if(empty){ content.innerHTML = empty; return; }
-  content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
-    <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
-      <th style="padding:6px;text-align:right">الختمة</th><th style="padding:6px;text-align:right">المجموعة</th>
-      <th style="padding:6px;text-align:right">الجزء</th><th style="padding:6px;text-align:right">القارئ</th>
+  content.innerHTML = `<table class="data-table">
+    <thead><tr>
+      <th>الختمة</th><th>المجموعة</th>
+      <th>الجزء</th><th>القارئ</th>
       ${mpSortTh('الحالة','status',ui)}${mpSortTh('تاريخ الإنجاز','completed_at',ui)}
     </tr></thead>
-    <tbody>${data.items.map(u => `<tr style="border-bottom:1px solid var(--line)">
-      <td style="padding:6px">${escapeHtml(u.khatmaTitle||'')} <span style="color:var(--muted);font-size:11px">${escapeHtml(u.khatmaSerialNumber||'')}</span></td>
-      <td style="padding:6px">${escapeHtml(u.groupName||'—')}</td>
-      <td style="padding:6px">${escapeHtml(u.label||String(u.unitNumber))}</td>
-      <td style="padding:6px">${escapeHtml(u.readerName||'—')}</td>
-      <td style="padding:6px">${escapeHtml(mpAssignmentStatusLabels[u.status] || u.status || '')}</td>
-      <td style="padding:6px">${u.completedAt ? escapeHtml(String(u.completedAt).slice(0,10)) : '—'}</td>
+    <tbody>${data.items.map(u => `<tr>
+      <td>${escapeHtml(u.khatmaTitle||'')} <span style="color:var(--muted);font-size:11px">${escapeHtml(u.khatmaSerialNumber||'')}</span></td>
+      <td>${escapeHtml(u.groupName||'—')}</td>
+      <td>${escapeHtml(u.label||String(u.unitNumber))}</td>
+      <td>${escapeHtml(u.readerName||'—')}</td>
+      <td>${escapeHtml(mpAssignmentStatusLabels[u.status] || u.status || '')}</td>
+      <td>${u.completedAt ? escapeHtml(String(u.completedAt).slice(0,10)) : '—'}</td>
     </tr>`).join('')}</tbody>
   </table>${mpPaginationHtml(ui, data.pagination)}`;
   bindMpSortHeaders(content, ui);
