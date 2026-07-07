@@ -6017,6 +6017,393 @@ async function dashboardStats(request, DB) {
   });
 }
 
+// ── Progress Monitoring Center — read-only aggregation views over existing
+// managed_* tables. No new schema. Mirrors the owner/creator scoping pattern
+// already used by dashboardStats/listReaderGroups/readerGlobalSearch.
+function maskManagedProgressPhone(phone) {
+  const s = String(phone || "").trim();
+  if (!s) return "";
+  if (s.length <= 4) return "*".repeat(s.length);
+  return s.slice(0, 2) + "*".repeat(s.length - 4) + s.slice(-2);
+}
+
+async function getManagedProgressScope(DB, user) {
+  const isOwner = user.role === "owner";
+  if (isOwner) {
+    return { isOwner, khatmaWhere: "mk.deleted_at IS NULL", khatmaParams: [], groupWhere: "mrg.status != 'deleted'", groupParams: [] };
+  }
+  const memberIds = await getCreatorGroupMemberIds(DB, user.id);
+  const userGroupIds = await getUserGroupIds(DB, user.id);
+  let khatmaWhere, khatmaParams, groupWhere, groupParams;
+  if (userGroupIds.length) {
+    const sharedK = `OR (mk.shared_creator_group_id IS NOT NULL AND mk.shared_creator_group_id IN (${userGroupIds.map(() => "?").join(",")}))`;
+    khatmaWhere = `mk.deleted_at IS NULL AND (mk.created_by_user_id IN (${memberIds.map(() => "?").join(",")}) ${sharedK})`;
+    khatmaParams = [...memberIds, ...userGroupIds];
+    const sharedG = `OR (mrg.shared_creator_group_id IS NOT NULL AND mrg.shared_creator_group_id IN (${userGroupIds.map(() => "?").join(",")}))`;
+    groupWhere = `mrg.status != 'deleted' AND (mrg.created_by_user_id IN (${memberIds.map(() => "?").join(",")}) ${sharedG})`;
+    groupParams = [...memberIds, ...userGroupIds];
+  } else {
+    khatmaWhere = `mk.deleted_at IS NULL AND mk.created_by_user_id IN (${memberIds.map(() => "?").join(",")})`;
+    khatmaParams = [...memberIds];
+    groupWhere = `mrg.status != 'deleted' AND mrg.created_by_user_id IN (${memberIds.map(() => "?").join(",")})`;
+    groupParams = [...memberIds];
+  }
+  return { isOwner, khatmaWhere, khatmaParams, groupWhere, groupParams };
+}
+
+async function managedProgress(request, DB) {
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  await ensureManagedSchema(DB);
+  await ensureGroupSchema(DB);
+
+  const url = new URL(request.url);
+  const view = (url.searchParams.get("view") || "summary").trim();
+  if (!["summary", "khatmas", "groups", "readers", "assignments"].includes(view)) {
+    return json({ ok: false, error: "invalid_view", message: "view يجب أن يكون: summary, khatmas, groups, readers, assignments" }, 400);
+  }
+
+  const scope = await getManagedProgressScope(DB, check.user);
+  const q = (url.searchParams.get("q") || "").trim();
+  const groupIdFilter = (url.searchParams.get("group_id") || "").trim();
+  const khatmaIdFilter = (url.searchParams.get("khatma_id") || "").trim();
+  const readerIdFilter = (url.searchParams.get("reader_id") || "").trim();
+  const statusFilter = (url.searchParams.get("status") || "").trim();
+  const minCompletionRaw = url.searchParams.get("min_completion");
+  const maxCompletionRaw = url.searchParams.get("max_completion");
+  const minCompletion = minCompletionRaw !== null && minCompletionRaw !== "" && Number.isFinite(Number(minCompletionRaw)) ? Number(minCompletionRaw) : null;
+  const maxCompletion = maxCompletionRaw !== null && maxCompletionRaw !== "" && Number.isFinite(Number(maxCompletionRaw)) ? Number(maxCompletionRaw) : null;
+  const dir = (url.searchParams.get("dir") || "desc").toLowerCase() === "asc" ? "ASC" : "DESC";
+  const dirLower = dir === "ASC" ? "asc" : "desc";
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "25", 10) || 25));
+  const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10) || 0);
+  const safeFirst = async (stmt) => { try { return (await stmt.first()) || {}; } catch { return {}; } };
+  const safeAll = async (stmt) => { try { return (await stmt.all()).results || []; } catch { return []; } };
+  const buildPagination = (total, count) => ({ total: Number(total || 0), limit, offset, count, has_more: offset + count < Number(total || 0) });
+
+  if (view === "summary") {
+    const khatmaRow = await safeFirst(DB.prepare(`SELECT COUNT(*) as total FROM managed_khatmas mk WHERE ${scope.khatmaWhere}`).bind(...scope.khatmaParams));
+    const groupRow = await safeFirst(DB.prepare(`SELECT COUNT(*) as total FROM managed_reader_groups mrg WHERE ${scope.groupWhere}`).bind(...scope.groupParams));
+    const readerRow = await safeFirst(DB.prepare(`
+      SELECT COUNT(DISTINCT mrp.id) as total
+      FROM managed_reader_profiles mrp
+      JOIN managed_khatma_participants mkp ON mkp.reader_profile_id = mrp.id
+      JOIN managed_khatmas mk ON mk.id = mkp.khatma_id
+      WHERE mrp.status != 'deleted' AND ${scope.khatmaWhere}
+    `).bind(...scope.khatmaParams));
+    const unitRow = await safeFirst(DB.prepare(`
+      SELECT COUNT(*) as total,
+        SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN u.status='reading' THEN 1 ELSE 0 END) as reading,
+        SUM(CASE WHEN u.status='assigned' THEN 1 ELSE 0 END) as assigned,
+        SUM(CASE WHEN u.status='available' THEN 1 ELSE 0 END) as available
+      FROM managed_khatma_units u JOIN managed_khatmas mk ON mk.id = u.khatma_id
+      WHERE ${scope.khatmaWhere}
+    `).bind(...scope.khatmaParams));
+    // low_progress_khatmas_count threshold: completion_pct < 50 (khatmas with at least 1 unit only)
+    const lowProgressRow = await safeFirst(DB.prepare(`
+      SELECT COUNT(*) as total FROM (
+        SELECT mk.id, COUNT(u.id) as total_units, SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END) as completed
+        FROM managed_khatmas mk JOIN managed_khatma_units u ON u.khatma_id = mk.id
+        WHERE ${scope.khatmaWhere}
+        GROUP BY mk.id
+        HAVING total_units > 0 AND (CAST(completed AS REAL) / total_units) < 0.5
+      )
+    `).bind(...scope.khatmaParams));
+    // Reader status breakdown: completed = all assigned units done; not_started = zero completed;
+    // partial = some but not all. Only readers with at least 1 assignment are counted.
+    const readerStatusRow = await safeFirst(DB.prepare(`
+      SELECT
+        SUM(CASE WHEN completed = assigned_total THEN 1 ELSE 0 END) as completed_readers,
+        SUM(CASE WHEN completed = 0 THEN 1 ELSE 0 END) as not_started_readers,
+        SUM(CASE WHEN completed > 0 AND completed < assigned_total THEN 1 ELSE 0 END) as partial_readers
+      FROM (
+        SELECT mrp.id, COUNT(u.id) as assigned_total, SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END) as completed
+        FROM managed_reader_profiles mrp
+        JOIN managed_khatma_participants mkp ON mkp.reader_profile_id = mrp.id
+        JOIN managed_khatma_units u ON u.participant_id = mkp.id
+        JOIN managed_khatmas mk ON mk.id = mkp.khatma_id
+        WHERE mrp.status != 'deleted' AND ${scope.khatmaWhere}
+        GROUP BY mrp.id
+        HAVING assigned_total > 0
+      )
+    `).bind(...scope.khatmaParams));
+
+    const totalUnits = Number(unitRow.total || 0);
+    const completed = Number(unitRow.completed || 0);
+    return json({
+      ok: true, view: "summary",
+      khatmas: { total: Number(khatmaRow.total || 0) },
+      groups: { total: Number(groupRow.total || 0) },
+      readers: { total: Number(readerRow.total || 0) },
+      assignments: {
+        total: totalUnits, completed, pending: totalUnits - completed,
+        reading: Number(unitRow.reading || 0), assigned: Number(unitRow.assigned || 0), available: Number(unitRow.available || 0),
+        completionPct: totalUnits ? Math.round((completed / totalUnits) * 100) : 0
+      },
+      low_progress_khatmas_count: Number(lowProgressRow.total || 0),
+      completed_readers_count: Number(readerStatusRow.completed_readers || 0),
+      not_started_readers_count: Number(readerStatusRow.not_started_readers || 0),
+      partial_readers_count: Number(readerStatusRow.partial_readers || 0)
+    });
+  }
+
+  if (view === "khatmas") {
+    let where = scope.khatmaWhere;
+    const params = [...scope.khatmaParams];
+    if (khatmaIdFilter) { where += " AND mk.id = ?"; params.push(khatmaIdFilter); }
+    if (groupIdFilter) { where += " AND mk.group_id = ?"; params.push(groupIdFilter); }
+    if (q) { where += " AND (mk.title LIKE ? OR mk.khatma_serial_number LIKE ?)"; params.push(`%${q}%`, `%${q}%`); }
+    const havingParams = [];
+    const havingParts = [];
+    if (minCompletion !== null) { havingParts.push("completion_pct >= ?"); havingParams.push(minCompletion); }
+    if (maxCompletion !== null) { havingParts.push("completion_pct <= ?"); havingParams.push(maxCompletion); }
+    const havingClause = havingParts.length ? `HAVING ${havingParts.join(" AND ")}` : "";
+    const sortMap = { completion_pct: "completion_pct", pending_count: "pending", completed_count: "completed", khatma_serial: "mk.khatma_serial_number", group_serial: "mrg.group_serial_number" };
+    const sortKeyReq = url.searchParams.get("sort");
+    const sortCol = sortMap[sortKeyReq] || "mk.created_at";
+    const sortKeyUsed = sortMap[sortKeyReq] ? sortKeyReq : "created_at";
+
+    const countRow = await safeFirst(DB.prepare(`
+      SELECT COUNT(*) as total FROM (
+        SELECT mk.id,
+          CASE WHEN COUNT(u.id)=0 THEN 0 ELSE ROUND(100.0*SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END)/COUNT(u.id)) END as completion_pct
+        FROM managed_khatmas mk
+        LEFT JOIN managed_khatma_units u ON u.khatma_id = mk.id
+        LEFT JOIN managed_reader_groups mrg ON mrg.id = mk.group_id
+        WHERE ${where}
+        GROUP BY mk.id
+        ${havingClause}
+      )
+    `).bind(...params, ...havingParams));
+
+    const rows = await safeAll(DB.prepare(`
+      SELECT mk.id, mk.title, mk.khatma_serial_number, mk.period_number, mk.status,
+        mrg.id as group_id, mrg.name as group_name, mrg.group_serial_number,
+        COUNT(u.id) as total_units,
+        SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END) as completed,
+        (COUNT(u.id) - SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END)) as pending,
+        COUNT(DISTINCT u.participant_id) as readers_count,
+        CASE WHEN COUNT(u.id)=0 THEN 0 ELSE ROUND(100.0*SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END)/COUNT(u.id)) END as completion_pct
+      FROM managed_khatmas mk
+      LEFT JOIN managed_reader_groups mrg ON mrg.id = mk.group_id
+      LEFT JOIN managed_khatma_units u ON u.khatma_id = mk.id
+      WHERE ${where}
+      GROUP BY mk.id
+      ${havingClause}
+      ORDER BY ${sortCol} ${dir}
+      LIMIT ? OFFSET ?
+    `).bind(...params, ...havingParams, limit, offset));
+
+    return json({
+      ok: true, view: "khatmas",
+      items: rows.map(r => ({
+        id: r.id, title: r.title || "", khatmaSerialNumber: r.khatma_serial_number || "", periodNumber: Number(r.period_number) || 1, status: r.status || "",
+        groupId: r.group_id || "", groupName: r.group_name || "", groupSerialNumber: r.group_serial_number || "",
+        totalUnits: Number(r.total_units) || 0, completed: Number(r.completed) || 0, pending: Number(r.pending) || 0,
+        readersCount: Number(r.readers_count) || 0, completionPct: Number(r.completion_pct) || 0
+      })),
+      pagination: buildPagination(countRow.total, rows.length),
+      sort: { key: sortKeyUsed, dir: dirLower },
+      filters: { q, group_id: groupIdFilter, khatma_id: khatmaIdFilter, min_completion: minCompletion, max_completion: maxCompletion }
+    });
+  }
+
+  if (view === "groups") {
+    let where = scope.groupWhere;
+    const params = [...scope.groupParams];
+    if (groupIdFilter) { where += " AND mrg.id = ?"; params.push(groupIdFilter); }
+    if (q) { where += " AND (mrg.name LIKE ? OR mrg.group_serial_number LIKE ?)"; params.push(`%${q}%`, `%${q}%`); }
+    const havingParams = [];
+    const havingParts = [];
+    if (minCompletion !== null) { havingParts.push("completion_pct >= ?"); havingParams.push(minCompletion); }
+    if (maxCompletion !== null) { havingParts.push("completion_pct <= ?"); havingParams.push(maxCompletion); }
+    const havingClause = havingParts.length ? `HAVING ${havingParts.join(" AND ")}` : "";
+    const sortMap = { completion_pct: "completion_pct", pending_count: "pending", completed_count: "completed", group_serial: "mrg.group_serial_number" };
+    const sortKeyReq = url.searchParams.get("sort");
+    const sortCol = sortMap[sortKeyReq] || "mrg.created_at";
+    const sortKeyUsed = sortMap[sortKeyReq] ? sortKeyReq : "created_at";
+
+    const countRow = await safeFirst(DB.prepare(`
+      SELECT COUNT(*) as total FROM (
+        SELECT mrg.id,
+          CASE WHEN COUNT(u.id)=0 THEN 0 ELSE ROUND(100.0*SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END)/COUNT(u.id)) END as completion_pct
+        FROM managed_reader_groups mrg
+        LEFT JOIN managed_khatmas mk ON mk.group_id = mrg.id AND mk.deleted_at IS NULL
+        LEFT JOIN managed_khatma_units u ON u.khatma_id = mk.id
+        WHERE ${where}
+        GROUP BY mrg.id
+        ${havingClause}
+      )
+    `).bind(...params, ...havingParams));
+
+    const rows = await safeAll(DB.prepare(`
+      SELECT mrg.id, mrg.name, mrg.group_serial_number,
+        COUNT(DISTINCT mk.id) as khatmas_count,
+        COUNT(u.id) as total_units,
+        SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END) as completed,
+        (COUNT(u.id) - SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END)) as pending,
+        CASE WHEN COUNT(u.id)=0 THEN 0 ELSE ROUND(100.0*SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END)/COUNT(u.id)) END as completion_pct,
+        (SELECT COUNT(DISTINCT rid) FROM (
+           SELECT reader_profile_id as rid FROM managed_reader_group_memberships WHERE group_id = mrg.id AND status='active'
+           UNION
+           SELECT id as rid FROM managed_reader_profiles WHERE group_id = mrg.id AND status != 'deleted'
+         )) as readers_count
+      FROM managed_reader_groups mrg
+      LEFT JOIN managed_khatmas mk ON mk.group_id = mrg.id AND mk.deleted_at IS NULL
+      LEFT JOIN managed_khatma_units u ON u.khatma_id = mk.id
+      WHERE ${where}
+      GROUP BY mrg.id
+      ${havingClause}
+      ORDER BY ${sortCol} ${dir}
+      LIMIT ? OFFSET ?
+    `).bind(...params, ...havingParams, limit, offset));
+
+    return json({
+      ok: true, view: "groups",
+      items: rows.map(r => ({
+        id: r.id, name: r.name || "", groupSerialNumber: r.group_serial_number || "",
+        khatmasCount: Number(r.khatmas_count) || 0, readersCount: Number(r.readers_count) || 0,
+        totalUnits: Number(r.total_units) || 0, completed: Number(r.completed) || 0, pending: Number(r.pending) || 0,
+        completionPct: Number(r.completion_pct) || 0
+      })),
+      pagination: buildPagination(countRow.total, rows.length),
+      sort: { key: sortKeyUsed, dir: dirLower },
+      filters: { q, group_id: groupIdFilter, min_completion: minCompletion, max_completion: maxCompletion }
+    });
+  }
+
+  if (view === "readers") {
+    let where = "mrp.status != 'deleted'";
+    const params = [];
+    if (scope.isOwner) {
+      // owner: no extra restriction beyond deleted check
+    } else {
+      where += ` AND ${scope.khatmaWhere}`;
+      params.push(...scope.khatmaParams);
+    }
+    if (readerIdFilter) { where += " AND mrp.id = ?"; params.push(readerIdFilter); }
+    if (khatmaIdFilter) { where += " AND mk.id = ?"; params.push(khatmaIdFilter); }
+    if (groupIdFilter) {
+      where += ` AND (mrp.group_id = ? OR EXISTS (SELECT 1 FROM managed_reader_group_memberships rgm3 WHERE rgm3.reader_profile_id = mrp.id AND rgm3.group_id = ? AND rgm3.status = 'active'))`;
+      params.push(groupIdFilter, groupIdFilter);
+    }
+    if (q) { where += " AND (mrp.reader_name LIKE ? OR mrp.serial_code LIKE ? OR mrp.phone LIKE ?)"; params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
+    const havingParts = [];
+    if (statusFilter === "completed") havingParts.push("pending = 0 AND assigned_total > 0");
+    else if (statusFilter === "partial") havingParts.push("completed_count > 0 AND pending > 0");
+    else if (statusFilter === "not_started") havingParts.push("completed_count = 0");
+    const havingClause = havingParts.length ? `HAVING ${havingParts.join(" AND ")}` : "";
+    const sortMap = { completion_pct: "completion_pct", pending_count: "pending", completed_count: "completed_count", reader_name: "mrp.reader_name" };
+    const sortKeyReq = url.searchParams.get("sort");
+    const sortCol = sortMap[sortKeyReq] || "mrp.reader_name";
+    const sortKeyUsed = sortMap[sortKeyReq] ? sortKeyReq : "reader_name";
+
+    const countRow = await safeFirst(DB.prepare(`
+      SELECT COUNT(*) as total FROM (
+        SELECT mrp.id, COUNT(u.id) as assigned_total,
+          SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END) as completed_count,
+          (COUNT(u.id) - SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END)) as pending
+        FROM managed_reader_profiles mrp
+        JOIN managed_khatma_participants mkp ON mkp.reader_profile_id = mrp.id
+        JOIN managed_khatma_units u ON u.participant_id = mkp.id
+        JOIN managed_khatmas mk ON mk.id = mkp.khatma_id
+        WHERE ${where}
+        GROUP BY mrp.id
+        ${havingClause}
+      )
+    `).bind(...params));
+
+    const rows = await safeAll(DB.prepare(`
+      SELECT mrp.id, mrp.reader_name, mrp.phone, mrp.serial_code,
+        COUNT(u.id) as assigned_total,
+        SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END) as completed_count,
+        (COUNT(u.id) - SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END)) as pending,
+        MAX(u.completed_at) as last_completed_at,
+        CASE WHEN COUNT(u.id)=0 THEN 0 ELSE ROUND(100.0*SUM(CASE WHEN u.status='completed' THEN 1 ELSE 0 END)/COUNT(u.id)) END as completion_pct
+      FROM managed_reader_profiles mrp
+      JOIN managed_khatma_participants mkp ON mkp.reader_profile_id = mrp.id
+      JOIN managed_khatma_units u ON u.participant_id = mkp.id
+      JOIN managed_khatmas mk ON mk.id = mkp.khatma_id
+      WHERE ${where}
+      GROUP BY mrp.id
+      ${havingClause}
+      ORDER BY ${sortCol} ${dir}
+      LIMIT ? OFFSET ?
+    `).bind(...params, limit, offset));
+
+    const statusLabels = { completed: "مكتمل", partial: "جزئي", not_started: "لم ينجز", no_assignments: "لا تكليفات" };
+    return json({
+      ok: true, view: "readers",
+      items: rows.map(r => {
+        const assigned = Number(r.assigned_total) || 0;
+        const completedCnt = Number(r.completed_count) || 0;
+        const status = assigned === 0 ? "no_assignments" : completedCnt === 0 ? "not_started" : completedCnt === assigned ? "completed" : "partial";
+        return {
+          id: r.id, readerName: r.reader_name || "", phoneMasked: maskManagedProgressPhone(r.phone), serialCode: r.serial_code || "",
+          assignedTotal: assigned, completed: completedCnt, pending: Number(r.pending) || 0,
+          completionPct: Number(r.completion_pct) || 0, lastCompletedAt: r.last_completed_at || null,
+          status, statusLabel: statusLabels[status]
+        };
+      }),
+      pagination: buildPagination(countRow.total, rows.length),
+      sort: { key: sortKeyUsed, dir: dirLower },
+      filters: { q, group_id: groupIdFilter, khatma_id: khatmaIdFilter, reader_id: readerIdFilter, status: statusFilter || null }
+    });
+  }
+
+  // view === "assignments"
+  let where = scope.khatmaWhere;
+  const params = [...scope.khatmaParams];
+  if (khatmaIdFilter) { where += " AND mk.id = ?"; params.push(khatmaIdFilter); }
+  if (groupIdFilter) { where += " AND mk.group_id = ?"; params.push(groupIdFilter); }
+  if (readerIdFilter) { where += " AND mrp.id = ?"; params.push(readerIdFilter); }
+  if (statusFilter) { where += " AND u.status = ?"; params.push(statusFilter); }
+  if (q) { where += " AND (mk.title LIKE ? OR mrp.reader_name LIKE ? OR u.label LIKE ?)"; params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
+  const sortMap = { khatma_serial: "mk.khatma_serial_number", group_serial: "mrg.group_serial_number", reader_name: "mrp.reader_name" };
+  const sortKeyReq = url.searchParams.get("sort");
+  const sortCol = sortMap[sortKeyReq] || "mk.khatma_serial_number";
+  const sortKeyUsed = sortMap[sortKeyReq] ? sortKeyReq : "khatma_serial";
+
+  const countRow = await safeFirst(DB.prepare(`
+    SELECT COUNT(*) as total
+    FROM managed_khatma_units u
+    JOIN managed_khatmas mk ON mk.id = u.khatma_id
+    LEFT JOIN managed_reader_groups mrg ON mrg.id = mk.group_id
+    LEFT JOIN managed_khatma_participants mkp ON mkp.id = u.participant_id
+    LEFT JOIN managed_reader_profiles mrp ON mrp.id = mkp.reader_profile_id
+    WHERE ${where}
+  `).bind(...params));
+
+  const rows = await safeAll(DB.prepare(`
+    SELECT u.unit_number, u.label, u.status, u.completed_at, u.reading_at,
+      mk.id as khatma_id, mk.title as khatma_title, mk.khatma_serial_number, mk.period_number,
+      mrg.id as group_id, mrg.name as group_name, mrg.group_serial_number,
+      mrp.id as reader_id, mrp.reader_name, mrp.phone
+    FROM managed_khatma_units u
+    JOIN managed_khatmas mk ON mk.id = u.khatma_id
+    LEFT JOIN managed_reader_groups mrg ON mrg.id = mk.group_id
+    LEFT JOIN managed_khatma_participants mkp ON mkp.id = u.participant_id
+    LEFT JOIN managed_reader_profiles mrp ON mrp.id = mkp.reader_profile_id
+    WHERE ${where}
+    ORDER BY ${sortCol} ${dir}, u.unit_number ASC
+    LIMIT ? OFFSET ?
+  `).bind(...params, limit, offset));
+
+  return json({
+    ok: true, view: "assignments",
+    items: rows.map(r => ({
+      unitNumber: Number(r.unit_number), label: r.label || "", status: r.status || "", completedAt: r.completed_at || null, readingAt: r.reading_at || null,
+      khatmaId: r.khatma_id, khatmaTitle: r.khatma_title || "", khatmaSerialNumber: r.khatma_serial_number || "", periodNumber: Number(r.period_number) || 1,
+      groupId: r.group_id || "", groupName: r.group_name || "", groupSerialNumber: r.group_serial_number || "",
+      readerId: r.reader_id || "", readerName: r.reader_name || "", readerPhoneMasked: maskManagedProgressPhone(r.phone)
+    })),
+    pagination: buildPagination(countRow.total, rows.length),
+    sort: { key: sortKeyUsed, dir: dirLower },
+    filters: { q, group_id: groupIdFilter, khatma_id: khatmaIdFilter, reader_id: readerIdFilter, status: statusFilter || null }
+  });
+}
+
 async function readerGlobalSearch(request, DB) {
   const check = await requireManagedCreator(request, DB);
   if (!check.ok) return check.response;
@@ -6797,6 +7184,7 @@ export async function onRequest(context) {
     if (parts.length === 1 && parts[0] === "system-backup" && method === "GET") return systemBackup(request, env.DB);
     if (parts.length === 1 && parts[0] === "system-restore" && method === "POST") return systemRestore(request, env.DB);
     if (parts.length === 1 && parts[0] === "dashboard-stats" && method === "GET") return dashboardStats(request, env.DB);
+    if (parts.length === 1 && parts[0] === "managed-progress" && method === "GET") return managedProgress(request, env.DB);
     if (parts.length === 1 && parts[0] === "reader-global-search" && method === "GET") return readerGlobalSearch(request, env.DB);
     if (parts.length === 1 && parts[0] === "managed-reader-groups") {
       if (method === "GET") return listReaderGroups(request, env.DB);
