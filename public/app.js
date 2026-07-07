@@ -397,6 +397,7 @@ async function router(){
   if(hash.startsWith('#/managed-readers')) return renderTemplate('managedReadersTemplate', setupManagedReaders);
   if(hash.startsWith('#/managed-create')) return renderTemplate('managedCreateTemplate', setupManagedCreate);
   if(hash.startsWith('#/managed-monitor')) return renderTemplate('managedMonitorTemplate', setupManagedMonitor);
+  if(hash.startsWith('#/managed-progress')) return renderTemplate('managedProgressTemplate', setupManagedProgress);
   if(hash.startsWith('#/reader-login')) return renderTemplate('readerLoginTemplate', setupReaderLogin);
   if(hash.startsWith('#/reader-khatma/')) return renderTemplate('readerKhatmaTemplate', () => { const parts = hash.split('/'); setupReaderKhatma(parts[2]); });
   if(hash.startsWith('#/reader-group/')) return renderTemplate('readerGroupTemplate', () => { const parts = hash.split('/'); setupReaderGroup(parts[2]); });
@@ -4222,6 +4223,238 @@ async function setupReaderGroup(id){
         </table></div>
       </section>`;
     })() : ''}`;
+}
+
+// ── Progress Monitoring Center — read-only frontend over GET /managed-progress
+const mpTabs = [
+  {key:'summary', label:'ملخص'},
+  {key:'khatmas', label:'الختمات'},
+  {key:'groups', label:'المجموعات'},
+  {key:'readers', label:'القراء'},
+  {key:'assignments', label:'التكليفات'}
+];
+async function fetchManagedProgress(view, params={}){
+  const qs = new URLSearchParams({view, ...params});
+  const res = await fetch(API_BASE + '/managed-progress?' + qs.toString(), {
+    headers: {'Content-Type':'application/json', ...(state.token ? {'Authorization':'Bearer ' + state.token} : {})}
+  });
+  if(!res.ok){
+    const err = new Error('managed_progress_error');
+    err.status = res.status;
+    throw err;
+  }
+  return await res.json().catch(() => ({}));
+}
+function mpErrorMessage(err){
+  if(err && err.status === 401) return 'تحتاج تسجيل الدخول للوصول إلى متابعة الإنجاز.';
+  if(err && err.status === 403) return 'ليس لديك صلاحية للوصول إلى متابعة الإنجاز.';
+  return 'تعذر تحميل بيانات متابعة الإنجاز.';
+}
+async function setupManagedProgress(){
+  const root = document.getElementById('managedProgressView');
+  if(!root) return;
+  if(!canUseManagedKhatmas()){ root.innerHTML = `<article class="feature-card empty-state"><h3>غير مصرح</h3></article>`; return; }
+
+  if(!state.mpUI) state.mpUI = { tab: 'summary', q: '', status: '', sort: '', dir: 'desc', offset: 0, limit: 25 };
+  const ui = state.mpUI;
+
+  root.innerHTML = `
+    <div id="mpTabBar" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      ${mpTabs.map(t => `<button type="button" class="btn ${ui.tab===t.key?'primary':'ghost'} compact-btn" data-mp-tab="${t.key}">${t.label}</button>`).join('')}
+    </div>
+    <div id="mpFilters" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
+    <div id="mpContent" style="overflow-x:auto"><p style="color:var(--muted)">جاري التحميل...</p></div>
+  `;
+  root.querySelectorAll('[data-mp-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if(ui.tab === btn.dataset.mpTab) return;
+      ui.tab = btn.dataset.mpTab; ui.offset = 0; ui.q = ''; ui.status = ''; ui.sort = ''; ui.dir = 'desc';
+      setupManagedProgress();
+    });
+  });
+
+  renderMpFilters(ui);
+  await loadMpTab(ui);
+}
+function renderMpFilters(ui){
+  const el = document.getElementById('mpFilters');
+  if(!el) return;
+  if(ui.tab === 'summary'){ el.innerHTML = ''; return; }
+  const statusOptionsHtml = ui.tab === 'readers'
+    ? `<option value="">كل الحالات</option><option value="completed">مكتمل</option><option value="partial">جزئي</option><option value="not_started">لم ينجز</option>`
+    : ui.tab === 'assignments'
+    ? `<option value="">كل الحالات</option><option value="available">متاح</option><option value="assigned">غير مقروء</option><option value="reading">جاري القراءة</option><option value="completed">مقروء</option>`
+    : '';
+  el.innerHTML = `
+    <input id="mpSearchInput" type="search" placeholder="بحث..." value="${escapeHtml(ui.q)}" style="flex:1;min-width:160px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px"/>
+    ${statusOptionsHtml ? `<select id="mpStatusSelect" style="padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px">${statusOptionsHtml}</select>` : ''}
+  `;
+  const inp = document.getElementById('mpSearchInput');
+  if(inp){
+    let deb = null;
+    inp.addEventListener('input', () => {
+      clearTimeout(deb);
+      deb = setTimeout(() => { ui.q = inp.value.trim(); ui.offset = 0; loadMpTab(ui); }, 350);
+    });
+  }
+  const sel = document.getElementById('mpStatusSelect');
+  if(sel){
+    sel.value = ui.status || '';
+    sel.addEventListener('change', () => { ui.status = sel.value; ui.offset = 0; loadMpTab(ui); });
+  }
+}
+async function loadMpTab(ui){
+  const content = document.getElementById('mpContent');
+  if(!content) return;
+  content.innerHTML = `<p style="color:var(--muted)">جاري التحميل...</p>`;
+  const params = {};
+  if(ui.q) params.q = ui.q;
+  if(ui.status) params.status = ui.status;
+  if(ui.sort) params.sort = ui.sort;
+  if(ui.dir) params.dir = ui.dir;
+  if(ui.tab !== 'summary'){ params.limit = ui.limit; params.offset = ui.offset; }
+  let data;
+  try{
+    data = await fetchManagedProgress(ui.tab, params);
+  }catch(err){
+    content.innerHTML = `<article class="feature-card empty-state"><h3>${escapeHtml(mpErrorMessage(err))}</h3></article>`;
+    return;
+  }
+  if(ui.tab === 'summary') return renderMpSummary(content, data);
+  if(ui.tab === 'khatmas') return renderMpKhatmas(content, data, ui);
+  if(ui.tab === 'groups') return renderMpGroups(content, data, ui);
+  if(ui.tab === 'readers') return renderMpReaders(content, data, ui);
+  return renderMpAssignments(content, data, ui);
+}
+function mpCard(label, value){
+  return `<div style="border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--surface);min-width:140px">
+    <div style="font-size:12px;color:var(--muted);margin-bottom:6px">${escapeHtml(label)}</div>
+    <div style="font-size:20px;font-weight:800">${escapeHtml(String(value))}</div>
+  </div>`;
+}
+function renderMpSummary(content, data){
+  if(!data || !data.ok){ content.innerHTML = `<article class="feature-card empty-state"><h3>تعذر تحميل بيانات متابعة الإنجاز.</h3></article>`; return; }
+  const a = data.assignments || {};
+  content.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:10px">
+    ${mpCard('إجمالي الختمات', data.khatmas?.total ?? 0)}
+    ${mpCard('إجمالي المجموعات', data.groups?.total ?? 0)}
+    ${mpCard('إجمالي القراء', data.readers?.total ?? 0)}
+    ${mpCard('إجمالي التكليفات', a.total ?? 0)}
+    ${mpCard('المكتمل', a.completed ?? 0)}
+    ${mpCard('المتبقي', a.pending ?? 0)}
+    ${mpCard('نسبة الإنجاز', (a.completionPct ?? 0) + '%')}
+    ${mpCard('القراء المكتملون', data.completed_readers_count ?? 0)}
+    ${mpCard('القراء الجزئيون', data.partial_readers_count ?? 0)}
+    ${mpCard('القراء الذين لم ينجزوا', data.not_started_readers_count ?? 0)}
+    ${mpCard('الختمات الأقل من 50%', data.low_progress_khatmas_count ?? 0)}
+  </div>`;
+}
+function mpPaginationHtml(ui, pagination){
+  if(!pagination) return '';
+  const page = Math.floor(ui.offset / ui.limit) + 1;
+  const pages = Math.max(1, Math.ceil((pagination.total || 0) / ui.limit));
+  return `<div style="display:flex;align-items:center;gap:10px;margin-top:12px;font-size:13px">
+    <button class="btn ghost compact-btn" type="button" id="mpPrevBtn" ${ui.offset <= 0 ? 'disabled' : ''}>السابق</button>
+    <span style="color:var(--muted)">صفحة ${page} من ${pages} · ${pagination.total} نتيجة</span>
+    <button class="btn ghost compact-btn" type="button" id="mpNextBtn" ${!pagination.has_more ? 'disabled' : ''}>التالي</button>
+  </div>`;
+}
+function bindMpPagination(ui){
+  document.getElementById('mpPrevBtn')?.addEventListener('click', () => { ui.offset = Math.max(0, ui.offset - ui.limit); loadMpTab(ui); });
+  document.getElementById('mpNextBtn')?.addEventListener('click', () => { ui.offset = ui.offset + ui.limit; loadMpTab(ui); });
+}
+function mpEmptyOrError(data){
+  if(!data || !data.ok) return `<article class="feature-card empty-state"><h3>تعذر تحميل بيانات متابعة الإنجاز.</h3></article>`;
+  if(!data.items || !data.items.length) return `<article class="feature-card empty-state"><h3>لا توجد بيانات للعرض.</h3></article>`;
+  return null;
+}
+function renderMpKhatmas(content, data, ui){
+  const empty = mpEmptyOrError(data);
+  if(empty){ content.innerHTML = empty; return; }
+  content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
+      <th style="padding:6px;text-align:right">التسلسل</th><th style="padding:6px;text-align:right">اسم الختمة</th>
+      <th style="padding:6px;text-align:right">المجموعة</th><th style="padding:6px;text-align:right">الفترة</th>
+      <th style="padding:6px;text-align:right">التكليفات</th><th style="padding:6px;text-align:right">المكتمل</th>
+      <th style="padding:6px;text-align:right">المتبقي</th><th style="padding:6px;text-align:right">القراء</th>
+      <th style="padding:6px;text-align:right">نسبة الإنجاز</th><th style="padding:6px;text-align:right">إجراء</th>
+    </tr></thead>
+    <tbody>${data.items.map(k => `<tr style="border-bottom:1px solid var(--line)">
+      <td style="padding:6px;font-family:monospace">${escapeHtml(k.khatmaSerialNumber||'—')}</td>
+      <td style="padding:6px">${escapeHtml(k.title||'')}</td>
+      <td style="padding:6px">${escapeHtml(k.groupName||'—')}</td>
+      <td style="padding:6px">${escapeHtml(String(k.periodNumber||1))}</td>
+      <td style="padding:6px">${k.totalUnits}</td><td style="padding:6px">${k.completed}</td>
+      <td style="padding:6px">${k.pending}</td><td style="padding:6px">${k.readersCount}</td>
+      <td style="padding:6px">${k.completionPct}%</td>
+      <td style="padding:6px"><a class="mini-icon-btn v32" href="#/managed-khatma/${escapeHtml(k.id)}/manage">فتح</a></td>
+    </tr>`).join('')}</tbody>
+  </table>${mpPaginationHtml(ui, data.pagination)}`;
+  bindMpPagination(ui);
+}
+function renderMpGroups(content, data, ui){
+  const empty = mpEmptyOrError(data);
+  if(empty){ content.innerHTML = empty; return; }
+  content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
+      <th style="padding:6px;text-align:right">تسلسل المجموعة</th><th style="padding:6px;text-align:right">اسم المجموعة</th>
+      <th style="padding:6px;text-align:right">عدد الختمات</th><th style="padding:6px;text-align:right">عدد القراء</th>
+      <th style="padding:6px;text-align:right">التكليفات</th><th style="padding:6px;text-align:right">المكتمل</th>
+      <th style="padding:6px;text-align:right">المتبقي</th><th style="padding:6px;text-align:right">نسبة الإنجاز</th>
+    </tr></thead>
+    <tbody>${data.items.map(g => `<tr style="border-bottom:1px solid var(--line)">
+      <td style="padding:6px;font-family:monospace">${escapeHtml(g.groupSerialNumber||'—')}</td>
+      <td style="padding:6px">${escapeHtml(g.name||'')}</td>
+      <td style="padding:6px">${g.khatmasCount}</td><td style="padding:6px">${g.readersCount}</td>
+      <td style="padding:6px">${g.totalUnits}</td><td style="padding:6px">${g.completed}</td>
+      <td style="padding:6px">${g.pending}</td><td style="padding:6px">${g.completionPct}%</td>
+    </tr>`).join('')}</tbody>
+  </table>${mpPaginationHtml(ui, data.pagination)}`;
+  bindMpPagination(ui);
+}
+function renderMpReaders(content, data, ui){
+  const empty = mpEmptyOrError(data);
+  if(empty){ content.innerHTML = empty; return; }
+  content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
+      <th style="padding:6px;text-align:right">تسلسل القارئ</th><th style="padding:6px;text-align:right">اسم القارئ</th>
+      <th style="padding:6px;text-align:right">الجوال</th><th style="padding:6px;text-align:right">التكليفات</th>
+      <th style="padding:6px;text-align:right">المكتمل</th><th style="padding:6px;text-align:right">المتبقي</th>
+      <th style="padding:6px;text-align:right">نسبة الإنجاز</th><th style="padding:6px;text-align:right">آخر إنجاز</th>
+      <th style="padding:6px;text-align:right">الحالة</th>
+    </tr></thead>
+    <tbody>${data.items.map(r => `<tr style="border-bottom:1px solid var(--line)">
+      <td style="padding:6px;font-family:monospace">${escapeHtml(r.serialCode||'—')}</td>
+      <td style="padding:6px">${escapeHtml(r.readerName||'')}</td>
+      <td style="padding:6px;font-family:monospace">${escapeHtml(r.phone||'')}</td>
+      <td style="padding:6px">${r.assignedTotal}</td><td style="padding:6px">${r.completed}</td>
+      <td style="padding:6px">${r.pending}</td><td style="padding:6px">${r.completionPct}%</td>
+      <td style="padding:6px">${r.lastCompletedAt ? escapeHtml(String(r.lastCompletedAt).slice(0,10)) : '—'}</td>
+      <td style="padding:6px">${escapeHtml(r.statusLabel||'')}</td>
+    </tr>`).join('')}</tbody>
+  </table>${mpPaginationHtml(ui, data.pagination)}`;
+  bindMpPagination(ui);
+}
+const mpAssignmentStatusLabels = { available: 'متاح', assigned: 'غير مقروء', reading: 'جاري القراءة', completed: 'مقروء' };
+function renderMpAssignments(content, data, ui){
+  const empty = mpEmptyOrError(data);
+  if(empty){ content.innerHTML = empty; return; }
+  content.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="border-bottom:2px solid var(--line);color:var(--muted)">
+      <th style="padding:6px;text-align:right">الختمة</th><th style="padding:6px;text-align:right">المجموعة</th>
+      <th style="padding:6px;text-align:right">الجزء</th><th style="padding:6px;text-align:right">القارئ</th>
+      <th style="padding:6px;text-align:right">الحالة</th><th style="padding:6px;text-align:right">تاريخ الإنجاز</th>
+    </tr></thead>
+    <tbody>${data.items.map(u => `<tr style="border-bottom:1px solid var(--line)">
+      <td style="padding:6px">${escapeHtml(u.khatmaTitle||'')} <span style="color:var(--muted);font-size:11px">${escapeHtml(u.khatmaSerialNumber||'')}</span></td>
+      <td style="padding:6px">${escapeHtml(u.groupName||'—')}</td>
+      <td style="padding:6px">${escapeHtml(u.label||String(u.unitNumber))}</td>
+      <td style="padding:6px">${escapeHtml(u.readerName||'—')}</td>
+      <td style="padding:6px">${escapeHtml(mpAssignmentStatusLabels[u.status] || u.status || '')}</td>
+      <td style="padding:6px">${u.completedAt ? escapeHtml(String(u.completedAt).slice(0,10)) : '—'}</td>
+    </tr>`).join('')}</tbody>
+  </table>${mpPaginationHtml(ui, data.pagination)}`;
+  bindMpPagination(ui);
 }
 
 async function setupManagedMonitor(){

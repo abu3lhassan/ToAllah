@@ -6340,7 +6340,7 @@ async function managedProgress(request, DB) {
         const completedCnt = Number(r.completed_count) || 0;
         const status = assigned === 0 ? "no_assignments" : completedCnt === 0 ? "not_started" : completedCnt === assigned ? "completed" : "partial";
         return {
-          id: r.id, readerName: r.reader_name || "", phoneMasked: maskManagedProgressPhone(r.phone), serialCode: r.serial_code || "",
+          id: r.id, readerName: r.reader_name || "", phone: r.phone || "", serialCode: r.serial_code || "",
           assignedTotal: assigned, completed: completedCnt, pending: Number(r.pending) || 0,
           completionPct: Number(r.completion_pct) || 0, lastCompletedAt: r.last_completed_at || null,
           status, statusLabel: statusLabels[status]
@@ -6396,7 +6396,7 @@ async function managedProgress(request, DB) {
       unitNumber: Number(r.unit_number), label: r.label || "", status: r.status || "", completedAt: r.completed_at || null, readingAt: r.reading_at || null,
       khatmaId: r.khatma_id, khatmaTitle: r.khatma_title || "", khatmaSerialNumber: r.khatma_serial_number || "", periodNumber: Number(r.period_number) || 1,
       groupId: r.group_id || "", groupName: r.group_name || "", groupSerialNumber: r.group_serial_number || "",
-      readerId: r.reader_id || "", readerName: r.reader_name || "", readerPhoneMasked: maskManagedProgressPhone(r.phone)
+      readerId: r.reader_id || "", readerName: r.reader_name || "", readerPhone: r.phone || ""
     })),
     pagination: buildPagination(countRow.total, rows.length),
     sort: { key: sortKeyUsed, dir: dirLower },
