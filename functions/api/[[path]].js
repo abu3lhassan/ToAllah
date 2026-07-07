@@ -43,6 +43,13 @@ function hijriMonthEndDateServer(date) {
   d.setUTCHours(20, 59, 59, 999); // = 23:59:59 UTC+3 (Saudi time)
   return new Date(d);
 }
+function isWithinRolloverClosingWindow(date, windowDays) {
+  const today = getHijriPartsServer(date);
+  const monthEnd = hijriMonthEndDateServer(date);
+  const daysInMonth = getHijriPartsServer(monthEnd).day;
+  const daysRemaining = daysInMonth - today.day;
+  return daysRemaining <= (windowDays - 1);
+}
 function computeRotationPeriodEnd(rotationStartDate, rotationType) {
   if (!rotationStartDate || !rotationType || rotationType === 'none') return null;
   const now = new Date();
@@ -4010,6 +4017,8 @@ async function loadCompletedBatchRolloverKhatmaIds(DB, targetYearMonth, khatmaId
   return completed;
 }
 
+const ROLLOVER_CLOSING_WINDOW_DAYS = 2;
+
 async function batchMonthlyRollover(request, DB) {
   const check = await requireManagedCreator(request, DB);
   if (!check.ok) return check.response;
@@ -4034,23 +4043,45 @@ async function batchMonthlyRollover(request, DB) {
     : null;
   const dryRun = body.dry_run === true;
 
-  // Calendar eligibility guard: a real (non-preview) run may only move a monthly
-  // khatma INTO target_year_month once that month has actually begun in real time —
-  // i.e. the current Hijri month has not yet ended, the previous period is still live.
+  // Calendar closing-window guard: a real (non-preview) run into a PAST or CURRENT
+  // Hijri month is always allowed as catch-up (target == current is allowed as
+  // catch-up only; duplicate protection remains handled by managed_batch_rollover_events).
+  // Rolling into the immediate NEXT month is allowed only inside the closing window
+  // (last ROLLOVER_CLOSING_WINDOW_DAYS days of the current Hijri month), so real
+  // month-end prep can run a day or two early. Anything further out is blocked.
   // Preview (dry_run:true) is exempt so planning/testing can look ahead freely.
   if (!dryRun) {
     const _todayHijri = getHijriPartsServer(new Date());
     const _currentKeyNum = _todayHijri.year * 12 + _todayHijri.month;
     const _targetKeyNum = _hijriYear * 12 + _hijriMonth;
-    if (_targetKeyNum > _currentKeyNum) {
+    const _currentYearMonthStr = `${_todayHijri.year}-${String(_todayHijri.month).padStart(2, '0')}`;
+
+    if (_targetKeyNum > _currentKeyNum + 1) {
       return json({
         ok: false,
-        error: 'period_not_finished',
-        message: 'لا يمكن تنفيذ التدوير الحقيقي قبل انتهاء الشهر الحالي. المعاينة فقط مسموحة الآن.',
-        current_hijri_year_month: `${_todayHijri.year}-${String(_todayHijri.month).padStart(2, '0')}`,
+        error: 'rollover_too_early',
+        message: 'لا يمكن تنفيذ التدوير الحقيقي لشهر مستقبلي بعيد. المعاينة فقط مسموحة الآن.',
+        current_hijri_year_month: _currentYearMonthStr,
         target_year_month: targetYearMonth
       }, 409);
     }
+
+    if (_targetKeyNum === _currentKeyNum + 1) {
+      const daysInCurrentMonth = getHijriPartsServer(hijriMonthEndDateServer(new Date())).day;
+      const daysRemainingInCurrentMonth = daysInCurrentMonth - _todayHijri.day;
+      if (!isWithinRolloverClosingWindow(new Date(), ROLLOVER_CLOSING_WINDOW_DAYS)) {
+        return json({
+          ok: false,
+          error: 'rollover_too_early',
+          message: 'لا يمكن تنفيذ التدوير الحقيقي للشهر القادم إلا خلال آخر يومين من الشهر الهجري الحالي. المعاينة (dry_run) مسموحة الآن.',
+          current_hijri_year_month: _currentYearMonthStr,
+          target_year_month: targetYearMonth,
+          closing_window_days: ROLLOVER_CLOSING_WINDOW_DAYS,
+          days_remaining_in_current_month: daysRemainingInCurrentMonth
+        }, 409);
+      }
+    }
+    // else _targetKeyNum <= _currentKeyNum: past or current month, catch-up, always allowed here.
   }
 
   const requestedMode = String(body.mode || '').trim();
