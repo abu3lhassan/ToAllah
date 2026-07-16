@@ -3676,11 +3676,23 @@ async function setupReaderLogin(){
         return;
       }
 
-      // Cumulative statistics (across all khatmas)
-      const allUnits = khatmas.flatMap(k => k.units || []);
-      const totalDone = allUnits.filter(u=>u.status==='completed').length;
-      const totalAssigned = allUnits.filter(u=>u.status!=='available').length;
-      const totalPct = totalAssigned ? Math.round(totalDone/totalAssigned*100) : 0;
+      // Cumulative statistics: prefer backend-computed cumulativeStats
+      // (historical archived cycles from managed_khatma_cycle_units + current
+      // live units); fall back to the old current-units-only computation
+      // only if the backend response didn't include it.
+      const cs = res.cumulativeStats || null;
+      let khatmasParticipatedCount, totalDone, totalPct;
+      if(cs){
+        khatmasParticipatedCount = cs.khatmas_participated;
+        totalDone = cs.completed_parts;
+        totalPct = cs.completion_rate;
+      } else {
+        const allUnits = khatmas.flatMap(k => k.units || []);
+        const totalAssigned = allUnits.filter(u=>u.status!=='available').length;
+        khatmasParticipatedCount = khatmas.length;
+        totalDone = allUnits.filter(u=>u.status==='completed').length;
+        totalPct = totalAssigned ? Math.round(totalDone/totalAssigned*100) : 0;
+      }
 
       // ── Welcome header ─────────────────────────────────────────────
       const welcomeHtml = readerName ? `
@@ -3698,7 +3710,7 @@ async function setupReaderLogin(){
         <section class="khatma-detail glass" style="margin-top:8px">
           <div class="sheet-head"><h3>إحصائياتك التجميعية</h3><span>منذ أول ختمة</span></div>
           <div class="mini-stats">
-            <div><strong>${khatmas.length}</strong><span>ختمة شاركت فيها</span></div>
+            <div><strong>${khatmasParticipatedCount}</strong><span>ختمة شاركت فيها</span></div>
             <div><strong>${totalDone}</strong><span>جزء أكملته</span></div>
             <div><strong>${totalPct}%</strong><span>نسبة الإنجاز الكلية</span></div>
           </div>
@@ -3918,16 +3930,27 @@ async function setupReaderKhatma(khatmaId){
         </div>`;
     }
 
-    // Cumulative stats across all khatmas
-    const allKhatmaUnits = khatmas.flatMap(k => k.units || []);
-    const cumDone = allKhatmaUnits.filter(u => u.status === 'completed').length;
-    const cumAssigned = allKhatmaUnits.filter(u => u.status !== 'available').length;
-    const cumPct = cumAssigned ? Math.round(cumDone / cumAssigned * 100) : 0;
+    // Cumulative stats: prefer backend-computed cumulativeStats (historical
+    // archived cycles from managed_khatma_cycle_units + current live units);
+    // fall back to the old current-units-only computation only if missing.
+    const cs = res.cumulativeStats || null;
+    let khatmasParticipatedCount, cumDone, cumPct;
+    if(cs){
+      khatmasParticipatedCount = cs.khatmas_participated;
+      cumDone = cs.completed_parts;
+      cumPct = cs.completion_rate;
+    } else {
+      const allKhatmaUnits = khatmas.flatMap(k => k.units || []);
+      const cumAssigned = allKhatmaUnits.filter(u => u.status !== 'available').length;
+      khatmasParticipatedCount = khatmas.length;
+      cumDone = allKhatmaUnits.filter(u => u.status === 'completed').length;
+      cumPct = cumAssigned ? Math.round(cumDone / cumAssigned * 100) : 0;
+    }
     const cumHtml = `
       <section class="khatma-detail glass" style="margin-top:16px">
         <div class="sheet-head"><h3>إحصائياتك التجميعية</h3><span>منذ أول ختمة</span></div>
         <div class="mini-stats">
-          <div><strong>${khatmas.length}</strong><span>ختمة شاركت فيها</span></div>
+          <div><strong>${khatmasParticipatedCount}</strong><span>ختمة شاركت فيها</span></div>
           <div><strong>${cumDone}</strong><span>جزء أكملته</span></div>
           <div><strong>${cumPct}%</strong><span>نسبة الإنجاز الكلية</span></div>
         </div>

@@ -6238,7 +6238,63 @@ async function readerPortal(request, DB) {
       phone:      profileRow.phone || ""
     };
   }
-  return json({ ok: true, identity: identityRaw, khatmas, readerProfile });
+
+  // Cumulative stats: historical (archived, post-rollover) units from
+  // managed_khatma_cycle_units + current live units from managed_khatma_units
+  // (via managed_khatma_participants). This is stats-only — it never feeds
+  // into `khatmas` above, so archived history never appears as an actionable
+  // unit in the portal; only the current cycle stays actionable there.
+  const readerProfileIds = [...new Set(participants.map(p => p.reader_profile_id).filter(Boolean))];
+  const participantIds = participants.map(p => p.id).filter(Boolean);
+
+  let historicalUnits = [];
+  if (readerProfileIds.length) {
+    const rpInClause = readerProfileIds.map(() => '?').join(',');
+    historicalUnits = (await DB.prepare(
+      `SELECT khatma_id, cycle_number, status FROM managed_khatma_cycle_units WHERE reader_profile_id IN (${rpInClause})`
+    ).bind(...readerProfileIds).all()).results || [];
+  }
+
+  let currentUnits = [];
+  if (participantIds.length) {
+    const pInClause = participantIds.map(() => '?').join(',');
+    currentUnits = (await DB.prepare(
+      `SELECT khatma_id, status FROM managed_khatma_units WHERE participant_id IN (${pInClause})`
+    ).bind(...participantIds).all()).results || [];
+  }
+
+  const historicalCycleKeys = new Set();
+  let historicalCompleted = 0;
+  for (const u of historicalUnits) {
+    historicalCycleKeys.add(`${u.khatma_id}:${u.cycle_number}`);
+    if (u.status === 'completed') historicalCompleted++;
+  }
+  const historicalAssigned = historicalUnits.length;
+
+  let currentAssigned = 0;
+  let currentCompleted = 0;
+  for (const u of currentUnits) {
+    if (u.status !== 'available') currentAssigned++;
+    if (u.status === 'completed') currentCompleted++;
+  }
+  // Current khatma_id is counted as a cycle independent of any historical
+  // cycle for the same khatma_id (a reader's current period after rollover
+  // is a distinct cycle from whatever was archived before it).
+  const currentKhatmaKeys = new Set(participants.map(p => p.khatma_id).filter(Boolean));
+
+  const assignedParts = historicalAssigned + currentAssigned;
+  const completedParts = historicalCompleted + currentCompleted;
+  const khatmasParticipated = historicalCycleKeys.size + currentKhatmaKeys.size;
+  const completionRate = assignedParts > 0 ? Math.round(completedParts / assignedParts * 100) : 0;
+
+  const cumulativeStats = {
+    khatmas_participated: khatmasParticipated,
+    completed_parts: completedParts,
+    assigned_parts: assignedParts,
+    completion_rate: completionRate
+  };
+
+  return json({ ok: true, identity: identityRaw, khatmas, readerProfile, cumulativeStats });
 }
 
 async function updateReaderProfile(request, DB) {
