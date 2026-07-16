@@ -5162,6 +5162,7 @@ function setupSafeBatchRolloverControls(cfg){
   const runBtn = document.getElementById(cfg.runBtnId);
   const pauseBtn = document.getElementById(cfg.pauseBtnId);
   const resumeBtn = document.getElementById(cfg.resumeBtnId);
+  const cancelBtn = document.getElementById(cfg.cancelBtnId);
   const scopeModeEl = document.getElementById('mkBatchScopeMode');
   const groupWrapEl = document.getElementById('mkBatchGroupIdWrap');
   const rangeWrapEl = document.getElementById('mkBatchRangeWrap');
@@ -5175,6 +5176,10 @@ function setupSafeBatchRolloverControls(cfg){
   let lastMonth = '';
   let lastDryRun = true;
   let scopeLabel = 'كل المجموعات';
+  // Rollover Run system state — a real (non-preview) run is always driven
+  // through /managed-rollover/runs/*, never the legacy batch-monthly loop.
+  let currentRunId = null;
+  let currentRunStatus = null; // building|running|paused|completed|failed|cancelled
 
   const applyScopeModeVisibility = () => {
     const mode = scopeModeEl ? scopeModeEl.value : 'full';
@@ -5311,10 +5316,20 @@ function setupSafeBatchRolloverControls(cfg){
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const setButtons = () => {
+    const dryRun = dryEl.checked !== false;
     runBtn.disabled = running;
-    runBtn.textContent = running ? '⟳ جاري التدوير الآمن...' : '⟳ بدء التدوير الآمن';
-    if(pauseBtn) pauseBtn.disabled = !running || pauseRequested;
-    if(resumeBtn) resumeBtn.disabled = running || (!paused && !errorStopped);
+    if(dryRun){
+      runBtn.textContent = running ? '▷ جارٍ المعاينة...' : '▷ بدء المعاينة';
+    } else if(currentRunStatus === 'paused'){
+      runBtn.textContent = running ? '⟳ جارٍ الاستكمال...' : '⟳ استكمال التشغيل المتوقف';
+    } else if(currentRunStatus === 'running'){
+      runBtn.textContent = running ? '⟳ جارٍ الاستكمال...' : '⟳ استكمال التشغيل الحالي';
+    } else {
+      runBtn.textContent = running ? '⟳ جارٍ التشغيل...' : '⟳ بدء تشغيل تدوير آمن';
+    }
+    if(pauseBtn) pauseBtn.disabled = !running || pauseRequested || dryRun; // pause only applies to real runs (Run System)
+    if(resumeBtn) resumeBtn.disabled = running || currentRunStatus !== 'paused';
+    if(cancelBtn) cancelBtn.disabled = running || !(currentRunStatus === 'running' || currentRunStatus === 'paused');
     if(monthEl) monthEl.disabled = running;
     if(dryEl) dryEl.disabled = running;
   };
@@ -5335,6 +5350,77 @@ function setupSafeBatchRolloverControls(cfg){
   };
   const detailSection = (arr, type, label, color) => !arr.length ? '' :
     `<details ${type==='failed'?'open':''}><summary><strong style="color:${color}">${label} (${arr.length})</strong></summary><ul style="margin:6px 0 0;padding-inline-start:20px;font-size:13px;line-height:1.9">${arr.map(i=>itemRow(i,type)).join('')}</ul></details>`;
+
+  // ── Rollover Run system (real runs only — dry_run preview still uses the
+  // legacy render()/itemRow()/detailSection() above) ─────────────────────
+  const runStatusLabel = status => ({
+    building: 'جارٍ تجهيز التشغيل...',
+    running: 'قيد التشغيل',
+    paused: 'تم الإيقاف المؤقت',
+    completed: 'اكتمل التدوير',
+    failed: 'متوقف بسبب خطأ',
+    cancelled: 'أُلغي التشغيل'
+  }[status] || status);
+  const runStatusColor = status => status === 'failed' ? 'var(--danger)' : status === 'completed' ? '#059669' : status === 'paused' ? '#b45309' : 'var(--primary)';
+  const renderRunPanel = (ctx) => {
+    const counts = ctx.counts || { pending:0, running:0, done:0, failed:0, skipped:0 };
+    const failedItems = ctx.failedItems || [];
+    const failedItemsHtml = failedItems.length
+      ? `<details open><summary><strong style="color:var(--danger)">ختمات فشلت (${failedItems.length})</strong></summary>
+          <ul style="margin:6px 0 0;padding-inline-start:20px;font-size:13px;line-height:1.9">
+            ${failedItems.map(it => `<li style="color:var(--danger)">${escapeHtml(it.khatma_id||'')} — ${escapeHtml(it.last_error||'')}</li>`).join('')}
+          </ul>
+        </details>` : '';
+    resDiv.innerHTML = `
+      <div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;background:var(--surface)">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px">
+          <strong style="color:${runStatusColor(ctx.status)}">${runStatusLabel(ctx.status)}</strong>
+          ${ctx.runId ? `<span style="color:var(--muted)">run: ${escapeHtml(ctx.runId)}</span>` : ''}
+        </div>
+        ${ctx.message ? `<p style="margin:8px 0 0;color:${ctx.status==='failed'?'var(--danger)':'var(--muted)'};font-size:13px">${escapeHtml(ctx.message)}</p>` : ''}
+        <p style="margin:8px 0 0;color:var(--muted);font-size:12px">هذا تشغيل آمن قابل للاستكمال. لا حاجة لإبقاء الصفحة مفتوحة، ويمكنك العودة لاحقًا لاستكمال نفس التشغيل.</p>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px;font-size:14px">
+        <span>الإجمالي: <strong>${ctx.totalItems ?? 0}</strong></span>
+        <span style="color:#059669">✓ منجزة: <strong>${counts.done}</strong></span>
+        <span style="color:var(--muted)">متبقية: <strong>${counts.pending}</strong></span>
+        <span style="color:var(--danger)">فشلت: <strong>${counts.failed}</strong></span>
+        <span style="color:#b45309">تُخطّيت: <strong>${counts.skipped}</strong></span>
+      </div>
+      ${failedItemsHtml}`;
+  };
+  async function findActiveRunForMonth(month){
+    try {
+      const runningRes = await api(`/managed-rollover/runs?target_year_month=${encodeURIComponent(month)}&status=running`);
+      const runningRun = (runningRes.runs || [])[0];
+      if(runningRun) return runningRun;
+
+      const pausedRes = await api(`/managed-rollover/runs?target_year_month=${encodeURIComponent(month)}&status=paused`);
+      const pausedRun = (pausedRes.runs || [])[0];
+      return pausedRun || null;
+    } catch {
+      return null;
+    }
+  }
+  async function refreshRunView(runId){
+    const res = await api(`/managed-rollover/runs/${encodeURIComponent(runId)}`);
+    currentRunStatus = res.run.status;
+    const statusMessages = {
+      building: 'جارٍ تجهيز التشغيل...',
+      running: 'يتم التدوير تلقائيًا على دفعات صغيرة جدًا (حتى 3 ختمات لكل خطوة).',
+      paused: 'تم الإيقاف المؤقت. اضغط "استكمال التشغيل المتوقف" للمتابعة من حيث توقفت.',
+      completed: 'اكتمل التدوير لهذا الشهر.',
+      failed: 'توقف التشغيل بسبب فشل في إحدى الختمات. راجع القائمة أدناه قبل أي استكمال.',
+      cancelled: 'أُلغي هذا التشغيل. الختمات التي اكتملت قبل الإلغاء تبقى محفوظة.'
+    };
+    renderRunPanel({
+      runId, status: res.run.status, totalItems: res.total_items,
+      counts: res.counts, failedItems: res.failed_items,
+      message: statusMessages[res.run.status] || ''
+    });
+    return res;
+  }
+
   const render = (ctx) => {
     const agg = ctx.agg || { rolled: [], skipped: [], failed: [], warnings: [] };
     const diag = ctx.lastDiagnostics || {};
@@ -5389,8 +5475,142 @@ function setupSafeBatchRolloverControls(cfg){
       </div>`;
   };
 
+  // Dry-run preview only — the legacy endpoint is retained solely for this
+  // path (requirement: never used as a general real-run driver from the UI).
+  async function runLegacyPreview(month, scopedGroupIds){
+    running = true;
+    paused = false;
+    pauseRequested = false;
+    errorStopped = false;
+    lastMonth = month;
+    lastDryRun = true;
+    setButtons();
+
+    const chunkLimit = 99;
+    const agg = { rolled: [], skipped: [], failed: [], warnings: [] };
+    let candidatesFound = 0, totalProcessed = 0, chunksRun = 0, targetCalendar = 'hijri';
+    let lastDiagnostics = {};
+    let latestBatch = { rolled: 0, skipped: 0, failed: 0, warnings: 0 };
+    let curOffset = 0, hasMore = true;
+    render({ dryRun:true, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status:'preview', message:'جاري المعاينة الآمنة...' });
+
+    try {
+      while(hasMore){
+        const body = { target_year_month:month, dry_run:true, algorithm:'period_shift_v1', offset:curOffset, limit:chunkLimit };
+        if(scopedGroupIds.length) body.group_ids = scopedGroupIds;
+        const data = await api('/managed-rollover/batch-monthly', { method:'POST', body });
+        const diag = data.diagnostics || {};
+        lastDiagnostics = diag;
+        candidatesFound = diag.candidates_found ?? candidatesFound;
+        totalProcessed += diag.processed_count ?? 0;
+        targetCalendar = diag.target_calendar || targetCalendar;
+        chunksRun++;
+        const rolled = data.rolled || [], skipped = data.skipped || [], failed = data.failed || [], warnings = data.warnings || [];
+        latestBatch = { rolled: rolled.length, skipped: skipped.length, failed: failed.length, warnings: warnings.length };
+        agg.rolled.push(...rolled);
+        agg.skipped.push(...skipped);
+        agg.failed.push(...failed);
+        agg.warnings.push(...warnings);
+
+        if(failed.length > 0 || Number(data.summary?.failed || 0) > 0){
+          hasMore = false;
+          render({ dryRun:true, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status:'error', message:'توقف النظام تلقائيًا عند وجود فشل في الدفعة.' });
+          break;
+        }
+        hasMore = diag.has_more === true;
+        curOffset = diag.next_offset ?? 0;
+        if(!hasMore){
+          render({ dryRun:true, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status:'completed', message:'انتهت المعاينة.' });
+          break;
+        }
+        render({ dryRun:true, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status:'preview', message:'جاري المعاينة الآمنة...' });
+        await sleep(500);
+      }
+    } catch(err){
+      errorStopped = true;
+      render({ dryRun:true, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status:'error', message: err.message || 'تعذر الاتصال' });
+    } finally {
+      running = false;
+      setButtons();
+    }
+  }
+
+  // Real run — always via the Rollover Run system, never the legacy loop.
+  async function runViaRunSystem(month, scopedGroupIds, scopeMode, singleLabel, fromLabel, toLabel, skipConfirm){
+    if(!skipConfirm){
+      const confirmMsg = scopeMode === 'single'
+        ? `سيتم تشغيل التدوير الحقيقي على المجموعة المحددة فقط: ${singleLabel}
+الشهر المستهدف: ${month}
+تشغيل آمن قابل للاستكمال، بخطوات صغيرة (حتى 3 ختمات في كل خطوة).
+سيتوقف تلقائيًا عند أي خطأ، ويمكن استكماله لاحقًا من نفس النقطة.`
+        : scopeMode === 'range'
+        ? `سيتم تشغيل التدوير الحقيقي على نطاق المجموعات من ${fromLabel} إلى ${toLabel}، عدد المجموعات: ${scopedGroupIds.length}
+الشهر المستهدف: ${month}
+تشغيل آمن قابل للاستكمال، بخطوات صغيرة (حتى 3 ختمات في كل خطوة).
+سيتوقف تلقائيًا عند أي خطأ، ويمكن استكماله لاحقًا من نفس النقطة.`
+        : `تحذير: سيتم تشغيل التدوير الحقيقي على كل المجموعات / كل الختمات المرشحة.
+الشهر المستهدف: ${month}
+تشغيل آمن قابل للاستكمال، بخطوات صغيرة (حتى 3 ختمات في كل خطوة).
+سيتوقف تلقائيًا عند أي خطأ، ويمكن استكماله لاحقًا من نفس النقطة.`;
+      if(!confirm(confirmMsg)) return;
+    }
+
+    running = true;
+    paused = false;
+    pauseRequested = false;
+    errorStopped = false;
+    lastMonth = month;
+    setButtons();
+    renderRunPanel({ status:'building', message:'جارٍ تجهيز التشغيل...', totalItems:0, counts:{}, failedItems:[] });
+
+    try {
+      let runId = currentRunId;
+      if(!runId || !(currentRunStatus === 'running' || currentRunStatus === 'paused')){
+        const existing = await findActiveRunForMonth(month);
+        if(existing){
+          runId = existing.id;
+          currentRunStatus = existing.status;
+        } else {
+          const body = { target_year_month: month, algorithm: 'period_shift_v1' };
+          if(scopedGroupIds.length) body.group_ids = scopedGroupIds;
+          const created = await api('/managed-rollover/runs', { method:'POST', body });
+          runId = created.run_id;
+          currentRunStatus = created.status;
+        }
+        currentRunId = runId;
+      }
+
+      if(currentRunStatus === 'paused'){
+        await api(`/managed-rollover/runs/${encodeURIComponent(runId)}/resume`, { method:'POST' });
+        currentRunStatus = 'running';
+      }
+
+      await refreshRunView(runId);
+
+      while(currentRunStatus === 'running'){
+        if(pauseRequested){
+          await api(`/managed-rollover/runs/${encodeURIComponent(runId)}/pause`, { method:'POST' }).catch(()=>{});
+          await refreshRunView(runId);
+          paused = true;
+          break;
+        }
+        const stepRes = await api(`/managed-rollover/runs/${encodeURIComponent(runId)}/step`, { method:'POST', body:{ limit:3 } });
+        currentRunStatus = stepRes.run_status;
+        await refreshRunView(runId);
+        if(currentRunStatus !== 'running') break;
+        await sleep(700);
+      }
+    } catch(err){
+      errorStopped = true;
+      resDiv.insertAdjacentHTML('beforeend', `<p style="color:var(--danger);margin:8px 0 0">${escapeHtml(err.message || 'تعذر الاتصال')}</p>`);
+    } finally {
+      running = false;
+      setButtons();
+    }
+  }
+
   async function runAuto(skipConfirm=false){
-    if(running) return;
+    if(running) return; // never let the button drive two concurrent loops
     const month = (monthEl.value || '').trim();
     const dryRun = dryEl.checked !== false;
     const ym = /^(\d{4})-(\d{2})$/.exec(month);
@@ -5436,97 +5656,12 @@ function setupSafeBatchRolloverControls(cfg){
       scopeLabel = 'كل المجموعات';
     }
 
-    if(!dryRun && !skipConfirm){
-      const confirmMsg = scopeMode === 'single'
-        ? `سيتم تشغيل التدوير الحقيقي على المجموعة المحددة فقط: ${singleLabel}
-الشهر المستهدف: ${month}
-سيتم التدوير تلقائيًا على دفعات صغيرة جدًا.
-الدفعة الداخلية: ختمة واحدة.
-سيتوقف النظام تلقائيًا عند أي خطأ.
-يمكن الاستئناف من آخر نقطة مكتملة.`
-        : scopeMode === 'range'
-        ? `سيتم تشغيل التدوير الحقيقي على نطاق المجموعات من ${fromLabel} إلى ${toLabel}، عدد المجموعات: ${scopedGroupIds.length}
-الشهر المستهدف: ${month}
-سيتم التدوير تلقائيًا على دفعات صغيرة جدًا.
-الدفعة الداخلية: ختمة واحدة.
-سيتوقف النظام تلقائيًا عند أي خطأ.
-يمكن الاستئناف من آخر نقطة مكتملة.`
-        : `تحذير: سيتم تشغيل التدوير الحقيقي على كل المجموعات / كل الختمات المرشحة.
-الشهر المستهدف: ${month}
-سيتم التدوير تلقائيًا على دفعات صغيرة جدًا.
-الدفعة الداخلية: ختمة واحدة.
-سيتوقف النظام تلقائيًا عند أي خطأ.
-يمكن الاستئناف من آخر نقطة مكتملة.`;
-      if(!confirm(confirmMsg)) return;
+    if(dryRun){
+      await runLegacyPreview(month, scopedGroupIds);
+      return;
     }
 
-    running = true;
-    paused = false;
-    pauseRequested = false;
-    errorStopped = false;
-    lastMonth = month;
-    lastDryRun = dryRun;
-    setButtons();
-
-    const chunkLimit = dryRun ? 99 : 1;
-    const agg = { rolled: [], skipped: [], failed: [], warnings: [] };
-    let candidatesFound = 0, totalProcessed = 0, chunksRun = 0, targetCalendar = 'hijri';
-    let lastDiagnostics = {};
-    let latestBatch = { rolled: 0, skipped: 0, failed: 0, warnings: 0 };
-    let curOffset = 0, hasMore = true;
-    render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: dryRun ? 'preview' : 'running', message: dryRun ? 'جاري المعاينة الآمنة...' : 'يتم التدوير تلقائيًا على دفعات صغيرة جدًا' });
-
-    try {
-      while(hasMore){
-        const body = dryRun
-          ? { target_year_month:month, dry_run:true, algorithm:'period_shift_v1', offset:curOffset, limit:chunkLimit }
-          : { target_year_month:month, dry_run:false, algorithm:'period_shift_v1', mode:'next_pending_chunk', limit:chunkLimit };
-        if(scopedGroupIds.length) body.group_ids = scopedGroupIds;
-        const data = await api('/managed-rollover/batch-monthly', { method:'POST', body });
-        const diag = data.diagnostics || {};
-        lastDiagnostics = diag;
-        candidatesFound = diag.candidates_found ?? candidatesFound;
-        totalProcessed += diag.processed_count ?? 0;
-        targetCalendar = diag.target_calendar || targetCalendar;
-        chunksRun++;
-        const rolled = data.rolled || [], skipped = data.skipped || [], failed = data.failed || [], warnings = data.warnings || [];
-        latestBatch = { rolled: rolled.length, skipped: skipped.length, failed: failed.length, warnings: warnings.length };
-        agg.rolled.push(...rolled);
-        agg.skipped.push(...skipped);
-        agg.failed.push(...failed);
-        agg.warnings.push(...warnings);
-
-        if(failed.length > 0 || Number(data.summary?.failed || 0) > 0){
-          hasMore = false;
-          render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: 'error', message: 'توقف النظام تلقائيًا عند وجود فشل في الدفعة.' });
-          break;
-        }
-        hasMore = diag.has_more === true;
-        curOffset = dryRun ? (diag.next_offset ?? 0) : 0;
-        if(!hasMore){
-          render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: 'completed', message: dryRun ? 'انتهت المعاينة.' : 'اكتمل التدوير' });
-          break;
-        }
-        if(pauseRequested){
-          paused = true;
-          hasMore = false;
-          render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: 'paused', message: 'تم الإيقاف المؤقت بعد اكتمال الدفعة الحالية.' });
-          break;
-        }
-        render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: dryRun ? 'preview' : 'running', message: dryRun ? 'جاري المعاينة الآمنة...' : 'يتم التدوير تلقائيًا على دفعات صغيرة جدًا' });
-        await sleep(500);
-      }
-    } catch(err){
-      errorStopped = true;
-      const periodNotFinished = err.message === 'period_not_finished';
-      const errMsg = periodNotFinished
-        ? 'لا يمكن تنفيذ التدوير الحقيقي قبل انتهاء الشهر الحالي. المعاينة فقط مسموحة الآن.'
-        : (err.message || 'تعذر الاتصال');
-      render({ dryRun, agg, candidatesFound, totalProcessed, chunksRun, targetCalendar, lastDiagnostics, latestBatch, chunkLimit, status: 'error', message: errMsg });
-    } finally {
-      running = false;
-      setButtons();
-    }
+    await runViaRunSystem(month, scopedGroupIds, scopeMode, singleLabel, fromLabel, toLabel, skipConfirm);
   }
 
   runBtn.addEventListener('click', () => runAuto(false));
@@ -5536,10 +5671,45 @@ function setupSafeBatchRolloverControls(cfg){
     setButtons();
   });
   resumeBtn?.addEventListener('click', () => {
-    if(running || (!paused && !errorStopped)) return;
+    if(running || currentRunStatus !== 'paused') return;
     if(lastMonth && monthEl) monthEl.value = lastMonth;
-    if(dryEl) dryEl.checked = lastDryRun;
+    if(dryEl) dryEl.checked = false; // resuming a real run is never a dry run
     runAuto(true);
+  });
+  cancelBtn?.addEventListener('click', async () => {
+    if(running || !currentRunId || !(currentRunStatus === 'running' || currentRunStatus === 'paused')) return;
+    if(!confirm('هل تريد إلغاء هذا التشغيل؟ الختمات المكتملة تبقى محفوظة، والباقي يتوقف ولا يُستكمل تلقائيًا.')) return;
+    try {
+      await api(`/managed-rollover/runs/${encodeURIComponent(currentRunId)}/cancel`, { method:'POST' });
+      await refreshRunView(currentRunId);
+    } catch(err) {
+      resDiv.insertAdjacentHTML('beforeend', `<p style="color:var(--danger)">${escapeHtml(err.message || 'تعذر الإلغاء')}</p>`);
+    } finally {
+      currentRunId = null;
+      currentRunStatus = null;
+      setButtons();
+    }
+  });
+  // Point 3/4: when a month is entered, proactively check for an already
+  // active run (running/paused) for that month and show it instead of
+  // silently offering to create a new one.
+  monthEl.addEventListener('change', async () => {
+    const month = (monthEl.value || '').trim();
+    if(running || !/^\d{4}-\d{2}$/.test(month)) return;
+    const existing = await findActiveRunForMonth(month);
+    if(existing){
+      currentRunId = existing.id;
+      currentRunStatus = existing.status;
+      if(dryEl) dryEl.checked = false;
+      await refreshRunView(existing.id);
+    } else {
+      currentRunId = null;
+      currentRunStatus = null;
+    }
+    setButtons();
+  });
+  dryEl?.addEventListener('change', () => {
+    setButtons();
   });
   setButtons();
 }
@@ -6730,16 +6900,18 @@ function _renderMKListPage(){
       <span>معاينة فقط بدون تطبيق</span>
     </label>
     <div style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);line-height:1.6">
-      <span>يتم التدوير تلقائيًا على دفعات صغيرة جدًا</span>
-      <span>الدفعة الداخلية: ختمة واحدة</span>
+      <span>المعاينة فقط تمر عبر المسار القديم ولا تكتب أي شيء</span>
+      <span>التدوير الحقيقي يتم عبر نظام التشغيل الآمن (Rollover Run): خطوات صغيرة جدًا، حتى 3 ختمات لكل خطوة</span>
       <span>يعالج فقط الختمات غير المدوّرة لهذا الشهر</span>
-      <span>سيتوقف النظام تلقائيًا عند أي خطأ</span>
-      <span>يمكن الاستئناف من آخر نقطة مكتملة</span>
+      <span>سيتوقف تلقائيًا عند أي خطأ في إحدى الختمات</span>
+      <span>تشغيل قابل للاستكمال: يمكنك إغلاق الصفحة والعودة لاحقًا لإكمال نفس التشغيل</span>
+      <span>لا يمكن وجود أكثر من تشغيل نشط لنفس الشهر في نفس الوقت</span>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button id="mkBatchRunBtn" class="btn primary compact-btn" type="button">⟳ بدء التدوير الآمن</button>
+      <button id="mkBatchRunBtn" class="btn primary compact-btn" type="button">⟳ بدء تشغيل تدوير آمن</button>
       <button id="mkBatchPauseBtn" class="btn ghost compact-btn" type="button" disabled>إيقاف مؤقت</button>
-      <button id="mkBatchResumeBtn" class="btn ghost compact-btn" type="button" disabled>استئناف التدوير</button>
+      <button id="mkBatchResumeBtn" class="btn ghost compact-btn" type="button" disabled>استكمال التشغيل المتوقف</button>
+      <button id="mkBatchCancelBtn" class="btn ghost compact-btn danger-btn" type="button" disabled>إلغاء التشغيل</button>
     </div>
   </div>
   <div id="mkBatchResult" style="margin-top:14px"></div>
@@ -6766,7 +6938,8 @@ function _renderMKListPage(){
     resultId: 'mkBatchResult',
     runBtnId: 'mkBatchRunBtn',
     pauseBtnId: 'mkBatchPauseBtn',
-    resumeBtnId: 'mkBatchResumeBtn'
+    resumeBtnId: 'mkBatchResumeBtn',
+    cancelBtnId: 'mkBatchCancelBtn'
   });
 }
 window.mkGoPage = function(pg){

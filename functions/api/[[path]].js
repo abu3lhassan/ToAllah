@@ -4019,6 +4019,282 @@ async function loadCompletedBatchRolloverKhatmaIds(DB, targetYearMonth, khatmaId
 
 const ROLLOVER_CLOSING_WINDOW_DAYS = 2;
 
+// Legacy /managed-rollover/batch-monthly is no longer the general-purpose
+// entry point for real rollovers (see Rollover Run system below). A real
+// (non-dry) call through it must be scoped to a small, explicit set of
+// groups — this is the only way it is still used safely (targeted resume
+// of a specific stuck khatma), never as a full-month batch driver from a UI
+// loop, which is what caused the Cloudflare 1102 incident during 1448-02.
+const LEGACY_BATCH_MAX_GROUP_IDS = 3;
+
+// A run_items row stuck in 'running' for longer than this (Worker died
+// mid-item) is reclaimed back to 'pending' the next time /step runs for
+// that run — see stepRolloverRun(). Checked lazily on every step call, no
+// background cron needed.
+const ROLLOVER_RUN_STALE_RUNNING_MINUTES = 10;
+
+// Hard cap on how many items a single /step call may process — keeps every
+// request small and bounded regardless of what the caller asks for.
+const ROLLOVER_RUN_STEP_MAX_LIMIT = 3;
+
+// Calendar closing-window guard, shared by every real-rollover entry point
+// (batchMonthlyRollover, createRolloverRun, stepRolloverRun): a real
+// (non-preview) run into a PAST or CURRENT Hijri month is always allowed as
+// catch-up (duplicate protection remains handled by
+// managed_batch_rollover_events). Rolling into the immediate NEXT month is
+// allowed only inside the closing window (last ROLLOVER_CLOSING_WINDOW_DAYS
+// days of the current Hijri month), so real month-end prep can run a day or
+// two early. Anything further out is blocked. Callers that support a
+// dry_run/preview mode are responsible for skipping this check themselves
+// when previewing; the Rollover Run system has no preview mode, so its
+// callers always invoke this unconditionally.
+function validateMonthlyRolloverTiming(targetYearMonth) {
+  const ymParts = /^(\d{4})-(\d{2})$/.exec(targetYearMonth);
+  const hijriYear = ymParts ? Number(ymParts[1]) : 0;
+  const hijriMonth = ymParts ? Number(ymParts[2]) : 0;
+
+  const todayHijri = getHijriPartsServer(new Date());
+  const currentKeyNum = todayHijri.year * 12 + todayHijri.month;
+  const targetKeyNum = hijriYear * 12 + hijriMonth;
+  const currentYearMonthStr = `${todayHijri.year}-${String(todayHijri.month).padStart(2, '0')}`;
+
+  if (targetKeyNum > currentKeyNum + 1) {
+    return {
+      ok: false,
+      error: 'rollover_too_early',
+      message: 'لا يمكن تنفيذ التدوير الحقيقي لشهر مستقبلي بعيد. المعاينة فقط مسموحة الآن.',
+      current_hijri_year_month: currentYearMonthStr,
+      target_year_month: targetYearMonth
+    };
+  }
+
+  if (targetKeyNum === currentKeyNum + 1) {
+    const daysInCurrentMonth = getHijriPartsServer(hijriMonthEndDateServer(new Date())).day;
+    const daysRemainingInCurrentMonth = daysInCurrentMonth - todayHijri.day;
+    if (!isWithinRolloverClosingWindow(new Date(), ROLLOVER_CLOSING_WINDOW_DAYS)) {
+      return {
+        ok: false,
+        error: 'rollover_too_early',
+        message: 'لا يمكن تنفيذ التدوير الحقيقي للشهر القادم إلا خلال آخر يومين من الشهر الهجري الحالي. المعاينة (dry_run) مسموحة الآن.',
+        current_hijri_year_month: currentYearMonthStr,
+        target_year_month: targetYearMonth,
+        closing_window_days: ROLLOVER_CLOSING_WINDOW_DAYS,
+        days_remaining_in_current_month: daysRemainingInCurrentMonth
+      };
+    }
+  }
+
+  // else targetKeyNum <= currentKeyNum: past or current month, catch-up, always allowed.
+  return { ok: true };
+}
+
+// Eligible khatmas: monthly, active, scoped by caller's authorization
+// (owner sees everything active; a managed creator sees only khatmas
+// created by their own creator-group peers). Optional group_ids narrows
+// the SQL WHERE clause itself — this is what makes a group_ids-scoped call
+// cheap, since nothing broader than that group is ever read. Shared by the
+// legacy batchMonthlyRollover and the new run-creation endpoint so the
+// eligibility rules never drift between the two.
+async function findEligibleMonthlyKhatmas(DB, user, requestedGroupIds) {
+  const isOwner = user.role === 'owner';
+  const khatmaOrderBy = "ORDER BY COALESCE(mk.khatma_serial_number, ''), COALESCE(mk.title, ''), mk.id ASC";
+
+  if (isOwner) {
+    const ownerSelect = `
+      SELECT mk.id, mk.title, mk.group_id, mk.period_number, mk.khatma_serial_number,
+             mrg.name AS group_name
+      FROM managed_khatmas mk
+      JOIN managed_reader_groups mrg ON mrg.id = mk.group_id
+      WHERE mk.khatma_type = 'monthly'
+        AND mk.deleted_at IS NULL
+        AND mk.archived_at IS NULL
+        AND mk.status = 'active'
+        AND mrg.status = 'active'
+    `;
+    let khatmaRows;
+    if (requestedGroupIds && requestedGroupIds.length) {
+      const inClause = requestedGroupIds.map(() => '?').join(',');
+      khatmaRows = (await DB.prepare(`${ownerSelect} AND mrg.id IN (${inClause}) ${khatmaOrderBy}`)
+        .bind(...requestedGroupIds).all()).results || [];
+    } else {
+      khatmaRows = (await DB.prepare(`${ownerSelect} ${khatmaOrderBy}`).all()).results || [];
+    }
+    return { ok: true, isOwner: true, khatmaRows };
+  }
+
+  // Creator path: khatmas created by peers in the same creator group(s).
+  // getCreatorGroupMemberIds returns user IDs (not reader group IDs).
+  // mk.created_by_user_id is the correct join key, not mk.group_id.
+  const visibleUserIds = await getCreatorGroupMemberIds(DB, user.id);
+  const userInClause = visibleUserIds.map(() => '?').join(',');
+  const baseCreatorSelect = `
+    SELECT mk.id, mk.title, mk.group_id, mk.period_number, mk.khatma_serial_number,
+           mrg.name AS group_name
+    FROM managed_khatmas mk
+    JOIN managed_reader_groups mrg ON mrg.id = mk.group_id
+    WHERE mk.khatma_type = 'monthly'
+      AND mk.deleted_at IS NULL
+      AND mk.archived_at IS NULL
+      AND mk.status = 'active'
+      AND mk.created_by_user_id IN (${userInClause})
+      AND mrg.status = 'active'
+  `;
+  let khatmaRows;
+  if (requestedGroupIds && requestedGroupIds.length) {
+    // Validate supplied group_ids are reader group IDs visible to this creator
+    const visGroupRows = (await DB.prepare(
+      `SELECT DISTINCT mk.group_id FROM managed_khatmas mk
+       WHERE mk.khatma_type = 'monthly'
+         AND mk.deleted_at IS NULL
+         AND mk.archived_at IS NULL
+         AND mk.created_by_user_id IN (${userInClause})`
+    ).bind(...visibleUserIds).all()).results || [];
+    const visibleReaderGroupIds = visGroupRows.map(r => r.group_id);
+    const unauthorized = requestedGroupIds.filter(id => !visibleReaderGroupIds.includes(id));
+    if (unauthorized.length) {
+      return { ok: false, error: 'unauthorized_groups', unauthorized_group_ids: unauthorized };
+    }
+    const groupInClause = requestedGroupIds.map(() => '?').join(',');
+    khatmaRows = (await DB.prepare(`${baseCreatorSelect} AND mk.group_id IN (${groupInClause}) ${khatmaOrderBy}`)
+      .bind(...visibleUserIds, ...requestedGroupIds).all()).results || [];
+  } else {
+    khatmaRows = (await DB.prepare(`${baseCreatorSelect} ${khatmaOrderBy}`)
+      .bind(...visibleUserIds).all()).results || [];
+  }
+  return { ok: true, isOwner: false, khatmaRows };
+}
+
+// Applies the monthly rollover (period_shift_v1) to exactly one khatma:
+// snapshot the completed cycle (skipped if a partial-recovery snapshot
+// already exists for this period), delete + rebuild participants/units,
+// then log the completion event — all as it worked inside the old
+// batchMonthlyRollover loop, just extracted so both the legacy endpoint and
+// the new Rollover Run /step endpoint call one single implementation instead
+// of two copies drifting apart over time. No behavioral change from the
+// original inline loop body.
+async function applyMonthlyRolloverForKhatma({
+  DB, khatma, targetYearMonth, algorithm, actorUserId, dryRun,
+  readersByGroupId, existingEventsSet, existingSnapsSet, maxSnapshotCycleByKhatma
+}) {
+  const khatmaId = khatma.id;
+  const groupId = khatma.group_id || '';
+  const khatmaName = khatma.title || '';
+  const groupName = khatma.group_name || '';
+  const periodBefore = Number(khatma.period_number) || 1;
+  const warnings = [];
+
+  try {
+    // Guard 1: event exists — already fully rolled for this target month
+    if (existingEventsSet.has(khatmaId)) {
+      return { status: 'skipped', partialRecovery: false, warnings, entry: { khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, reason: 'already_rolled_this_month' } };
+    }
+
+    // Guard 2: detect partial recovery vs inconsistent snapshot state
+    const hasSnapForThisCycle = existingSnapsSet.has(`${khatmaId}|${periodBefore}`);
+    const maxSnapCycle = maxSnapshotCycleByKhatma.get(khatmaId) || 0;
+    if (maxSnapCycle > periodBefore) {
+      return { status: 'skipped', partialRecovery: false, warnings, entry: { khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, reason: 'inconsistent_future_snapshot', max_snapshot_cycle: maxSnapCycle, period_before: periodBefore } };
+    }
+    const isPartialRecovery = hasSnapForThisCycle;
+
+    // Use prefetched readers map — no per-khatma DB query
+    const readerData = readersByGroupId.get(groupId) || { active: [], inactive: [] };
+    const activeReaders = readerData.active;
+    for (const r of readerData.inactive) {
+      warnings.push({ khatma_id: khatmaId, code: 'inactive_reader_excluded', reader_profile_id: r.reader_profile_id, reader_name: r.reader_name || '' });
+    }
+    if (!activeReaders.length) {
+      return { status: 'skipped', partialRecovery: isPartialRecovery, warnings, entry: { khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, reason: 'no_eligible_readers' } };
+    }
+
+    // Canonical formula: computeRotationJuzServer(start_juz, parts_count, period_number)
+    const nextAssignments = [];
+    let skippedReaders = 0;
+    for (const r of activeReaders) {
+      const startJuz = Number(r.start_juz);
+      const partsCount = Number(r.parts_count);
+      if (!Number.isInteger(startJuz) || startJuz < 1 || startJuz > 30 || !Number.isInteger(partsCount) || partsCount < 1) {
+        warnings.push({ khatma_id: khatmaId, code: 'reader_missing_juz_config', reader_profile_id: r.reader_profile_id, reader_name: r.reader_name || '' });
+        skippedReaders++;
+        continue;
+      }
+      const units = computeRotationJuzServer(startJuz, partsCount, periodBefore);
+      for (let i = 0; i < units.length; i++) {
+        nextAssignments.push({ reader_profile_id: r.reader_profile_id, unit_number: units[i], slot_index: i + 1 });
+      }
+    }
+
+    if (!nextAssignments.length) {
+      return { status: 'skipped', partialRecovery: isPartialRecovery, warnings, entry: { khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, reason: 'no_assignments_generated', detail: { skipped_readers: skippedReaders } } };
+    }
+
+    const eligibleReaderCount = activeReaders.length - skippedReaders;
+
+    if (dryRun) {
+      return { status: 'rolled', partialRecovery: isPartialRecovery, warnings, entry: { khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, period_number_before: periodBefore, period_number_after: periodBefore + 1, assignments_created: nextAssignments.length, readers_count: eligibleReaderCount, target_year_month: targetYearMonth, dry_run: true, partial_recovery: isPartialRecovery } };
+    }
+
+    const t = now();
+    const periodAfter = periodBefore + 1;
+
+    // Step 1: snapshot (skip if partial recovery — snapshot already written)
+    if (!isPartialRecovery) {
+      const snapResult = await snapshotCurrentCycle(DB, khatmaId, periodBefore, null, actorUserId, periodBefore);
+      if (!snapResult.ok) {
+        return { status: 'failed', partialRecovery: isPartialRecovery, warnings, entry: { khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, error: snapResult.error, detail: snapResult } };
+      }
+    }
+
+    // Steps 2-5: rebuild assignments in small batches — avoids D1 batch statement limit
+    const byReader = new Map();
+    for (const a of nextAssignments) {
+      if (!byReader.has(a.reader_profile_id)) byReader.set(a.reader_profile_id, []);
+      byReader.get(a.reader_profile_id).push(a);
+    }
+    const readerById = new Map(activeReaders.map(r => [r.reader_profile_id, r]));
+
+    const participantIdByRid = new Map();
+    const participantStmts = [];
+    const pStmt = DB.prepare('INSERT INTO managed_khatma_participants (id, khatma_id, participant_name, phone, access_code, reader_profile_id, notes, start_juz, parts_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    for (const [rid, asgns] of byReader) {
+      const r = readerById.get(rid);
+      if (!r) continue;
+      const partId = newId('mpart');
+      participantIdByRid.set(rid, partId);
+      const sortedUnits = asgns.map(a => a.unit_number).sort((a, b) => a - b);
+      participantStmts.push(pStmt.bind(partId, khatmaId, r.reader_name || '', r.phone || null, r.access_code || '', rid, null, sortedUnits[0], sortedUnits.length, t, t));
+    }
+
+    const uStmt = DB.prepare('INSERT INTO managed_khatma_units (id, khatma_id, unit_number, label, status, participant_id, reading_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)');
+    const unitStmts = nextAssignments.map(a => {
+      const partId = participantIdByRid.get(a.reader_profile_id) || null;
+      return uStmt.bind(newId('munit'), khatmaId, a.unit_number, `الجزء ${a.unit_number}`, partId ? 'assigned' : 'available', partId, t);
+    });
+
+    const eventPayload = JSON.stringify({ algorithm, period_number_before: periodBefore, period_number_after: periodAfter, assignments_created: nextAssignments.length, readers_count: eligibleReaderCount, partial_recovery: isPartialRecovery });
+
+    // Step 2: delete existing assignments
+    await DB.batch([
+      DB.prepare('DELETE FROM managed_khatma_units WHERE khatma_id = ?').bind(khatmaId),
+      DB.prepare('DELETE FROM managed_khatma_participants WHERE khatma_id = ?').bind(khatmaId)
+    ]);
+    // Step 3: insert new participants in chunks of 25
+    await batchStatementsInChunks(DB, participantStmts, 25);
+    // Step 4: insert new units in chunks of 25
+    await batchStatementsInChunks(DB, unitStmts, 25);
+    // Step 5: update period + log event (must be last — idempotency guard)
+    await DB.batch([
+      DB.prepare('UPDATE managed_khatmas SET period_number = ? WHERE id = ? AND deleted_at IS NULL').bind(periodAfter, khatmaId),
+      DB.prepare('INSERT INTO managed_batch_rollover_events (id, khatma_id, group_id, target_year_month, period_number_before, period_number_after, algorithm, assignments_created, readers_count, applied_by_user_id, event_payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(newId('brev'), khatmaId, groupId, targetYearMonth, periodBefore, periodAfter, algorithm, nextAssignments.length, eligibleReaderCount, actorUserId, eventPayload, t)
+    ]);
+
+    return { status: 'rolled', partialRecovery: isPartialRecovery, warnings, entry: { khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, period_number_before: periodBefore, period_number_after: periodAfter, assignments_created: nextAssignments.length, readers_count: eligibleReaderCount, target_year_month: targetYearMonth, partial_recovery: isPartialRecovery } };
+
+  } catch (err) {
+    return { status: 'failed', partialRecovery: false, warnings, entry: { khatma_id: khatmaId, khatma_name: khatmaName, group_id: khatma.group_id || '', group_name: khatma.group_name || '', error: err?.message || 'unexpected_error' } };
+  }
+}
+
 async function batchMonthlyRollover(request, DB) {
   const check = await requireManagedCreator(request, DB);
   if (!check.ok) return check.response;
@@ -4043,45 +4319,26 @@ async function batchMonthlyRollover(request, DB) {
     : null;
   const dryRun = body.dry_run === true;
 
-  // Calendar closing-window guard: a real (non-preview) run into a PAST or CURRENT
-  // Hijri month is always allowed as catch-up (target == current is allowed as
-  // catch-up only; duplicate protection remains handled by managed_batch_rollover_events).
-  // Rolling into the immediate NEXT month is allowed only inside the closing window
-  // (last ROLLOVER_CLOSING_WINDOW_DAYS days of the current Hijri month), so real
-  // month-end prep can run a day or two early. Anything further out is blocked.
-  // Preview (dry_run:true) is exempt so planning/testing can look ahead freely.
+  // Legacy-batch safety guard: this endpoint is no longer the general-purpose
+  // real-rollover driver (see Rollover Run system — POST /managed-rollover/runs).
+  // A real run through this legacy path must be scoped to a small, explicit
+  // set of groups (targeted manual resume only). dry_run previews are exempt.
   if (!dryRun) {
-    const _todayHijri = getHijriPartsServer(new Date());
-    const _currentKeyNum = _todayHijri.year * 12 + _todayHijri.month;
-    const _targetKeyNum = _hijriYear * 12 + _hijriMonth;
-    const _currentYearMonthStr = `${_todayHijri.year}-${String(_todayHijri.month).padStart(2, '0')}`;
-
-    if (_targetKeyNum > _currentKeyNum + 1) {
+    if (!requestedGroupIds || requestedGroupIds.length === 0 || requestedGroupIds.length > LEGACY_BATCH_MAX_GROUP_IDS) {
       return json({
         ok: false,
-        error: 'rollover_too_early',
-        message: 'لا يمكن تنفيذ التدوير الحقيقي لشهر مستقبلي بعيد. المعاينة فقط مسموحة الآن.',
-        current_hijri_year_month: _currentYearMonthStr,
-        target_year_month: targetYearMonth
-      }, 409);
+        error: 'unsafe_legacy_batch',
+        message: `هذا المسار القديم مخصص الآن لاستكمال يدوي ضيق النطاق فقط (حتى ${LEGACY_BATCH_MAX_GROUP_IDS} مجموعات محددة عبر group_ids). للتشغيل العام استخدم نظام Rollover Runs الجديد: POST /managed-rollover/runs.`,
+        max_group_ids: LEGACY_BATCH_MAX_GROUP_IDS
+      }, 400);
     }
+  }
 
-    if (_targetKeyNum === _currentKeyNum + 1) {
-      const daysInCurrentMonth = getHijriPartsServer(hijriMonthEndDateServer(new Date())).day;
-      const daysRemainingInCurrentMonth = daysInCurrentMonth - _todayHijri.day;
-      if (!isWithinRolloverClosingWindow(new Date(), ROLLOVER_CLOSING_WINDOW_DAYS)) {
-        return json({
-          ok: false,
-          error: 'rollover_too_early',
-          message: 'لا يمكن تنفيذ التدوير الحقيقي للشهر القادم إلا خلال آخر يومين من الشهر الهجري الحالي. المعاينة (dry_run) مسموحة الآن.',
-          current_hijri_year_month: _currentYearMonthStr,
-          target_year_month: targetYearMonth,
-          closing_window_days: ROLLOVER_CLOSING_WINDOW_DAYS,
-          days_remaining_in_current_month: daysRemainingInCurrentMonth
-        }, 409);
-      }
-    }
-    // else _targetKeyNum <= _currentKeyNum: past or current month, catch-up, always allowed here.
+  // Calendar closing-window guard (shared helper — see validateMonthlyRolloverTiming).
+  // Preview (dry_run:true) is exempt so planning/testing can look ahead freely.
+  if (!dryRun) {
+    const timing = validateMonthlyRolloverTiming(targetYearMonth);
+    if (!timing.ok) return json(timing, 409);
   }
 
   const requestedMode = String(body.mode || '').trim();
@@ -4098,70 +4355,11 @@ async function batchMonthlyRollover(request, DB) {
     : _maxLimit;
 
   // Eligible khatmas: monthly, active, scoped by caller's authorization
-  const isOwner = check.user.role === 'owner';
-  const khatmaOrderBy = "ORDER BY COALESCE(mk.khatma_serial_number, ''), COALESCE(mk.title, ''), mk.id ASC";
-  let khatmaRows;
-
-  if (isOwner) {
-    // Owner sees all active monthly khatmas — no group creator restriction
-    const ownerSelect = `
-      SELECT mk.id, mk.title, mk.group_id, mk.period_number, mk.khatma_serial_number,
-             mrg.name AS group_name
-      FROM managed_khatmas mk
-      JOIN managed_reader_groups mrg ON mrg.id = mk.group_id
-      WHERE mk.khatma_type = 'monthly'
-        AND mk.deleted_at IS NULL
-        AND mk.archived_at IS NULL
-        AND mk.status = 'active'
-        AND mrg.status = 'active'
-    `;
-    if (requestedGroupIds && requestedGroupIds.length) {
-      const inClause = requestedGroupIds.map(() => '?').join(',');
-      khatmaRows = (await DB.prepare(`${ownerSelect} AND mrg.id IN (${inClause}) ${khatmaOrderBy}`)
-        .bind(...requestedGroupIds).all()).results || [];
-    } else {
-      khatmaRows = (await DB.prepare(`${ownerSelect} ${khatmaOrderBy}`).all()).results || [];
-    }
-  } else {
-    // Creator path: khatmas created by peers in the same creator group(s).
-    // getCreatorGroupMemberIds returns user IDs (not reader group IDs).
-    // mk.created_by_user_id is the correct join key, not mk.group_id.
-    const visibleUserIds = await getCreatorGroupMemberIds(DB, check.user.id);
-    const userInClause = visibleUserIds.map(() => '?').join(',');
-    const baseCreatorSelect = `
-      SELECT mk.id, mk.title, mk.group_id, mk.period_number, mk.khatma_serial_number,
-             mrg.name AS group_name
-      FROM managed_khatmas mk
-      JOIN managed_reader_groups mrg ON mrg.id = mk.group_id
-      WHERE mk.khatma_type = 'monthly'
-        AND mk.deleted_at IS NULL
-        AND mk.archived_at IS NULL
-        AND mk.status = 'active'
-        AND mk.created_by_user_id IN (${userInClause})
-        AND mrg.status = 'active'
-    `;
-    if (requestedGroupIds && requestedGroupIds.length) {
-      // Validate supplied group_ids are reader group IDs visible to this creator
-      const visGroupRows = (await DB.prepare(
-        `SELECT DISTINCT mk.group_id FROM managed_khatmas mk
-         WHERE mk.khatma_type = 'monthly'
-           AND mk.deleted_at IS NULL
-           AND mk.archived_at IS NULL
-           AND mk.created_by_user_id IN (${userInClause})`
-      ).bind(...visibleUserIds).all()).results || [];
-      const visibleReaderGroupIds = visGroupRows.map(r => r.group_id);
-      const unauthorized = requestedGroupIds.filter(id => !visibleReaderGroupIds.includes(id));
-      if (unauthorized.length) {
-        return json({ ok: false, error: 'unauthorized_groups', unauthorized_group_ids: unauthorized }, 403);
-      }
-      const groupInClause = requestedGroupIds.map(() => '?').join(',');
-      khatmaRows = (await DB.prepare(`${baseCreatorSelect} AND mk.group_id IN (${groupInClause}) ${khatmaOrderBy}`)
-        .bind(...visibleUserIds, ...requestedGroupIds).all()).results || [];
-    } else {
-      khatmaRows = (await DB.prepare(`${baseCreatorSelect} ${khatmaOrderBy}`)
-        .bind(...visibleUserIds).all()).results || [];
-    }
-  }
+  // (shared with the Rollover Run system via findEligibleMonthlyKhatmas).
+  const eligible = await findEligibleMonthlyKhatmas(DB, check.user, requestedGroupIds);
+  if (!eligible.ok) return json({ ok: false, error: eligible.error, unauthorized_group_ids: eligible.unauthorized_group_ids }, 403);
+  const isOwner = eligible.isOwner;
+  const khatmaRows = eligible.khatmaRows;
 
   // Slice the candidate list into a safe chunk. Real next_pending_chunk excludes
   // completed khatmas before processing so completed rows are not returned as skips.
@@ -4242,128 +4440,18 @@ async function batchMonthlyRollover(request, DB) {
   let partialRecoveryTotal = 0;
 
   for (const khatma of chunk) {
-    const khatmaId = khatma.id;
-    const groupId = khatma.group_id || '';
-    const khatmaName = khatma.title || '';
-    const groupName = khatma.group_name || '';
-    const periodBefore = Number(khatma.period_number) || 1;
-
-    try {
-      // Guard 1: event exists — already fully rolled for this target month
-      if (existingEventsSet.has(khatmaId)) {
-        skipped.push({ khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, reason: 'already_rolled_this_month' });
-        continue;
-      }
-
-      // Guard 2: detect partial recovery vs inconsistent snapshot state
-      const hasSnapForThisCycle = existingSnapsSet.has(`${khatmaId}|${periodBefore}`);
-      const maxSnapCycle = maxSnapshotCycleByKhatma.get(khatmaId) || 0;
-      if (maxSnapCycle > periodBefore) {
-        skipped.push({ khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, reason: 'inconsistent_future_snapshot', max_snapshot_cycle: maxSnapCycle, period_before: periodBefore });
-        continue;
-      }
-      const isPartialRecovery = hasSnapForThisCycle;
-
-      // Use prefetched readers map — no per-khatma DB query
-      const readerData = readersByGroupId.get(groupId) || { active: [], inactive: [] };
-      const activeReaders = readerData.active;
-      for (const r of readerData.inactive) {
-        warnings.push({ khatma_id: khatmaId, code: 'inactive_reader_excluded', reader_profile_id: r.reader_profile_id, reader_name: r.reader_name || '' });
-      }
-      if (!activeReaders.length) {
-        skipped.push({ khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, reason: 'no_eligible_readers' });
-        continue;
-      }
-
-      // Canonical formula: computeRotationJuzServer(start_juz, parts_count, period_number)
-      const nextAssignments = [];
-      let skippedReaders = 0;
-      for (const r of activeReaders) {
-        const startJuz = Number(r.start_juz);
-        const partsCount = Number(r.parts_count);
-        if (!Number.isInteger(startJuz) || startJuz < 1 || startJuz > 30 || !Number.isInteger(partsCount) || partsCount < 1) {
-          warnings.push({ khatma_id: khatmaId, code: 'reader_missing_juz_config', reader_profile_id: r.reader_profile_id, reader_name: r.reader_name || '' });
-          skippedReaders++;
-          continue;
-        }
-        const units = computeRotationJuzServer(startJuz, partsCount, periodBefore);
-        for (let i = 0; i < units.length; i++) {
-          nextAssignments.push({ reader_profile_id: r.reader_profile_id, unit_number: units[i], slot_index: i + 1 });
-        }
-      }
-
-      if (!nextAssignments.length) {
-        skipped.push({ khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, reason: 'no_assignments_generated', detail: { skipped_readers: skippedReaders } });
-        continue;
-      }
-
-      const eligibleReaderCount = activeReaders.length - skippedReaders;
-      if (isPartialRecovery) partialRecoveryTotal++;
-
-      if (dryRun) {
-        rolled.push({ khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, period_number_before: periodBefore, period_number_after: periodBefore + 1, assignments_created: nextAssignments.length, readers_count: eligibleReaderCount, target_year_month: targetYearMonth, dry_run: true, partial_recovery: isPartialRecovery });
-        continue;
-      }
-
-      const t = now();
-      const periodAfter = periodBefore + 1;
-
-      // Step 1: snapshot (skip if partial recovery — snapshot already written)
-      if (!isPartialRecovery) {
-        const snapResult = await snapshotCurrentCycle(DB, khatmaId, periodBefore, null, check.user.id, periodBefore);
-        if (!snapResult.ok) {
-          failed.push({ khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, error: snapResult.error, detail: snapResult });
-          continue;
-        }
-      }
-
-      // Steps 2-5: rebuild assignments in small batches — avoids D1 batch statement limit
-      const byReader = new Map();
-      for (const a of nextAssignments) {
-        if (!byReader.has(a.reader_profile_id)) byReader.set(a.reader_profile_id, []);
-        byReader.get(a.reader_profile_id).push(a);
-      }
-      const readerById = new Map(activeReaders.map(r => [r.reader_profile_id, r]));
-
-      const participantIdByRid = new Map();
-      const participantStmts = [];
-      const pStmt = DB.prepare('INSERT INTO managed_khatma_participants (id, khatma_id, participant_name, phone, access_code, reader_profile_id, notes, start_juz, parts_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-      for (const [rid, asgns] of byReader) {
-        const r = readerById.get(rid);
-        if (!r) continue;
-        const partId = newId('mpart');
-        participantIdByRid.set(rid, partId);
-        const sortedUnits = asgns.map(a => a.unit_number).sort((a, b) => a - b);
-        participantStmts.push(pStmt.bind(partId, khatmaId, r.reader_name || '', r.phone || null, r.access_code || '', rid, null, sortedUnits[0], sortedUnits.length, t, t));
-      }
-
-      const uStmt = DB.prepare('INSERT INTO managed_khatma_units (id, khatma_id, unit_number, label, status, participant_id, reading_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)');
-      const unitStmts = nextAssignments.map(a => {
-        const partId = participantIdByRid.get(a.reader_profile_id) || null;
-        return uStmt.bind(newId('munit'), khatmaId, a.unit_number, `الجزء ${a.unit_number}`, partId ? 'assigned' : 'available', partId, t);
-      });
-
-      const eventPayload = JSON.stringify({ algorithm, period_number_before: periodBefore, period_number_after: periodAfter, assignments_created: nextAssignments.length, readers_count: eligibleReaderCount, partial_recovery: isPartialRecovery });
-
-      // Step 2: delete existing assignments
-      await DB.batch([
-        DB.prepare('DELETE FROM managed_khatma_units WHERE khatma_id = ?').bind(khatmaId),
-        DB.prepare('DELETE FROM managed_khatma_participants WHERE khatma_id = ?').bind(khatmaId)
-      ]);
-      // Step 3: insert new participants in chunks of 25
-      await batchStatementsInChunks(DB, participantStmts, 25);
-      // Step 4: insert new units in chunks of 25
-      await batchStatementsInChunks(DB, unitStmts, 25);
-      // Step 5: update period + log event (must be last — idempotency guard)
-      await DB.batch([
-        DB.prepare('UPDATE managed_khatmas SET period_number = ? WHERE id = ? AND deleted_at IS NULL').bind(periodAfter, khatmaId),
-        DB.prepare('INSERT INTO managed_batch_rollover_events (id, khatma_id, group_id, target_year_month, period_number_before, period_number_after, algorithm, assignments_created, readers_count, applied_by_user_id, event_payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(newId('brev'), khatmaId, groupId, targetYearMonth, periodBefore, periodAfter, algorithm, nextAssignments.length, eligibleReaderCount, check.user.id, eventPayload, t)
-      ]);
-
-      rolled.push({ khatma_id: khatmaId, khatma_name: khatmaName, group_id: groupId, group_name: groupName, period_number_before: periodBefore, period_number_after: periodAfter, assignments_created: nextAssignments.length, readers_count: eligibleReaderCount, target_year_month: targetYearMonth, partial_recovery: isPartialRecovery });
-
-    } catch (err) {
-      failed.push({ khatma_id: khatmaId, khatma_name: khatmaName, group_id: khatma.group_id || '', group_name: khatma.group_name || '', error: err?.message || 'unexpected_error' });
+    const result = await applyMonthlyRolloverForKhatma({
+      DB, khatma, targetYearMonth, algorithm, actorUserId: check.user.id, dryRun,
+      readersByGroupId, existingEventsSet, existingSnapsSet, maxSnapshotCycleByKhatma
+    });
+    if (result.warnings.length) warnings.push(...result.warnings);
+    if (result.status === 'rolled') {
+      rolled.push(result.entry);
+      if (result.partialRecovery) partialRecoveryTotal++;
+    } else if (result.status === 'skipped') {
+      skipped.push(result.entry);
+    } else {
+      failed.push(result.entry);
     }
   }
 
@@ -4398,6 +4486,433 @@ async function batchMonthlyRollover(request, DB) {
   };
   return json({ ok: true, target_year_month: targetYearMonth, dry_run: dryRun, algorithm, summary: { rolled: rolled.length, skipped: skipped.length, failed: failed.length, warnings: warnings.length }, diagnostics, rolled, skipped, failed, warnings });
 }
+
+// ===================== Rollover Run system (resumable, bounded-step rollover) =====================
+// No auto-DDL / ensure*Schema function here by design — managed_rollover_runs
+// and managed_rollover_run_items are created ONLY via
+// migrations/030_managed_rollover_runs.sql, applied explicitly and
+// separately. Do not add runtime CREATE TABLE/INDEX for these tables
+// without new explicit approval (same policy as the Posts module).
+
+// Per-run control permission: owner controls every run. A managed creator
+// controls only runs they created themselves, or runs created by a peer
+// within the same managed_creator_group — mirrors the exact ownership model
+// already used by requireManagedControl (managed_khatmas) and
+// requirePostControl (managed_posts): resource-level ownership via
+// getCreatorGroupMemberIds, layered on top of the hasManagedPermission check
+// that requireManagedCreator already performed before this is called.
+async function canControlRolloverRun(DB, user, run) {
+  if (user.role === 'owner') return true;
+  if (run.created_by_user_id === user.id) return true;
+  const visibleIds = await getCreatorGroupMemberIds(DB, user.id);
+  return visibleIds.includes(run.created_by_user_id);
+}
+
+async function createRolloverRun(request, DB) {
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+
+  let body;
+  try { body = await request.json(); } catch { return json({ ok: false, error: 'invalid_json' }, 400); }
+
+  const targetYearMonth = String(body.target_year_month || '').trim();
+  if (!/^\d{4}-\d{2}$/.test(targetYearMonth)) {
+    return json({ ok: false, error: 'invalid_target_year_month', message: 'target_year_month must be a Hijri year-month key like 1448-03' }, 400);
+  }
+
+  // Rollover Run has no preview mode — every run it creates is destined for a
+  // real rollover, so the calendar closing-window guard always applies here
+  // (never skipped), same rules as batchMonthlyRollover's real-run path.
+  const timing = validateMonthlyRolloverTiming(targetYearMonth);
+  if (!timing.ok) return json(timing, 409);
+
+  const algorithm = String(body.algorithm || 'period_shift_v1').trim();
+  if (algorithm !== 'period_shift_v1') {
+    return json({ ok: false, error: 'unsupported_algorithm', supported: ['period_shift_v1'] }, 400);
+  }
+  const requestedGroupIds = Array.isArray(body.group_ids) && body.group_ids.length
+    ? body.group_ids.map(id => String(id).trim()).filter(Boolean)
+    : null;
+
+  // App-level pre-check for a friendly error in the common (non-racing) case.
+  // The real, race-safe guard is idx_mrruns_one_active_month (partial unique
+  // index on target_year_month WHERE status IN ('running','paused')) — see
+  // the catch block around the INSERT below.
+  const existingActive = await DB.prepare(
+    "SELECT id, status FROM managed_rollover_runs WHERE target_year_month = ? AND status IN ('running','paused') LIMIT 1"
+  ).bind(targetYearMonth).first();
+  if (existingActive) {
+    return json({ ok: false, error: 'run_already_active', run_id: existingActive.id, status: existingActive.status }, 409);
+  }
+
+  const eligible = await findEligibleMonthlyKhatmas(DB, check.user, requestedGroupIds);
+  if (!eligible.ok) return json({ ok: false, error: eligible.error, unauthorized_group_ids: eligible.unauthorized_group_ids }, 403);
+  const khatmaRows = eligible.khatmaRows;
+
+  // Discover once, here, at run creation — never again per-step.
+  const candidateIds = khatmaRows.map(k => k.id).filter(Boolean);
+  const alreadyRolledSet = await loadCompletedBatchRolloverKhatmaIds(DB, targetYearMonth, candidateIds);
+  const pendingRows = khatmaRows.filter(k => !alreadyRolledSet.has(k.id));
+
+  const runId = newId('rrun');
+  const t = now();
+
+  // Step (a): insert as 'building'. This status is deliberately NOT covered
+  // by idx_mrruns_one_active_month (which only guards running/paused), so
+  // it never claims the "one active run per month" slot before the run is
+  // actually ready to process. If item insertion below fails, this run
+  // simply becomes 'failed' instead of ever having falsely occupied that
+  // slot or being mistaken for a runnable run.
+  const runStmt = DB.prepare(
+    `INSERT INTO managed_rollover_runs
+      (id, target_year_month, status, algorithm, scope_group_ids_json, total_items, pending_count, done_count, failed_count, skipped_count, created_by_user_id, created_at, updated_at, completed_at)
+     VALUES (?, ?, 'building', ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, NULL)`
+  ).bind(
+    runId, targetYearMonth, algorithm,
+    requestedGroupIds ? JSON.stringify(requestedGroupIds) : null,
+    pendingRows.length, pendingRows.length,
+    check.user.id, t, t
+  );
+
+  try {
+    await DB.batch([runStmt]);
+  } catch (err) {
+    return json({ ok: false, error: 'run_create_failed', detail: err?.message || 'insert_failed' }, 500);
+  }
+
+  // Step (b): insert run_items. On failure, mark the run 'failed' explicitly
+  // (step d) instead of leaving it stuck in 'building' forever.
+  if (pendingRows.length > 0) {
+    try {
+      const itemStmt = DB.prepare(
+        `INSERT INTO managed_rollover_run_items (id, run_id, khatma_id, group_id, status, attempt_count, sequence_number, created_at)
+         VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)`
+      );
+      const itemStmts = pendingRows.map((k, idx) => itemStmt.bind(newId('rritem'), runId, k.id, k.group_id || null, idx, t));
+      await batchStatementsInChunks(DB, itemStmts, 25);
+    } catch (err) {
+      await DB.prepare(
+        "UPDATE managed_rollover_runs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?"
+      ).bind('run_items_insert_failed', now(), runId).run();
+      return json({ ok: false, error: 'run_items_insert_failed', run_id: runId, detail: err?.message || 'insert_failed' }, 500);
+    }
+  }
+
+  // Step (c): only now flip to running/completed, once items are confirmed
+  // in place. This UPDATE is still guarded by idx_mrruns_one_active_month
+  // (running/paused): if another concurrent build for the same month
+  // reaches this point first, this UPDATE is rejected by the database and
+  // caught below — this run becomes 'failed' rather than a phantom second
+  // active run for the same target_year_month.
+  const finalStatus = pendingRows.length > 0 ? 'running' : 'completed';
+  try {
+    await DB.prepare(
+      "UPDATE managed_rollover_runs SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?"
+    ).bind(finalStatus, finalStatus === 'completed' ? now() : null, now(), runId).run();
+  } catch (err) {
+    await DB.prepare(
+      "UPDATE managed_rollover_runs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?"
+    ).bind('run_already_active', now(), runId).run();
+    return json({ ok: false, error: 'run_already_active', run_id: runId, detail: err?.message || 'unique_constraint' }, 409);
+  }
+
+  return json({
+    ok: true,
+    run_id: runId,
+    target_year_month: targetYearMonth,
+    status: finalStatus,
+    total_items: pendingRows.length,
+    pending_count: pendingRows.length,
+    already_rolled_count: alreadyRolledSet.size,
+    candidates_found: khatmaRows.length
+  }, 201);
+}
+
+async function listRolloverRuns(request, DB) {
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+
+  const url = new URL(request.url);
+  const targetYearMonth = String(url.searchParams.get('target_year_month') || '').trim();
+  const statusFilter = String(url.searchParams.get('status') || '').trim();
+
+  const conditions = [];
+  const params = [];
+
+  // View permission applied in SQL: owner sees every run; a managed creator
+  // sees only runs created by themselves or by a peer within the same
+  // managed_creator_group (same visibility rule as canControlRolloverRun,
+  // filtered here at query time instead of after fetching all rows).
+  if (check.user.role !== 'owner') {
+    const visibleIds = await getCreatorGroupMemberIds(DB, check.user.id);
+    conditions.push(`created_by_user_id IN (${visibleIds.map(() => '?').join(',')})`);
+    params.push(...visibleIds);
+  }
+
+  if (/^\d{4}-\d{2}$/.test(targetYearMonth)) { conditions.push('target_year_month = ?'); params.push(targetYearMonth); }
+  if (statusFilter) { conditions.push('status = ?'); params.push(statusFilter); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const rows = (await DB.prepare(
+    `SELECT * FROM managed_rollover_runs ${where} ORDER BY created_at DESC LIMIT 20`
+  ).bind(...params).all()).results || [];
+  return json({ ok: true, runs: rows });
+}
+
+async function getRolloverRun(request, DB, runId) {
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+
+  const run = await DB.prepare('SELECT * FROM managed_rollover_runs WHERE id = ? LIMIT 1').bind(runId).first();
+  if (!run) return json({ ok: false, error: 'run_not_found' }, 404);
+  if (!await canControlRolloverRun(DB, check.user, run)) {
+    return json({ ok: false, error: 'run_not_authorized' }, 403);
+  }
+
+  // Requirement: counts here are computed from managed_rollover_run_items
+  // directly (authoritative), not read from the cached counters on the run
+  // row — those cached counters are a fast summary for list views only.
+  const statusRows = (await DB.prepare(
+    'SELECT status, COUNT(*) AS cnt FROM managed_rollover_run_items WHERE run_id = ? GROUP BY status'
+  ).bind(runId).all()).results || [];
+  const counts = { pending: 0, running: 0, done: 0, failed: 0, skipped: 0 };
+  for (const r of statusRows) { if (Object.prototype.hasOwnProperty.call(counts, r.status)) counts[r.status] = r.cnt; }
+  const totalItems = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  const failedItems = (await DB.prepare(
+    "SELECT khatma_id, group_id, last_error, attempt_count FROM managed_rollover_run_items WHERE run_id = ? AND status = 'failed' ORDER BY sequence_number ASC"
+  ).bind(runId).all()).results || [];
+
+  return json({ ok: true, run, counts, total_items: totalItems, failed_items: failedItems });
+}
+
+async function stepRolloverRun(request, DB, runId) {
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+
+  let body;
+  try { body = await request.json(); } catch { body = {}; }
+  const requestedLimit = Number.isInteger(Number(body.limit)) ? Number(body.limit) : 1;
+  const limit = Math.min(ROLLOVER_RUN_STEP_MAX_LIMIT, Math.max(1, requestedLimit));
+
+  const run = await DB.prepare('SELECT * FROM managed_rollover_runs WHERE id = ? LIMIT 1').bind(runId).first();
+  if (!run) return json({ ok: false, error: 'run_not_found' }, 404);
+  if (!await canControlRolloverRun(DB, check.user, run)) {
+    return json({ ok: false, error: 'run_not_authorized' }, 403);
+  }
+  if (run.status !== 'running') return json({ ok: false, error: 'run_not_active', status: run.status }, 409);
+
+  // Rollover Run has no preview mode — every /step call performs a real
+  // rollover, so the calendar closing-window guard always applies here too,
+  // re-checked on every step (not just at run creation).
+  const timing = validateMonthlyRolloverTiming(run.target_year_month);
+  if (!timing.ok) return json(timing, 409);
+
+  // Reclaim stale "running" items: a Worker that died mid-item leaves it
+  // stuck in 'running' forever otherwise. Anything running longer than
+  // ROLLOVER_RUN_STALE_RUNNING_MINUTES is reset to 'pending' so the run is
+  // never permanently blocked by a dead Worker. Checked lazily on every
+  // /step call — no background cron needed. attempt_count already reflects
+  // the earlier attempt(s); it is incremented again below when re-picked up.
+  const staleThresholdIso = new Date(Date.now() - ROLLOVER_RUN_STALE_RUNNING_MINUTES * 60000).toISOString();
+  await DB.prepare(
+    "UPDATE managed_rollover_run_items SET status = 'pending' WHERE run_id = ? AND status = 'running' AND started_at IS NOT NULL AND started_at < ?"
+  ).bind(runId, staleThresholdIso).run();
+
+  // The only per-step discovery query — scoped strictly to this run's own
+  // queue via the (run_id, status) index, never the global candidate list.
+  const pendingItems = (await DB.prepare(
+    "SELECT * FROM managed_rollover_run_items WHERE run_id = ? AND status = 'pending' ORDER BY sequence_number ASC LIMIT ?"
+  ).bind(runId, limit).all()).results || [];
+
+  if (!pendingItems.length) {
+    const stillRunning = await DB.prepare(
+      "SELECT COUNT(*) AS cnt FROM managed_rollover_run_items WHERE run_id = ? AND status = 'running'"
+    ).bind(runId).first();
+    let finalStatus = run.status;
+    if (!stillRunning?.cnt) {
+      finalStatus = 'completed';
+      await DB.prepare("UPDATE managed_rollover_runs SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ? AND status = 'running'")
+        .bind(now(), now(), runId).run();
+    }
+    return json({ ok: true, run_id: runId, processed_count: 0, success_count: 0, failed_count: 0, skipped_count: 0, remaining_count: 0, run_status: finalStatus });
+  }
+
+  // Prefetch khatma rows + active readers scoped strictly to this small
+  // batch's khatmas/groups — never the full eligible-khatma list.
+  const khatmaIds = pendingItems.map(i => i.khatma_id);
+  const inClause = khatmaIds.map(() => '?').join(',');
+  const khatmaRows = (await DB.prepare(
+    `SELECT mk.id, mk.title, mk.group_id, mk.period_number, mrg.name AS group_name
+     FROM managed_khatmas mk
+     JOIN managed_reader_groups mrg ON mrg.id = mk.group_id
+     WHERE mk.id IN (${inClause})`
+  ).bind(...khatmaIds).all()).results || [];
+  const khatmaById = new Map(khatmaRows.map(k => [k.id, k]));
+
+  const groupIds = [...new Set(khatmaRows.map(k => k.group_id).filter(Boolean))];
+  const readersByGroupId = new Map();
+  if (groupIds.length) {
+    const rgClause = groupIds.map(() => '?').join(',');
+    const allReaderRows = (await DB.prepare(
+      `SELECT id AS reader_profile_id, reader_name, phone, access_code, group_id, start_juz, parts_count, status
+       FROM managed_reader_profiles WHERE status = 'active' AND group_id IN (${rgClause}) ORDER BY id ASC`
+    ).bind(...groupIds).all()).results || [];
+    const membershipRows = (await DB.prepare(
+      `SELECT mrp.id AS reader_profile_id, mrp.reader_name, mrp.phone, mrp.access_code, rgm.group_id AS group_id, mrp.start_juz, mrp.parts_count, mrp.status
+       FROM managed_reader_group_memberships rgm
+       JOIN managed_reader_profiles mrp ON mrp.id = rgm.reader_profile_id
+       WHERE rgm.status = 'active' AND rgm.group_id IN (${rgClause}) AND mrp.status = 'active'`
+    ).bind(...groupIds).all()).results || [];
+    const seenByGroup = new Set();
+    for (const r of [...allReaderRows, ...membershipRows]) {
+      const dedupeKey = `${r.group_id}::${r.reader_profile_id}`;
+      if (seenByGroup.has(dedupeKey)) continue;
+      seenByGroup.add(dedupeKey);
+      const sj = normalizePositiveInt(r.start_juz, null);
+      const pc = normalizePositiveInt(r.parts_count, null) || 0;
+      const mapped = { reader_profile_id: r.reader_profile_id, reader_name: r.reader_name || '', phone: r.phone || '', access_code: r.access_code || '', group_id: r.group_id || '', start_juz: sj, parts_count: pc, status: r.status || 'active' };
+      if (!readersByGroupId.has(r.group_id)) readersByGroupId.set(r.group_id, { active: [], inactive: [] });
+      if (sj && pc) readersByGroupId.get(r.group_id).active.push(mapped);
+      else readersByGroupId.get(r.group_id).inactive.push(mapped);
+    }
+  }
+
+  const existingEventsSet = await loadCompletedBatchRolloverKhatmaIds(DB, run.target_year_month, khatmaIds);
+  const existingSnapsSet = new Set();
+  const maxSnapshotCycleByKhatma = new Map();
+  const snapRows = (await DB.prepare(
+    `SELECT khatma_id, cycle_number FROM managed_khatma_cycle_snapshots WHERE khatma_id IN (${inClause})`
+  ).bind(...khatmaIds).all()).results || [];
+  for (const s of snapRows) {
+    const snapCycle = Number(s.cycle_number) || 0;
+    existingSnapsSet.add(`${s.khatma_id}|${snapCycle}`);
+    const cur = maxSnapshotCycleByKhatma.get(s.khatma_id) || 0;
+    if (snapCycle > cur) maxSnapshotCycleByKhatma.set(s.khatma_id, snapCycle);
+  }
+
+  let successCount = 0, failedCount = 0, skippedCount = 0, processedCount = 0;
+  let stoppedOnFailure = false;
+
+  for (const item of pendingItems) {
+    // Atomic claim: the WHERE clause requires status='pending' at update
+    // time, and we check the actual affected-row count. If a concurrent
+    // /step call on this same run already claimed this item between our
+    // SELECT above and this UPDATE, changes will be 0 and we must not
+    // process it here — two requests must never process the same khatma
+    // at once.
+    const claimResult = await DB.prepare(
+      "UPDATE managed_rollover_run_items SET status = 'running', started_at = ?, attempt_count = attempt_count + 1 WHERE id = ? AND status = 'pending'"
+    ).bind(now(), item.id).run();
+    const claimedRows = claimResult?.meta?.changes ?? 0;
+    if (claimedRows === 0) {
+      continue; // lost the race to another concurrent /step call — not ours to process
+    }
+
+    const khatma = khatmaById.get(item.khatma_id);
+    if (!khatma) {
+      await DB.prepare("UPDATE managed_rollover_run_items SET status = 'failed', last_error = ?, processed_at = ? WHERE id = ?")
+        .bind('khatma_not_found', now(), item.id).run();
+      failedCount++; processedCount++;
+      stoppedOnFailure = true;
+      break;
+    }
+
+    // dryRun is always false here — /step only ever performs real rollovers;
+    // previews go through the legacy endpoint's dry_run path.
+    const result = await applyMonthlyRolloverForKhatma({
+      DB, khatma, targetYearMonth: run.target_year_month, algorithm: run.algorithm,
+      actorUserId: check.user.id, dryRun: false,
+      readersByGroupId, existingEventsSet, existingSnapsSet, maxSnapshotCycleByKhatma
+    });
+    processedCount++;
+
+    if (result.status === 'rolled') {
+      successCount++;
+      await DB.prepare(
+        "UPDATE managed_rollover_run_items SET status = 'done', period_number_before = ?, period_number_after = ?, assignments_created = ?, readers_count = ?, processed_at = ? WHERE id = ?"
+      ).bind(result.entry.period_number_before, result.entry.period_number_after, result.entry.assignments_created, result.entry.readers_count, now(), item.id).run();
+    } else if (result.status === 'skipped') {
+      skippedCount++;
+      await DB.prepare("UPDATE managed_rollover_run_items SET status = 'skipped', last_error = ?, processed_at = ? WHERE id = ?")
+        .bind(result.entry.reason || 'skipped', now(), item.id).run();
+    } else {
+      failedCount++;
+      await DB.prepare("UPDATE managed_rollover_run_items SET status = 'failed', last_error = ?, processed_at = ? WHERE id = ?")
+        .bind(result.entry.error || 'unexpected_error', now(), item.id).run();
+      stoppedOnFailure = true;
+      break; // Stop processing further items in this step on first failure — no silent skip-ahead.
+    }
+  }
+
+  // Recompute authoritative counts from run_items (never trust in-memory
+  // tallies alone) and update the run row's cached summary + status.
+  const statusRows = (await DB.prepare(
+    "SELECT status, COUNT(*) AS cnt FROM managed_rollover_run_items WHERE run_id = ? GROUP BY status"
+  ).bind(runId).all()).results || [];
+  const counts = { pending: 0, running: 0, done: 0, failed: 0, skipped: 0 };
+  for (const r of statusRows) { if (Object.prototype.hasOwnProperty.call(counts, r.status)) counts[r.status] = r.cnt; }
+
+  let newStatus = run.status;
+  if (stoppedOnFailure) newStatus = 'failed';
+  else if (counts.pending === 0 && counts.running === 0) newStatus = 'completed';
+
+  await DB.prepare(
+    `UPDATE managed_rollover_runs SET pending_count = ?, done_count = ?, failed_count = ?, skipped_count = ?, status = ?, updated_at = ?,
+       completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END, last_error = ? WHERE id = ?`
+  ).bind(counts.pending, counts.done, counts.failed, counts.skipped, newStatus, now(), newStatus, now(), stoppedOnFailure ? 'item_failed' : null, runId).run();
+
+  return json({
+    ok: true, run_id: runId,
+    processed_count: processedCount, success_count: successCount, failed_count: failedCount, skipped_count: skippedCount,
+    remaining_count: counts.pending,
+    run_status: newStatus
+  });
+}
+
+async function pauseRolloverRun(request, DB, runId) {
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  const run = await DB.prepare('SELECT id, status, created_by_user_id FROM managed_rollover_runs WHERE id = ? LIMIT 1').bind(runId).first();
+  if (!run) return json({ ok: false, error: 'run_not_found' }, 404);
+  if (!await canControlRolloverRun(DB, check.user, run)) {
+    return json({ ok: false, error: 'run_not_authorized' }, 403);
+  }
+  if (run.status !== 'running') return json({ ok: false, error: 'run_not_running', status: run.status }, 409);
+  await DB.prepare("UPDATE managed_rollover_runs SET status = 'paused', updated_at = ? WHERE id = ?").bind(now(), runId).run();
+  return json({ ok: true, run_id: runId, status: 'paused' });
+}
+
+async function resumeRolloverRun(request, DB, runId) {
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  const run = await DB.prepare('SELECT id, status, created_by_user_id FROM managed_rollover_runs WHERE id = ? LIMIT 1').bind(runId).first();
+  if (!run) return json({ ok: false, error: 'run_not_found' }, 404);
+  if (!await canControlRolloverRun(DB, check.user, run)) {
+    return json({ ok: false, error: 'run_not_authorized' }, 403);
+  }
+  if (run.status !== 'paused') return json({ ok: false, error: 'run_not_paused', status: run.status }, 409);
+  await DB.prepare("UPDATE managed_rollover_runs SET status = 'running', updated_at = ? WHERE id = ?").bind(now(), runId).run();
+  return json({ ok: true, run_id: runId, status: 'running' });
+}
+
+async function cancelRolloverRun(request, DB, runId) {
+  const check = await requireManagedCreator(request, DB);
+  if (!check.ok) return check.response;
+  const run = await DB.prepare('SELECT id, status, created_by_user_id FROM managed_rollover_runs WHERE id = ? LIMIT 1').bind(runId).first();
+  if (!run) return json({ ok: false, error: 'run_not_found' }, 404);
+  if (!await canControlRolloverRun(DB, check.user, run)) {
+    return json({ ok: false, error: 'run_not_authorized' }, 403);
+  }
+  if (run.status !== 'running' && run.status !== 'paused') return json({ ok: false, error: 'run_not_cancellable', status: run.status }, 409);
+  // Cancelling never touches run_items — items already 'done' remain valid
+  // forever (managed_batch_rollover_events is the real source of truth,
+  // independent of this run's bookkeeping).
+  await DB.prepare("UPDATE managed_rollover_runs SET status = 'cancelled', updated_at = ? WHERE id = ?").bind(now(), runId).run();
+  return json({ ok: true, run_id: runId, status: 'cancelled' });
+}
+
+// ===================== end Rollover Run system =====================
 
 async function listManagedReaders(request, DB) {
   await ensureGroupSchema(DB);
@@ -7322,6 +7837,18 @@ export async function onRequest(context) {
       if (parts.length === 6 && parts[1] === "khatmas" && parts[3] === "units" && parts[5] === "reassign" && method === "POST") return supervisorReassignUnit(request, env.DB, parts[2], parts[4]);
       if (parts.length === 4 && parts[1] === "readers" && parts[3] === "move-group" && method === "POST") return supervisorMoveReader(request, env.DB, parts[2]);
       if (parts.length === 3 && parts[1] === "readers" && method === "PATCH") return supervisorUpdateReaderNotes(request, env.DB, parts[2]);
+    }
+    // Rollover Run system (resumable, bounded-step rollover)
+    if (parts.length === 2 && parts[0] === "managed-rollover" && parts[1] === "runs") {
+      if (method === "POST") return createRolloverRun(request, env.DB);
+      if (method === "GET") return listRolloverRuns(request, env.DB);
+    }
+    if (parts.length === 3 && parts[0] === "managed-rollover" && parts[1] === "runs" && method === "GET") return getRolloverRun(request, env.DB, parts[2]);
+    if (parts.length === 4 && parts[0] === "managed-rollover" && parts[1] === "runs" && method === "POST") {
+      if (parts[3] === "step") return stepRolloverRun(request, env.DB, parts[2]);
+      if (parts[3] === "pause") return pauseRolloverRun(request, env.DB, parts[2]);
+      if (parts[3] === "resume") return resumeRolloverRun(request, env.DB, parts[2]);
+      if (parts[3] === "cancel") return cancelRolloverRun(request, env.DB, parts[2]);
     }
     return json({ ok: false, error: "Not found", path: parts }, 404);
   } catch (error) {
