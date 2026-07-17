@@ -6251,7 +6251,7 @@ async function readerPortal(request, DB) {
   if (readerProfileIds.length) {
     const rpInClause = readerProfileIds.map(() => '?').join(',');
     historicalUnits = (await DB.prepare(
-      `SELECT khatma_id, cycle_number, status FROM managed_khatma_cycle_units WHERE reader_profile_id IN (${rpInClause})`
+      `SELECT khatma_id, unit_number, cycle_number, status, completed_at FROM managed_khatma_cycle_units WHERE reader_profile_id IN (${rpInClause})`
     ).bind(...readerProfileIds).all()).results || [];
   }
 
@@ -6259,7 +6259,7 @@ async function readerPortal(request, DB) {
   if (participantIds.length) {
     const pInClause = participantIds.map(() => '?').join(',');
     currentUnits = (await DB.prepare(
-      `SELECT khatma_id, status FROM managed_khatma_units WHERE participant_id IN (${pInClause})`
+      `SELECT khatma_id, unit_number, status, completed_at FROM managed_khatma_units WHERE participant_id IN (${pInClause})`
     ).bind(...participantIds).all()).results || [];
   }
 
@@ -6286,15 +6286,53 @@ async function readerPortal(request, DB) {
   const completedParts = historicalCompleted + currentCompleted;
   const khatmasParticipated = historicalCycleKeys.size + currentKhatmaKeys.size;
   const completionRate = assignedParts > 0 ? Math.round(completedParts / assignedParts * 100) : 0;
+  const remainingParts = Math.max(assignedParts - completedParts, 0);
+
+  // recentAchievements: last 10 completed units across both sources, newest
+  // first. cycle_number for historical rows comes from the archived snapshot;
+  // for current rows it is resolved below from the khatma's live period_number.
+  const completedEntries = [
+    ...historicalUnits
+      .filter(u => u.status === 'completed' && u.completed_at)
+      .map(u => ({ khatma_id: u.khatma_id, unit_number: u.unit_number, cycle_number: u.cycle_number, completed_at: u.completed_at })),
+    ...currentUnits
+      .filter(u => u.status === 'completed' && u.completed_at)
+      .map(u => ({ khatma_id: u.khatma_id, unit_number: u.unit_number, cycle_number: null, completed_at: u.completed_at }))
+  ].sort((a, b) => (b.completed_at || '').localeCompare(a.completed_at || ''));
+
+  const lastCompletedAt = completedEntries.length ? completedEntries[0].completed_at : null;
+  const topAchievements = completedEntries.slice(0, 10);
+
+  const achievementKhatmaIds = [...new Set(topAchievements.map(a => a.khatma_id))];
+  let achievementKhatmaMeta = new Map();
+  if (achievementKhatmaIds.length) {
+    const inClause = achievementKhatmaIds.map(() => '?').join(',');
+    const metaRows = (await DB.prepare(
+      `SELECT id, title, period_number FROM managed_khatmas WHERE id IN (${inClause})`
+    ).bind(...achievementKhatmaIds).all()).results || [];
+    achievementKhatmaMeta = new Map(metaRows.map(r => [r.id, r]));
+  }
+
+  const recentAchievements = topAchievements.map(a => {
+    const meta = achievementKhatmaMeta.get(a.khatma_id);
+    return {
+      khatma_name: meta?.title || '',
+      unit_number: a.unit_number,
+      cycle_number: a.cycle_number != null ? a.cycle_number : (meta?.period_number ?? null),
+      completed_at: a.completed_at
+    };
+  });
 
   const cumulativeStats = {
     khatmas_participated: khatmasParticipated,
     completed_parts: completedParts,
     assigned_parts: assignedParts,
-    completion_rate: completionRate
+    remaining_parts: remainingParts,
+    completion_rate: completionRate,
+    last_completed_at: lastCompletedAt
   };
 
-  return json({ ok: true, identity: identityRaw, khatmas, readerProfile, cumulativeStats });
+  return json({ ok: true, identity: identityRaw, khatmas, readerProfile, cumulativeStats, recentAchievements });
 }
 
 async function updateReaderProfile(request, DB) {

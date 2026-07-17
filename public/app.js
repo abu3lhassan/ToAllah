@@ -3681,17 +3681,24 @@ async function setupReaderLogin(){
       // live units); fall back to the old current-units-only computation
       // only if the backend response didn't include it.
       const cs = res.cumulativeStats || null;
-      let khatmasParticipatedCount, totalDone, totalPct;
+      const achievements = res.recentAchievements || [];
+      let khatmasParticipatedCount, totalDone, totalPct, totalAssignedCount, totalRemaining, lastCompletedAt;
       if(cs){
         khatmasParticipatedCount = cs.khatmas_participated;
         totalDone = cs.completed_parts;
         totalPct = cs.completion_rate;
+        totalAssignedCount = cs.assigned_parts;
+        totalRemaining = cs.remaining_parts ?? Math.max(totalAssignedCount - totalDone, 0);
+        lastCompletedAt = cs.last_completed_at || null;
       } else {
         const allUnits = khatmas.flatMap(k => k.units || []);
         const totalAssigned = allUnits.filter(u=>u.status!=='available').length;
         khatmasParticipatedCount = khatmas.length;
         totalDone = allUnits.filter(u=>u.status==='completed').length;
         totalPct = totalAssigned ? Math.round(totalDone/totalAssigned*100) : 0;
+        totalAssignedCount = totalAssigned;
+        totalRemaining = Math.max(totalAssigned - totalDone, 0);
+        lastCompletedAt = null;
       }
 
       // ── Welcome header ─────────────────────────────────────────────
@@ -3706,14 +3713,31 @@ async function setupReaderLogin(){
         </div>` : '';
 
       // ── Cumulative stats block ─────────────────────────────────────
+      const lastCompletedStr = lastCompletedAt ? formatSafeGregorianDate(lastCompletedAt) : '';
+      const achievementsListHtml = achievements.length ? `
+          <div class="sheet-head" style="margin-top:18px"><h3 style="font-size:15px">آخر إنجازاتك</h3></div>
+          <div class="achievements-list">
+            ${achievements.map(a => `
+              <div class="achievement-row">
+                <div class="achievement-main">
+                  <strong>${escapeHtml(a.khatma_name || 'ختمة')}</strong>
+                  <span>الجزء ${a.unit_number}${a.cycle_number ? ' · الدورة ' + a.cycle_number : ''}</span>
+                </div>
+                <span class="achievement-date">${escapeHtml(formatSafeGregorianDate(a.completed_at))}</span>
+              </div>`).join('')}
+          </div>` : '';
       const statsHtml = `
         <section class="khatma-detail glass" style="margin-top:8px">
           <div class="sheet-head"><h3>إحصائياتك التجميعية</h3><span>منذ أول ختمة</span></div>
           <div class="mini-stats">
-            <div><strong>${khatmasParticipatedCount}</strong><span>ختمة شاركت فيها</span></div>
+            <div><strong>${khatmasParticipatedCount}</strong><span>ختمة/دورة شاركت فيها</span></div>
             <div><strong>${totalDone}</strong><span>جزء أكملته</span></div>
+            <div><strong>${totalAssignedCount}</strong><span>إجمالي الأجزاء المسندة</span></div>
+            <div><strong>${totalRemaining}</strong><span>أجزاء متبقية</span></div>
             <div><strong>${totalPct}%</strong><span>نسبة الإنجاز الكلية</span></div>
+            ${lastCompletedStr ? `<div><strong style="font-size:15px">${escapeHtml(lastCompletedStr)}</strong><span>آخر إنجاز</span></div>` : ''}
           </div>
+          ${achievementsListHtml}
         </section>`;
 
       // ── Bind logout ───────────────────────────────────────────────
@@ -3934,26 +3958,50 @@ async function setupReaderKhatma(khatmaId){
     // archived cycles from managed_khatma_cycle_units + current live units);
     // fall back to the old current-units-only computation only if missing.
     const cs = res.cumulativeStats || null;
-    let khatmasParticipatedCount, cumDone, cumPct;
+    const achievements = res.recentAchievements || [];
+    let khatmasParticipatedCount, cumDone, cumPct, cumAssignedCount, cumRemaining, cumLastCompletedAt;
     if(cs){
       khatmasParticipatedCount = cs.khatmas_participated;
       cumDone = cs.completed_parts;
       cumPct = cs.completion_rate;
+      cumAssignedCount = cs.assigned_parts;
+      cumRemaining = cs.remaining_parts ?? Math.max(cumAssignedCount - cumDone, 0);
+      cumLastCompletedAt = cs.last_completed_at || null;
     } else {
       const allKhatmaUnits = khatmas.flatMap(k => k.units || []);
       const cumAssigned = allKhatmaUnits.filter(u => u.status !== 'available').length;
       khatmasParticipatedCount = khatmas.length;
       cumDone = allKhatmaUnits.filter(u => u.status === 'completed').length;
       cumPct = cumAssigned ? Math.round(cumDone / cumAssigned * 100) : 0;
+      cumAssignedCount = cumAssigned;
+      cumRemaining = Math.max(cumAssigned - cumDone, 0);
+      cumLastCompletedAt = null;
     }
+    const cumLastCompletedStr = cumLastCompletedAt ? formatSafeGregorianDate(cumLastCompletedAt) : '';
+    const cumAchievementsHtml = achievements.length ? `
+        <div class="sheet-head" style="margin-top:18px"><h3 style="font-size:15px">آخر إنجازاتك</h3></div>
+        <div class="achievements-list">
+          ${achievements.map(a => `
+            <div class="achievement-row">
+              <div class="achievement-main">
+                <strong>${escapeHtml(a.khatma_name || 'ختمة')}</strong>
+                <span>الجزء ${a.unit_number}${a.cycle_number ? ' · الدورة ' + a.cycle_number : ''}</span>
+              </div>
+              <span class="achievement-date">${escapeHtml(formatSafeGregorianDate(a.completed_at))}</span>
+            </div>`).join('')}
+        </div>` : '';
     const cumHtml = `
       <section class="khatma-detail glass" style="margin-top:16px">
         <div class="sheet-head"><h3>إحصائياتك التجميعية</h3><span>منذ أول ختمة</span></div>
         <div class="mini-stats">
-          <div><strong>${khatmasParticipatedCount}</strong><span>ختمة شاركت فيها</span></div>
+          <div><strong>${khatmasParticipatedCount}</strong><span>ختمة/دورة شاركت فيها</span></div>
           <div><strong>${cumDone}</strong><span>جزء أكملته</span></div>
+          <div><strong>${cumAssignedCount}</strong><span>إجمالي الأجزاء المسندة</span></div>
+          <div><strong>${cumRemaining}</strong><span>أجزاء متبقية</span></div>
           <div><strong>${cumPct}%</strong><span>نسبة الإنجاز الكلية</span></div>
+          ${cumLastCompletedStr ? `<div><strong style="font-size:15px">${escapeHtml(cumLastCompletedStr)}</strong><span>آخر إنجاز</span></div>` : ''}
         </div>
+        ${cumAchievementsHtml}
       </section>`;
 
     view.innerHTML = `
@@ -8021,6 +8069,17 @@ function dateFromInputValue(value){ if(!value) return null; const [y,m,d] = valu
 function updateDateFields(form){ const dateInput = form.querySelector('input[name="khatmaDate"]'); const hijriInput = form.querySelector('input[name="hijriDate"]'); const gregInput = form.querySelector('input[name="gregorianDate"]'); const date = dateFromInputValue(dateInput?.value); if(!date){ return; } if(hijriInput){ hijriInput.value = formatHijriDate(date); } if(gregInput){ gregInput.value = formatGregorianDate(date); } }
 function formatHijriDate(date){ return date.toLocaleDateString('ar-SA-u-ca-islamic-umalqura-nu-latn', { weekday:'long', day:'numeric', month:'long', year:'numeric' }).replace('،','').trim(); }
 function formatGregorianDate(date){ return date.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn', { day:'numeric', month:'long', year:'numeric' }).replace('،','').trim(); }
+function formatSafeGregorianDate(value, fallback = '—'){
+  if(!value) return fallback;
+  const date = new Date(value);
+  if(Number.isNaN(date.getTime())) return fallback;
+  try{
+    const formatted = formatGregorianDate(date);
+    return formatted && formatted !== 'Invalid Date' ? formatted : fallback;
+  }catch{
+    return fallback;
+  }
+}
 function showInputModal({title, message, label, placeholder='', inputMode='text', confirmText='تأكيد'}){ return new Promise(resolve => { const backdrop = document.createElement('div'); backdrop.className = 'modal-backdrop'; backdrop.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(message).replace(/\n/g,'<br>')}</p><label>${escapeHtml(label)}<input id="modalInput" inputmode="${escapeHtml(inputMode)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" /></label><div class="modal-actions"><button class="btn primary" id="modalOk">${escapeHtml(confirmText)}</button><button class="btn ghost" id="modalCancel">إلغاء</button></div></div>`; document.body.appendChild(backdrop); const input = backdrop.querySelector('#modalInput'); const close = value => { backdrop.remove(); resolve(value); }; backdrop.querySelector('#modalOk').addEventListener('click', ()=>close(input.value.trim())); backdrop.querySelector('#modalCancel').addEventListener('click', ()=>close('')); backdrop.addEventListener('click', e => { if(e.target === backdrop) close(''); }); input.addEventListener('keydown', e => { if(e.key === 'Enter') close(input.value.trim()); if(e.key === 'Escape') close(''); }); setTimeout(()=>input.focus(), 20); }); }
 function showConfirmModal({title, message, confirmText='تأكيد', danger=false}){ return new Promise(resolve => { const backdrop = document.createElement('div'); backdrop.className = 'modal-backdrop'; backdrop.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(message).replace(/\n/g,'<br>')}</p><div class="modal-actions"><button class="btn ${danger ? 'danger-btn' : 'primary'}" id="modalOk">${escapeHtml(confirmText)}</button><button class="btn ghost" id="modalCancel">إلغاء</button></div></div>`; document.body.appendChild(backdrop); const close = value => { backdrop.remove(); resolve(value); }; backdrop.querySelector('#modalOk').addEventListener('click', ()=>close(true)); backdrop.querySelector('#modalCancel').addEventListener('click', ()=>close(false)); backdrop.addEventListener('click', e => { if(e.target === backdrop) close(false); }); }); }
 function copyText(text){ navigator.clipboard?.writeText(text).then(()=>toast('تم النسخ')).catch(()=>toast('تعذر النسخ')); }

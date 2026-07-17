@@ -952,6 +952,28 @@ input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--mute
 .mini-stats strong, .result-boxes strong { display: block; font-size: 25px }
 .mini-stats span,   .result-boxes span   { color: var(--muted); font-weight: 800 }
 
+/* Reader portal: recent achievements list (vertical, mobile-first) */
+.achievements-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px }
+.achievement-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255,255,255,.3);
+}
+[data-theme="dark"] .achievement-row { background: rgba(255,255,255,.05) }
+.achievement-main { display: flex; flex-direction: column; gap: 2px; min-width: 0 }
+.achievement-main strong { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.achievement-main span { font-size: 12px; color: var(--muted); font-weight: 700 }
+.achievement-date { font-size: 12px; color: var(--muted); font-weight: 700; white-space: nowrap; flex-shrink: 0 }
+@media (max-width: 480px) {
+  .achievement-row { flex-wrap: wrap }
+  .achievement-date { width: 100% }
+}
+
 /* Message preview */
 .message-preview {
   white-space: pre-wrap;
